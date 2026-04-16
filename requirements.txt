@@ -11,3 +11,4 @@ httpx
 ccxt
 pandas
 apscheduler
+yfinance

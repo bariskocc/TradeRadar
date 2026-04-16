@@ -190,6 +190,33 @@ def _calc_bias(
     return bias, score
 
 
+def _calc_live_setup_bias(direction: str, htf_bias: str = "NEUTRAL") -> tuple[str, int]:
+    """Canli (2-bar) setup icin daha hafif kalite skoru."""
+    htf_aligned = (
+        (direction == "LONG" and htf_bias == "BULLISH")
+        or (direction == "SHORT" and htf_bias == "BEARISH")
+    )
+    htf_contrary = (
+        (direction == "LONG" and htf_bias == "BEARISH")
+        or (direction == "SHORT" and htf_bias == "BULLISH")
+    )
+
+    score = 6
+    if htf_aligned:
+        score += 2
+    elif htf_contrary:
+        score -= 2
+    score = max(0, min(10, score))
+
+    if score >= 7:
+        bias = "BULLISH" if direction == "LONG" else "BEARISH"
+    elif score <= 3:
+        bias = "BEARISH" if direction == "LONG" else "BULLISH"
+    else:
+        bias = "NEUTRAL"
+    return bias, score
+
+
 def detect_crt_setup(
     df_4h: pd.DataFrame,
     symbol: str,
@@ -197,12 +224,13 @@ def detect_crt_setup(
     htf_bias: str = "NEUTRAL",
 ) -> Optional[CRTSetup]:
     """4H verisinde CRT pattern tespit et. Henüz CISD konfirmasyonu yok."""
+    df_4h = df_4h.sort_index()
+
     if len(df_4h) < 16:
         return None
 
     atr = compute_atr(df_4h)
     i = len(df_4h) - 3
-
     crt_bar = df_4h.iloc[i]
     next_bar = df_4h.iloc[i + 1]
     confirm_bar = df_4h.iloc[i + 2]
@@ -267,6 +295,72 @@ def detect_crt_setup(
                     market_type=market_type,
                 )
 
+    # FALLBACK (2-bar canli setup):
+    # Son 3 mum icindeki iki olasi 2'li kombinasyonu kontrol et:
+    #   - (len-2 -> len-1)
+    #   - (len-3 -> len-2)
+    # Boylece son mum acik olsa bile bir onceki 2'li (05->09 gibi) yakalanabilir.
+    candidate_indices = [len(df_4h) - 2, len(df_4h) - 3]
+    purge_threshold = 0.0 if market_type in {"fx", "index"} else PURGE_THRESHOLD_PCT
+    for live_i in candidate_indices:
+        if live_i < 0 or live_i + 1 >= len(df_4h):
+            continue
+
+        live_crt = df_4h.iloc[live_i]
+        live_bar = df_4h.iloc[live_i + 1]
+        live_range = live_crt["high"] - live_crt["low"]
+        live_atr = atr.iloc[live_i]
+        if live_atr == 0 or live_range <= 0:
+            continue
+
+        live_ratio = live_range / live_atr
+        if live_ratio < MIN_RANGE_ATR_RATIO or live_ratio > MAX_RANGE_ATR_RATIO:
+            continue
+
+        live_mid = live_crt["low"] + (live_range * 0.5)
+
+        # HIGH sweep + CRT high altina geri donus => SHORT setup
+        live_purge_above = live_bar["high"] > live_crt["high"] * (1 + purge_threshold)
+        if live_purge_above and live_bar["close"] <= live_crt["high"]:
+            bias, score = _calc_live_setup_bias("SHORT", htf_bias)
+            return CRTSetup(
+                symbol=symbol,
+                direction="SHORT",
+                purge_type="HIGH",
+                bias=bias,
+                bias_score=score,
+                key_level_high=round(live_crt["high"], 8),
+                key_level_low=round(live_crt["low"], 8),
+                crt_bar_time=live_crt.name.to_pydatetime(),
+                purge_time=live_bar.name.to_pydatetime(),
+                invalidation_level=round(live_mid, 8),
+                purge_extreme=round(live_bar["high"], 8),
+                last_4h_high=round(live_bar["high"], 8),
+                last_4h_low=round(live_bar["low"], 8),
+                market_type=market_type,
+            )
+
+        # LOW sweep + CRT low ustune geri donus => LONG setup
+        live_purge_below = live_bar["low"] < live_crt["low"] * (1 - purge_threshold)
+        if live_purge_below and live_bar["close"] >= live_crt["low"]:
+            bias, score = _calc_live_setup_bias("LONG", htf_bias)
+            return CRTSetup(
+                symbol=symbol,
+                direction="LONG",
+                purge_type="LOW",
+                bias=bias,
+                bias_score=score,
+                key_level_high=round(live_crt["high"], 8),
+                key_level_low=round(live_crt["low"], 8),
+                crt_bar_time=live_crt.name.to_pydatetime(),
+                purge_time=live_bar.name.to_pydatetime(),
+                invalidation_level=round(live_mid, 8),
+                purge_extreme=round(live_bar["low"], 8),
+                last_4h_high=round(live_bar["high"], 8),
+                last_4h_low=round(live_bar["low"], 8),
+                market_type=market_type,
+            )
+
     return None
 
 
@@ -315,33 +409,36 @@ def _check_bullish_cisd(
     if len(df) < 3:
         return None
 
-    ref_time: Optional[pd.Timestamp] = None
-    cisd_level: Optional[float] = None
-
-    pre_purge = df
+    work = df
     if setup.purge_time:
         purge_ts = pd.Timestamp(setup.purge_time)
         if purge_ts.tzinfo is None:
             purge_ts = purge_ts.tz_localize("UTC")
         else:
             purge_ts = purge_ts.tz_convert("UTC")
-        pre_purge = df[df.index <= purge_ts]
+        work = df[df.index >= purge_ts]
 
-    for i in range(1, len(pre_purge)):
-        cur = pre_purge.iloc[i]
-        prev = pre_purge.iloc[i - 1]
-        is_bearish = cur["close"] < cur["open"]
-        was_bullish = prev["close"] > prev["open"]
-        if is_bearish and was_bullish:
-            ref_time = cur.name
-            cisd_level = float(cur["high"])
-
-    if cisd_level is None or ref_time is None:
+    if len(work) < 3:
         return None
 
-    post_ref = df[df.index >= ref_time]
-    for _, cur in post_ref.iterrows():
-        if cur["close"] > cisd_level:
+    ref_time: Optional[pd.Timestamp] = None
+    cisd_level: Optional[float] = None
+
+    for i in range(1, len(work)):
+        cur = work.iloc[i]
+        prev = work.iloc[i - 1]
+
+        # Ilk gecerli CISD referansini sabitle:
+        # son bullish mumdan sonra gelen bearish mumun high'i.
+        if ref_time is None:
+            is_bearish = cur["close"] < cur["open"]
+            was_bullish = prev["close"] >= prev["open"]
+            if is_bearish and was_bullish:
+                ref_time = cur.name
+                cisd_level = float(cur["high"])
+            continue
+
+        if cisd_level is not None and cur.name > ref_time and cur["close"] >= cisd_level:
             entry = round(cisd_level, 8)
             sl = round(setup.purge_extreme, 8)
             tp = round(setup.key_level_high, 8)
@@ -370,33 +467,36 @@ def _check_bearish_cisd(
     if len(df) < 3:
         return None
 
-    ref_time: Optional[pd.Timestamp] = None
-    cisd_level: Optional[float] = None
-
-    pre_purge = df
+    work = df
     if setup.purge_time:
         purge_ts = pd.Timestamp(setup.purge_time)
         if purge_ts.tzinfo is None:
             purge_ts = purge_ts.tz_localize("UTC")
         else:
             purge_ts = purge_ts.tz_convert("UTC")
-        pre_purge = df[df.index <= purge_ts]
+        work = df[df.index >= purge_ts]
 
-    for i in range(1, len(pre_purge)):
-        cur = pre_purge.iloc[i]
-        prev = pre_purge.iloc[i - 1]
-        is_bullish = cur["close"] > cur["open"]
-        was_bearish = prev["close"] < prev["open"]
-        if is_bullish and was_bearish:
-            ref_time = cur.name
-            cisd_level = float(cur["low"])
-
-    if cisd_level is None or ref_time is None:
+    if len(work) < 3:
         return None
 
-    post_ref = df[df.index >= ref_time]
-    for _, cur in post_ref.iterrows():
-        if cur["close"] < cisd_level:
+    ref_time: Optional[pd.Timestamp] = None
+    cisd_level: Optional[float] = None
+
+    for i in range(1, len(work)):
+        cur = work.iloc[i]
+        prev = work.iloc[i - 1]
+
+        # Ilk gecerli CISD referansini sabitle:
+        # son bearish mumdan sonra gelen bullish mumun low'u.
+        if ref_time is None:
+            is_bullish = cur["close"] > cur["open"]
+            was_bearish = prev["close"] <= prev["open"]
+            if is_bullish and was_bearish:
+                ref_time = cur.name
+                cisd_level = float(cur["low"])
+            continue
+
+        if cisd_level is not None and cur.name > ref_time and cur["close"] <= cisd_level:
             entry = round(cisd_level, 8)
             sl = round(setup.purge_extreme, 8)
             tp = round(setup.key_level_low, 8)

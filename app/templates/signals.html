@@ -71,7 +71,6 @@
                         <select name="status"
                             class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
                             <option value="">All</option>
-                            <option value="pending_cisd" {% if filters.status == 'pending_cisd' %}selected{% endif %}>Pending CISD</option>
                             <option value="active" {% if filters.status == 'active' %}selected{% endif %}>Active</option>
                             <option value="expired" {% if filters.status == 'expired' %}selected{% endif %}>Expired</option>
                             <option value="breakeven" {% if filters.status == 'breakeven' %}selected{% endif %}>Breakeven</option>
@@ -113,10 +112,11 @@
 
             <!-- Signals Table -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto">
-                <table class="w-full min-w-[1100px]">
+                <table class="w-full min-w-[1200px]">
                     <thead>
                         <tr class="border-b border-dark-600">
                             <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">SYMBOL</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">MARKET</th>
                             <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">DIRECTION</th>
                             <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">QUALITY SCORE</th>
                             <th class="px-3 py-3 text-center text-xs font-semibold text-gray-500 tracking-wider">HTF BIAS</th>
@@ -134,7 +134,11 @@
                         <tr class="hover:bg-dark-700/50 transition-colors">
                             <td class="px-3 py-3">
                                 <div class="text-sm font-medium text-white">{{ signal.symbol }}</div>
-                                <div class="text-[10px] text-gray-500">{{ signal.market_type|upper }}</div>
+                            </td>
+                            <td class="px-3 py-3">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-dark-700 text-gray-300">
+                                    {{ signal.market_type|upper }}
+                                </span>
                             </td>
                             <td class="px-3 py-3">
                                 <span class="inline-flex px-2 py-0.5 rounded text-xs font-bold
@@ -194,11 +198,7 @@
                                 {{ signal.created_at|fmt_date_tsi }}
                             </td>
                             <td class="px-3 py-3">
-                                {% if signal.status == 'pending_cisd' %}
-                                <span class="inline-flex items-center gap-1 text-xs font-medium text-yellow-400">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse"></span> Pending CISD
-                                </span>
-                                {% elif signal.status == 'active' %}
+                                {% if signal.status == 'active' %}
                                 <span class="inline-flex items-center gap-1 text-xs font-medium text-accent-blue">
                                     <span class="w-1.5 h-1.5 rounded-full bg-accent-blue animate-pulse"></span> Active
                                 </span>
@@ -225,7 +225,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="11" class="px-4 py-12 text-center text-gray-500">
+                            <td colspan="12" class="px-4 py-12 text-center text-gray-500">
                                 {% if tab == 'active' %}
                                 No active signals.
                                 {% else %}

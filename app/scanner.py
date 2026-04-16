@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crt_engine import (
@@ -36,7 +36,8 @@ from app.models import Signal
 from app.telegram import send_signal_active, is_configured as tg_configured
 
 log = logging.getLogger(__name__)
-MIN_RR_RATIO = 1.5
+MIN_RR_RATIO = 2.0
+MIN_QUALITY_SCORE = 5
 
 
 async def _is_duplicate_setup(session: AsyncSession, setup: CRTSetup) -> bool:
@@ -123,6 +124,15 @@ async def run_scan(
                     display_sym = to_display_symbol(symbol)
                     setup = detect_crt_setup(df_4h, display_sym, market, htf_bias)
                     if setup is None:
+                        continue
+                    if int(setup.bias_score or 0) < MIN_QUALITY_SCORE:
+                        log.info(
+                            "SKIPPED (LOW QUALITY): %s %s score=%s (< %d)",
+                            setup.symbol,
+                            setup.direction,
+                            setup.bias_score,
+                            MIN_QUALITY_SCORE,
+                        )
                         continue
                     if await _is_duplicate_setup(session, setup):
                         continue
@@ -225,8 +235,6 @@ async def run_scan(
                 if cisd:
                     planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
                     if planned_rr is None or planned_rr < MIN_RR_RATIO:
-                        await session.delete(sig)
-                        pending_changed = True
                         log.info(
                             "SKIPPED (LOW RR): %s %s → RR: %s (< %.2f)",
                             sig.symbol,
@@ -254,6 +262,16 @@ async def run_scan(
             if result["activated"] and tg_configured():
                 for sig in result["activated"]:
                     await send_signal_active(sig)
+
+        # Pending CISD kayitlari UI/DB'de tutulmasin.
+        pending_ids_r = await session.execute(
+            select(Signal.id).where(Signal.status == "pending_cisd")
+        )
+        pending_ids = [row[0] for row in pending_ids_r.all()]
+        if pending_ids:
+            await session.execute(delete(Signal).where(Signal.id.in_(pending_ids)))
+            await session.commit()
+            log.info("PENDING CLEANUP: %d pending_cisd row deleted.", len(pending_ids))
 
         # ─── AŞAMA 3: Aktif Sinyal Takibi (TP/SL/Invalidation) ───
         active = await session.execute(

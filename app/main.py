@@ -121,7 +121,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     all_signals = result.scalars().all()
 
     closed = [s for s in all_signals if s.result is not None]
-    active = [s for s in all_signals if s.status in ("active", "pending_cisd")]
+    active = [s for s in all_signals if s.status == "active"]
     wins = [s for s in closed if s.result == "win"]
     losses = [s for s in closed if s.result == "loss"]
     breakevens = [s for s in closed if s.result == "breakeven"]
@@ -248,10 +248,10 @@ async def signals_page(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    query = select(Signal)
+    query = select(Signal).where(Signal.status != "pending_cisd")
 
     if tab == "active":
-        query = query.where(Signal.status.in_(["active", "pending_cisd"]))
+        query = query.where(Signal.status == "active")
     elif tab == "closed":
         query = query.where(Signal.status.in_(["expired", "breakeven"]))
 
@@ -285,16 +285,23 @@ async def signals_page(
     total = count_result.scalar()
     total_pages = max(1, (total + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
 
-    query = query.order_by(desc(Signal.created_at))
+    status_priority = case(
+        (Signal.status == "active", 0),
+        (Signal.status == "pending_cisd", 1),
+        (Signal.status == "breakeven", 2),
+        (Signal.status == "expired", 3),
+        else_=4,
+    )
+    query = query.order_by(status_priority.asc(), desc(Signal.created_at))
     query = query.offset((page - 1) * ITEMS_PER_PAGE).limit(ITEMS_PER_PAGE)
     result = await db.execute(query)
     signals = result.scalars().all()
 
-    active_count_r = await db.execute(
-        select(func.count()).where(Signal.status.in_(["active", "pending_cisd"]))
-    )
+    active_count_r = await db.execute(select(func.count()).where(Signal.status == "active"))
     active_count = active_count_r.scalar()
-    total_count_r = await db.execute(select(func.count()).select_from(Signal))
+    total_count_r = await db.execute(
+        select(func.count()).where(Signal.status != "pending_cisd")
+    )
     total_count = total_count_r.scalar()
     closed_count = total_count - active_count
 
