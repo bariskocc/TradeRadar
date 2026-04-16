@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - Analytics{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block body %}
+<div class="flex h-full">
+
+    {% set active_page = 'analytics' %}
+    {% include 'sidebar.html' %}
+
+    <!-- Main Content -->
+    <main class="flex-1 overflow-auto">
+        <div class="p-6 max-w-6xl">
+            <!-- Header -->
+            <div class="mb-6">
+                <h1 class="text-xl font-bold text-white">Analytics</h1>
+                <p class="text-sm text-gray-500 mt-0.5">Performans grafikleri ve detaylı analiz ({{ total_closed }} kapalı trade)</p>
+            </div>
+
+            {% if total_closed == 0 %}
+            <div class="bg-dark-800 rounded-xl border border-dark-600 p-12 text-center">
+                <svg class="w-12 h-12 text-gray-600 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                <p class="text-gray-500">Henüz kapalı trade yok. Sinyaller kapandığında grafikler burada görünecek.</p>
+            </div>
+            {% else %}
+
+            <!-- Row 1: Equity Curve -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-4">
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Equity Curve (Kümülatif R:R)</p>
+                <div style="height: 280px;">
+                    <canvas id="equityChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Row 2: Distribution Charts -->
+            <div class="grid grid-cols-3 gap-4 mb-4">
+                <!-- Win/Loss/BE -->
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Sonuç Dağılımı</p>
+                    <div style="height: 200px;">
+                        <canvas id="resultChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Direction Distribution -->
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Yön Dağılımı</p>
+                    <div style="height: 200px;">
+                        <canvas id="directionChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Market Distribution -->
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Piyasa Dağılımı</p>
+                    <div style="height: 200px;">
+                        <canvas id="marketChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Row 3: Weekly Performance -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-4">
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Haftalık Performans (R:R)</p>
+                <div style="height: 240px;">
+                    <canvas id="weeklyChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Row 4: Top Symbols -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">En İyi Semboller (Toplam R:R)</p>
+                <div style="height: 260px;">
+                    <canvas id="symbolChart"></canvas>
+                </div>
+            </div>
+
+            {% endif %}
+
+        </div>
+    </main>
+</div>
+
+{% if total_closed > 0 %}
+<script>
+const CHART_DEFAULTS = {
+    color: '#6b7280',
+    borderColor: '#272b40',
+    font: { family: "'Segoe UI', system-ui, sans-serif", size: 11 },
+};
+Chart.defaults.color = CHART_DEFAULTS.color;
+Chart.defaults.font.family = CHART_DEFAULTS.font.family;
+Chart.defaults.font.size = CHART_DEFAULTS.font.size;
+
+// Equity Curve
+const equityData = {{ equity_data | tojson }};
+new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: {
+        labels: equityData.map(d => d.date),
+        datasets: [{
+            label: 'Cumulative R:R',
+            data: equityData.map(d => d.rr),
+            borderColor: '#3b82f6',
+            backgroundColor: 'rgba(59,130,246,0.1)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            pointHitRadius: 8,
+            borderWidth: 2,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: {
+                grid: { color: '#1e2235' },
+                ticks: { maxTicksLimit: 10 },
+            },
+            y: {
+                grid: { color: '#1e2235' },
+                ticks: { callback: v => v + 'R' },
+            },
+        },
+    },
+});
+
+// Result Distribution (Doughnut)
+const results = {{ results_count | tojson }};
+new Chart(document.getElementById('resultChart'), {
+    type: 'doughnut',
+    data: {
+        labels: ['Win', 'Loss', 'Breakeven'],
+        datasets: [{
+            data: [results.win, results.loss, results.breakeven],
+            backgroundColor: ['#22c55e', '#ef4444', '#eab308'],
+            borderWidth: 0,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '65%',
+        plugins: {
+            legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, pointStyleWidth: 8 } },
+        },
+    },
+});
+
+// Direction Distribution
+const directions = {{ direction_count | tojson }};
+new Chart(document.getElementById('directionChart'), {
+    type: 'doughnut',
+    data: {
+        labels: ['LONG', 'SHORT'],
+        datasets: [{
+            data: [directions.LONG || 0, directions.SHORT || 0],
+            backgroundColor: ['#22c55e', '#ef4444'],
+            borderWidth: 0,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '65%',
+        plugins: {
+            legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, pointStyleWidth: 8 } },
+        },
+    },
+});
+
+// Market Distribution
+const markets = {{ market_count | tojson }};
+const marketColors = { crypto: '#3b82f6', fx: '#a855f7', index: '#f97316', metal: '#eab308' };
+new Chart(document.getElementById('marketChart'), {
+    type: 'doughnut',
+    data: {
+        labels: Object.keys(markets).map(m => m.toUpperCase()),
+        datasets: [{
+            data: Object.values(markets),
+            backgroundColor: Object.keys(markets).map(m => marketColors[m] || '#6b7280'),
+            borderWidth: 0,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '65%',
+        plugins: {
+            legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, pointStyleWidth: 8 } },
+        },
+    },
+});
+
+// Weekly Performance
+const weeklyLabels = {{ weekly_labels | tojson }};
+const weeklyValues = {{ weekly_values | tojson }};
+new Chart(document.getElementById('weeklyChart'), {
+    type: 'bar',
+    data: {
+        labels: weeklyLabels,
+        datasets: [{
+            label: 'Weekly R:R',
+            data: weeklyValues,
+            backgroundColor: weeklyValues.map(v => v >= 0 ? 'rgba(34,197,94,0.6)' : 'rgba(239,68,68,0.6)'),
+            borderRadius: 4,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { grid: { display: false } },
+            y: {
+                grid: { color: '#1e2235' },
+                ticks: { callback: v => v + 'R' },
+            },
+        },
+    },
+});
+
+// Top Symbols
+const symLabels = {{ top_sym_labels | tojson }};
+const symValues = {{ top_sym_values | tojson }};
+new Chart(document.getElementById('symbolChart'), {
+    type: 'bar',
+    data: {
+        labels: symLabels,
+        datasets: [{
+            label: 'Total R:R',
+            data: symValues,
+            backgroundColor: symValues.map(v => v >= 0 ? 'rgba(59,130,246,0.6)' : 'rgba(239,68,68,0.6)'),
+            borderRadius: 4,
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+            x: {
+                grid: { color: '#1e2235' },
+                ticks: { callback: v => v + 'R' },
+            },
+            y: { grid: { display: false } },
+        },
+    },
+});
+</script>
+{% endif %}
+{% endblock %}

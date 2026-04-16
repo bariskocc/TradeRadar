@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+sqlalchemy
+aiosqlite
+python-dotenv
+httpx
+ccxt
+pandas
+apscheduler

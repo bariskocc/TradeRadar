@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - All Signals{% endblock %}
+
+{% block body %}
+<div class="flex h-full">
+
+    {% set active_page = 'signals' %}
+    {% include 'sidebar.html' %}
+
+    <!-- Main Content -->
+    <main class="flex-1 overflow-auto">
+        <div class="p-6">
+            <!-- Header -->
+            <div class="mb-6">
+                <h1 class="text-xl font-bold text-white">All Signals</h1>
+                <p class="text-sm text-gray-500 mt-0.5">CRT signal history</p>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex items-center gap-1 mb-4">
+                <a href="?tab=all"
+                    class="px-4 py-2 rounded-lg text-sm font-medium transition
+                    {% if tab == 'all' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+                    All <span class="ml-1 text-xs opacity-70">{{ total_count }}</span>
+                </a>
+                <a href="?tab=active"
+                    class="px-4 py-2 rounded-lg text-sm font-medium transition
+                    {% if tab == 'active' %}bg-green-500/20 text-green-400{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+                    Active <span class="ml-1 text-xs opacity-70">{{ active_count }}</span>
+                </a>
+                <a href="?tab=closed"
+                    class="px-4 py-2 rounded-lg text-sm font-medium transition
+                    {% if tab == 'closed' %}bg-gray-500/20 text-gray-300{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+                    Closed <span class="ml-1 text-xs opacity-70">{{ closed_count }}</span>
+                </a>
+            </div>
+
+            <!-- Filters -->
+            <form method="GET" action="/signals" class="mb-6 p-4 bg-dark-800 rounded-xl border border-dark-600">
+                <input type="hidden" name="tab" value="{{ tab }}">
+
+                <div class="flex flex-wrap items-end gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">SYMBOL</label>
+                        <input type="text" name="symbol" value="{{ filters.symbol }}" placeholder="Search..."
+                            class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">DIRECTION</label>
+                        <select name="direction"
+                            class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                            <option value="">All</option>
+                            <option value="LONG" {% if filters.direction == 'LONG' %}selected{% endif %}>LONG</option>
+                            <option value="SHORT" {% if filters.direction == 'SHORT' %}selected{% endif %}>SHORT</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">MARKET</label>
+                        <select name="market_type"
+                            class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                            <option value="">All</option>
+                            <option value="crypto" {% if filters.market_type == 'crypto' %}selected{% endif %}>Crypto</option>
+                            <option value="fx" {% if filters.market_type == 'fx' %}selected{% endif %}>FX</option>
+                            <option value="index" {% if filters.market_type == 'index' %}selected{% endif %}>Index</option>
+                            <option value="metal" {% if filters.market_type == 'metal' %}selected{% endif %}>Metal</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">STATUS</label>
+                        <select name="status"
+                            class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                            <option value="">All</option>
+                            <option value="pending_cisd" {% if filters.status == 'pending_cisd' %}selected{% endif %}>Pending CISD</option>
+                            <option value="active" {% if filters.status == 'active' %}selected{% endif %}>Active</option>
+                            <option value="expired" {% if filters.status == 'expired' %}selected{% endif %}>Expired</option>
+                            <option value="breakeven" {% if filters.status == 'breakeven' %}selected{% endif %}>Breakeven</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">RESULT</label>
+                        <select name="result"
+                            class="w-32 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                            <option value="">All</option>
+                            <option value="win" {% if filters.result == 'win' %}selected{% endif %}>Win</option>
+                            <option value="loss" {% if filters.result == 'loss' %}selected{% endif %}>Loss</option>
+                            <option value="breakeven" {% if filters.result == 'breakeven' %}selected{% endif %}>Breakeven</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">DATE (Start)</label>
+                        <input type="date" name="date_from" value="{{ filters.date_from }}"
+                            class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">DATE (End)</label>
+                        <input type="date" name="date_to" value="{{ filters.date_to }}"
+                            class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-2 mt-3">
+                    <button type="submit"
+                        class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
+                        Filter
+                    </button>
+                    <a href="/signals?tab={{ tab }}"
+                        class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">
+                        Reset
+                    </a>
+                </div>
+            </form>
+
+            <!-- Signals Table -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto">
+                <table class="w-full min-w-[1100px]">
+                    <thead>
+                        <tr class="border-b border-dark-600">
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">SYMBOL</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">DIRECTION</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">QUALITY SCORE</th>
+                            <th class="px-3 py-3 text-center text-xs font-semibold text-gray-500 tracking-wider">HTF BIAS</th>
+                            <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">ENTRY</th>
+                            <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">SL</th>
+                            <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">TP</th>
+                            <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">%50 INV.</th>
+                            <th class="px-3 py-3 text-center text-xs font-semibold text-gray-500 tracking-wider">R:R</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">DATE</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">STATUS</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for signal in signals %}
+                        <tr class="hover:bg-dark-700/50 transition-colors">
+                            <td class="px-3 py-3">
+                                <div class="text-sm font-medium text-white">{{ signal.symbol }}</div>
+                                <div class="text-[10px] text-gray-500">{{ signal.market_type|upper }}</div>
+                            </td>
+                            <td class="px-3 py-3">
+                                <span class="inline-flex px-2 py-0.5 rounded text-xs font-bold
+                                    {% if signal.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">
+                                    {{ signal.direction }}
+                                </span>
+                            </td>
+                            <td class="px-3 py-3">
+                                {% if signal.bias_score is not none %}
+                                {% set score10 = signal.bias_score|int %}
+                                {% if score10 < 0 %}{% set score10 = 0 %}{% endif %}
+                                {% if score10 > 10 %}{% set score10 = 10 %}{% endif %}
+                                {% set pct = score10 * 10 %}
+                                <div class="flex items-center gap-2 min-w-[90px]">
+                                    <div class="flex-1 h-2 rounded-full bg-dark-600 overflow-hidden">
+                                        <div class="h-full rounded-full {% if score10 >= 7 %}bg-green-400{% elif score10 >= 4 %}bg-orange-400{% else %}bg-gray-400{% endif %}"
+                                             style="width: {{ pct }}%"></div>
+                                    </div>
+                                    <span class="text-xs font-bold whitespace-nowrap {% if score10 >= 7 %}text-green-400{% elif score10 >= 4 %}text-orange-400{% else %}text-gray-400{% endif %}">
+                                        {{ score10 }}/10
+                                    </span>
+                                </div>
+                                {% else %}
+                                <span class="text-gray-600 text-xs">-</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 py-3 text-center">
+                                {% if signal.htf_bias == 'BULLISH' %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/15 text-green-400">BULLISH</span>
+                                {% elif signal.htf_bias == 'BEARISH' %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-400">BEARISH</span>
+                                {% else %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-yellow-500/15 text-yellow-400">NEUTRAL</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 py-3 text-right text-xs font-mono text-white">
+                                {{ signal.entry_price|fmt_price }}
+                            </td>
+                            <td class="px-3 py-3 text-right text-xs font-mono text-red-400">
+                                {{ signal.stop_loss|fmt_price }}
+                            </td>
+                            <td class="px-3 py-3 text-right text-xs font-mono text-green-400">
+                                {{ signal.take_profit|fmt_price }}
+                            </td>
+                            <td class="px-3 py-3 text-right text-xs font-mono text-yellow-400">
+                                {{ signal.invalidation_level|fmt_price }}
+                            </td>
+                            <td class="px-3 py-3 text-center">
+                                {% set rr = calc_rr_ratio(signal.entry_price, signal.stop_loss, signal.take_profit) %}
+                                {% if rr is not none %}
+                                <span class="text-xs font-bold text-accent-blue">1:{{ rr }}</span>
+                                {% else %}
+                                <span class="text-gray-600 text-xs">-</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 py-3 text-xs text-gray-400">
+                                {{ signal.created_at|fmt_date_tsi }}
+                            </td>
+                            <td class="px-3 py-3">
+                                {% if signal.status == 'pending_cisd' %}
+                                <span class="inline-flex items-center gap-1 text-xs font-medium text-yellow-400">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse"></span> Pending CISD
+                                </span>
+                                {% elif signal.status == 'active' %}
+                                <span class="inline-flex items-center gap-1 text-xs font-medium text-accent-blue">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-accent-blue animate-pulse"></span> Active
+                                </span>
+                                {% elif signal.status == 'expired' %}
+                                    {% if signal.result == 'win' %}
+                                    <span class="inline-flex items-center gap-1 text-xs font-medium text-green-400">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> TP Hit
+                                    </span>
+                                    {% elif signal.result == 'loss' %}
+                                    <span class="inline-flex items-center gap-1 text-xs font-medium text-red-400">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> SL Hit
+                                    </span>
+                                    {% else %}
+                                    <span class="inline-flex items-center gap-1 text-xs font-medium text-gray-400">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span> Expired
+                                    </span>
+                                    {% endif %}
+                                {% elif signal.status == 'breakeven' %}
+                                <span class="inline-flex items-center gap-1 text-xs font-medium text-blue-400">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span> Breakeven
+                                </span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="11" class="px-4 py-12 text-center text-gray-500">
+                                {% if tab == 'active' %}
+                                No active signals.
+                                {% else %}
+                                No signals yet. Signals will appear here when the bot runs.
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            {% if total_pages > 1 %}
+            <div class="flex items-center justify-between mt-4">
+                <p class="text-sm text-gray-500">Total {{ total }} signals</p>
+                <div class="flex items-center gap-1">
+                    {% if page > 1 %}
+                    <a href="?tab={{ tab }}&page={{ page - 1 }}&symbol={{ filters.symbol }}&direction={{ filters.direction }}&market_type={{ filters.market_type }}&result={{ filters.result }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}"
+                        class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-sm text-gray-400 hover:bg-dark-700 transition">
+                        &larr;
+                    </a>
+                    {% endif %}
+
+                    {% for p in range(1, total_pages + 1) %}
+                        {% if p == page %}
+                        <span class="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-sm font-medium">{{ p }}</span>
+                        {% elif p <= 3 or p > total_pages - 2 or (p >= page - 1 and p <= page + 1) %}
+                        <a href="?tab={{ tab }}&page={{ p }}&symbol={{ filters.symbol }}&direction={{ filters.direction }}&market_type={{ filters.market_type }}&result={{ filters.result }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}"
+                            class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-sm text-gray-400 hover:bg-dark-700 transition">
+                            {{ p }}
+                        </a>
+                        {% elif p == 4 or p == total_pages - 2 %}
+                        <span class="px-2 text-gray-600">...</span>
+                        {% endif %}
+                    {% endfor %}
+
+                    {% if page < total_pages %}
+                    <a href="?tab={{ tab }}&page={{ page + 1 }}&symbol={{ filters.symbol }}&direction={{ filters.direction }}&market_type={{ filters.market_type }}&result={{ filters.result }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}"
+                        class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-sm text-gray-400 hover:bg-dark-700 transition">
+                        &rarr;
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+    </main>
+</div>
+{% endblock %}

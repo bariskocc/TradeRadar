@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}TradeRadar{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            900: '#0f1117',
+                            800: '#161925',
+                            700: '#1e2235',
+                            600: '#272b40',
+                            500: '#333855',
+                        },
+                        accent: {
+                            blue: '#3b82f6',
+                            green: '#22c55e',
+                            red: '#ef4444',
+                            yellow: '#eab308',
+                            purple: '#a855f7',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #161925; }
+        ::-webkit-scrollbar-thumb { background: #333855; border-radius: 3px; }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body class="h-full bg-dark-900 text-gray-200">
+    {% block body %}{% endblock %}
+</body>
+</html>
