@@ -2,7 +2,7 @@
 
 1. Yeni CRT setup tespiti (4H) → status: pending_cisd
 2. Bekleyen setup'larda CISD konfirmasyonu (15M) → status: active
-3. Aktif sinyallerde TP/SL/invalidation takibi → status: expired (result: win/loss/invalidated)
+3. Aktif sinyallerde sadece TP/SL takibi → status: expired (result: win/loss)
 4. Expired (invalidated) sinyallerde breakeven kontrolü → fiyat entry'ye dönerse breakeven
 """
 
@@ -18,7 +18,6 @@ from app.crt_engine import (
     CRTSetup,
     check_breakeven,
     check_cisd_confirmation,
-    check_signal_invalidation,
     check_tp_sl_hit,
     compute_htf_bias,
     detect_crt_setup,
@@ -32,7 +31,7 @@ from app.exchange import (
     from_display_symbol,
     to_display_symbol,
 )
-from app.models import Signal
+from app.models import Signal, ScanLog
 from app.telegram import send_signal_active, is_configured as tg_configured
 
 log = logging.getLogger(__name__)
@@ -91,15 +90,47 @@ def _calc_planned_rr(entry: float | None, sl: float | None, tp: float | None) ->
     return round(reward / risk, 2)
 
 
+async def _persist_scan_log(
+    session: AsyncSession,
+    *,
+    source: str,
+    timeframe: str,
+    status: str,
+    started_at: datetime,
+    result: dict,
+    error_message: str | None = None,
+) -> None:
+    finished_at = datetime.now(timezone.utc)
+    duration_seconds = round((finished_at - started_at).total_seconds(), 2)
+    session.add(
+        ScanLog(
+            source=source,
+            timeframe=timeframe,
+            status=status,
+            new_setups=len(result.get("new_setups", [])),
+            activated=len(result.get("activated", [])),
+            closed=len(result.get("closed", [])),
+            breakeven=len(result.get("breakeven", [])),
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_seconds=duration_seconds,
+            error_message=error_message,
+        )
+    )
+    await session.commit()
+
+
 async def run_scan(
     session: AsyncSession,
     timeframe: str = "4h",
     market_types: list[str] | None = None,
+    source: str = "manual",
 ) -> dict:
     if market_types is None:
         market_types = list(SYMBOLS_BY_MARKET.keys())
 
     exchanges = await create_exchanges()
+    started_at = datetime.now(timezone.utc)
     result = {"new_setups": [], "activated": [], "closed": [], "breakeven": []}
 
     try:
@@ -273,7 +304,7 @@ async def run_scan(
             await session.commit()
             log.info("PENDING CLEANUP: %d pending_cisd row deleted.", len(pending_ids))
 
-        # ─── AŞAMA 3: Aktif Sinyal Takibi (TP/SL/Invalidation) ───
+        # ─── AŞAMA 3: Aktif Sinyal Takibi (yalnizca TP/SL) ───
         active = await session.execute(
             select(Signal).where(Signal.status == "active")
         )
@@ -311,19 +342,6 @@ async def run_scan(
                     result["closed"].append({"symbol": sig.symbol, "status": "expired", "result": sig.result})
                     log.info("EXPIRED (%s): %s %s (R:R %.2f)", hit.upper(), sig.symbol, sig.direction, sig.rr_value)
                     continue
-
-                if sig.invalidation_level and sig.entry_price and check_signal_invalidation(
-                    current_price, sig.direction, sig.invalidation_level, sig.entry_price
-                ):
-                    sig.status = "expired"
-                    sig.result = "invalidated"
-                    sig.rr_value = 0.0
-                    if sig.cisd_time:
-                        delta = datetime.now(timezone.utc) - sig.cisd_time
-                        sig.duration_hours = round(delta.total_seconds() / 3600, 1)
-
-                    result["closed"].append({"symbol": sig.symbol, "status": "expired", "result": "invalidated"})
-                    log.info("EXPIRED (50%%): %s %s – price crossed CRT midpoint", sig.symbol, sig.direction)
 
             except Exception as e:
                 log.warning("Active signal check failed for %s: %s", sig.symbol, e)
@@ -376,6 +394,33 @@ async def run_scan(
             len(result["new_setups"]), len(result["activated"]),
             len(result["closed"]), len(result["breakeven"]),
         )
+        try:
+            await _persist_scan_log(
+                session,
+                source=source,
+                timeframe=timeframe,
+                status="success",
+                started_at=started_at,
+                result=result,
+            )
+        except Exception:
+            log.exception("Failed to persist successful scan log")
+
+    except Exception as exc:
+        try:
+            await session.rollback()
+            await _persist_scan_log(
+                session,
+                source=source,
+                timeframe=timeframe,
+                status="failed",
+                started_at=started_at,
+                result=result,
+                error_message=str(exc),
+            )
+        except Exception:
+            log.exception("Failed to persist failed scan log")
+        raise
 
     finally:
         await close_exchanges(exchanges)

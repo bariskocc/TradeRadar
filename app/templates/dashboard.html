@@ -10,214 +10,110 @@
 
     <!-- Main Content -->
     <main class="flex-1 overflow-auto">
-        <div class="p-6 max-w-6xl">
+        <div class="p-6 max-w-none">
             <!-- Header -->
             <div class="mb-6">
                 <h1 class="text-xl font-bold text-white">Dashboard</h1>
                 <p class="text-sm text-gray-500 mt-0.5">Sinyal performans özeti</p>
             </div>
 
-            <!-- Row 1: Main Stats -->
-            <div class="grid grid-cols-4 gap-4 mb-4">
-                <!-- Total Signals -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Total Signals</p>
-                    <p class="text-2xl font-bold text-white">{{ stats.total_signals }}</p>
-                    <p class="text-xs text-gray-500 mt-1">
-                        <span class="text-green-400">{{ stats.active_signals }}</span> active
-                    </p>
-                </div>
-
-                <!-- Win Rate -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Win Rate</p>
-                    <p class="text-2xl font-bold {% if stats.win_rate >= 50 %}text-green-400{% else %}text-red-400{% endif %}">
-                        {{ stats.win_rate }}%
-                    </p>
-                    <p class="text-xs text-gray-500 mt-1">
-                        {{ stats.win_count }}W / {{ stats.loss_count }}L / {{ stats.be_count }}BE
-                    </p>
-                </div>
-
-                <!-- Avg R:R -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Avg R:R</p>
-                    <p class="text-2xl font-bold {% if stats.avg_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-                        {{ '%+.2f'|format(stats.avg_rr) }}R
-                    </p>
-                    <p class="text-xs text-gray-500 mt-1">per trade</p>
-                </div>
-
-                <!-- Total R:R -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Total R:R</p>
-                    <p class="text-2xl font-bold {% if stats.total_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-                        {{ '%+.2f'|format(stats.total_rr) }}R
-                    </p>
-                    <p class="text-xs text-gray-500 mt-1">cumulative</p>
-                </div>
-            </div>
-
-            <!-- Row 2: Pair Stats -->
-            <div class="grid grid-cols-4 gap-4 mb-4">
-                <!-- Most Profitable Pair -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Most Profitable Pair</p>
-                    <p class="text-lg font-bold text-white">{{ stats.most_profitable }}</p>
-                    <p class="text-xs text-green-400 mt-1">{{ '%+.2f'|format(stats.most_profitable_rr) }}R</p>
-                </div>
-
-                <!-- Highest Win Rate Pair -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Highest Win Rate Pair</p>
-                    <p class="text-lg font-bold text-white">{{ stats.best_wr_pair }}</p>
-                    <p class="text-xs text-green-400 mt-1">{{ stats.best_wr_pct }}%</p>
-                </div>
-
-                <!-- Most Traded Pair -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Most Traded Pair</p>
-                    <p class="text-lg font-bold text-white">{{ stats.most_traded }}</p>
-                    <p class="text-xs text-gray-400 mt-1">{{ stats.most_traded_count }} trades</p>
-                </div>
-
-                <!-- Avg Duration -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Avg Duration</p>
-                    <p class="text-lg font-bold text-white">{{ stats.avg_duration }}h</p>
-                    <p class="text-xs text-gray-400 mt-1">per signal</p>
-                </div>
-            </div>
-
-            <!-- Row 3: Streak & Edge -->
-            <div class="grid grid-cols-3 gap-4 mb-4">
-                <!-- Highest Win Streak -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 border-t-2 border-t-green-500">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Highest Win Streak</p>
-                    <p class="text-3xl font-bold text-white">{{ stats.max_streak }}</p>
-                </div>
-
-                <!-- Best Week -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 border-t-2 border-t-accent-blue">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Best Week</p>
-                    <p class="text-xl font-bold text-white">
-                        {{ stats.best_week }}
-                        <span class="text-green-400 text-base">({{ '%+.2f'|format(stats.best_week_rr) }}R)</span>
-                    </p>
-                </div>
-
-                <!-- Top Symbol Edge -->
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 border-t-2 border-t-accent-purple">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Top Symbol Edge</p>
-                    <p class="text-xl font-bold text-white">
-                        {{ stats.top_edge_sym }}
-                        <span class="text-green-400 text-base">({{ '%+.2f'|format(stats.top_edge_rr) }}R)</span>
-                    </p>
-                </div>
-            </div>
-
-            <!-- Row 4: CRT Scanner -->
-            <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 border-t-2 border-t-yellow-500">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">CRT Scanner</p>
-                        <p id="scan-status" class="text-sm text-gray-400">Hazır – taramayı başlatmak için butona basın.</p>
+            <!-- Split Dashboard: Crypto vs Global Markets -->
+            <div class="space-y-4 mb-4">
+                <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <div class="mb-3">
+                        <h2 class="text-sm font-bold text-white">Crypto</h2>
+                        <p class="text-xs text-gray-500">Only crypto market stats</p>
                     </div>
-                    <button id="scan-btn" onclick="runScan()"
-                        class="px-5 py-2.5 bg-yellow-500 hover:bg-yellow-600 text-dark-900 text-sm font-bold rounded-lg transition flex items-center gap-2">
-                        <svg id="scan-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                        </svg>
-                        <svg id="scan-spinner" class="w-4 h-4 animate-spin hidden" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                        </svg>
-                        <span id="scan-btn-text">Scan Now</span>
-                    </button>
-                </div>
-                <div id="scan-results" class="mt-3 hidden">
-                    <div id="scan-results-content" class="space-y-1"></div>
-                </div>
-            </div>
+                    <div class="grid grid-cols-4 gap-3">
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total Signals</p>
+                            <p class="text-xl font-bold text-white">{{ stats_crypto.total_signals }}</p>
+                            <p class="text-xs text-gray-500 mt-1"><span class="text-green-400">{{ stats_crypto.active_signals }}</span> active</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Win Rate</p>
+                            <p class="text-xl font-bold {% if stats_crypto.win_rate >= 50 %}text-green-400{% else %}text-red-400{% endif %}">{{ stats_crypto.win_rate }}%</p>
+                            <p class="text-xs text-gray-500 mt-1">{{ stats_crypto.win_count }}W / {{ stats_crypto.loss_count }}L / {{ stats_crypto.be_count }}BE</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg R:R</p>
+                            <p class="text-xl font-bold {% if stats_crypto.avg_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_crypto.avg_rr) }}R</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total R:R</p>
+                            <p class="text-xl font-bold {% if stats_crypto.total_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_crypto.total_rr) }}R</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Profitable</p>
+                            <p class="text-sm font-bold text-white">{{ stats_crypto.most_profitable }}</p>
+                            <p class="text-xs text-green-400 mt-1">{{ '%+.2f'|format(stats_crypto.most_profitable_rr) }}R</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Traded</p>
+                            <p class="text-sm font-bold text-white">{{ stats_crypto.most_traded }}</p>
+                            <p class="text-xs text-gray-400 mt-1">{{ stats_crypto.most_traded_count }} trades</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Highest Win Rate</p>
+                            <p class="text-sm font-bold text-white">{{ stats_crypto.best_wr_pair }}</p>
+                            <p class="text-xs text-green-400 mt-1">{{ stats_crypto.best_wr_pct }}%</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg Duration</p>
+                            <p class="text-sm font-bold text-white">{{ stats_crypto.avg_duration }}h</p>
+                            <p class="text-xs text-gray-400 mt-1">per signal</p>
+                        </div>
+                    </div>
+                </section>
 
+                <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <div class="mb-3">
+                        <h2 class="text-sm font-bold text-white">{{ global_markets_label }}</h2>
+                        <p class="text-xs text-gray-500">FX + Index + Metal stats</p>
+                    </div>
+                    <div class="grid grid-cols-4 gap-3">
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total Signals</p>
+                            <p class="text-xl font-bold text-white">{{ stats_global.total_signals }}</p>
+                            <p class="text-xs text-gray-500 mt-1"><span class="text-green-400">{{ stats_global.active_signals }}</span> active</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Win Rate</p>
+                            <p class="text-xl font-bold {% if stats_global.win_rate >= 50 %}text-green-400{% else %}text-red-400{% endif %}">{{ stats_global.win_rate }}%</p>
+                            <p class="text-xs text-gray-500 mt-1">{{ stats_global.win_count }}W / {{ stats_global.loss_count }}L / {{ stats_global.be_count }}BE</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg R:R</p>
+                            <p class="text-xl font-bold {% if stats_global.avg_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_global.avg_rr) }}R</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total R:R</p>
+                            <p class="text-xl font-bold {% if stats_global.total_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_global.total_rr) }}R</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Profitable</p>
+                            <p class="text-sm font-bold text-white">{{ stats_global.most_profitable }}</p>
+                            <p class="text-xs text-green-400 mt-1">{{ '%+.2f'|format(stats_global.most_profitable_rr) }}R</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Traded</p>
+                            <p class="text-sm font-bold text-white">{{ stats_global.most_traded }}</p>
+                            <p class="text-xs text-gray-400 mt-1">{{ stats_global.most_traded_count }} trades</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Highest Win Rate</p>
+                            <p class="text-sm font-bold text-white">{{ stats_global.best_wr_pair }}</p>
+                            <p class="text-xs text-green-400 mt-1">{{ stats_global.best_wr_pct }}%</p>
+                        </div>
+                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg Duration</p>
+                            <p class="text-sm font-bold text-white">{{ stats_global.avg_duration }}h</p>
+                            <p class="text-xs text-gray-400 mt-1">per signal</p>
+                        </div>
+                    </div>
+                </section>
+            </div>
         </div>
     </main>
 </div>
-
-<script>
-async function runScan() {
-    const btn = document.getElementById('scan-btn');
-    const btnText = document.getElementById('scan-btn-text');
-    const icon = document.getElementById('scan-icon');
-    const spinner = document.getElementById('scan-spinner');
-    const status = document.getElementById('scan-status');
-    const results = document.getElementById('scan-results');
-    const resultsContent = document.getElementById('scan-results-content');
-
-    btn.disabled = true;
-    btn.classList.add('opacity-60', 'cursor-not-allowed');
-    icon.classList.add('hidden');
-    spinner.classList.remove('hidden');
-    btnText.textContent = 'Scanning...';
-    status.textContent = 'Taranıyor... Piyasa verileri çekiliyor ve CRT pattern aranıyor.';
-    status.className = 'text-sm text-yellow-400';
-    results.classList.add('hidden');
-
-    try {
-        const res = await fetch('/api/scan', { method: 'POST' });
-        const data = await res.json();
-
-        if (res.ok) {
-            const total = (data.new_setups || 0) + (data.activated || 0) + (data.closed || 0);
-            if (total > 0) {
-                const parts = [];
-                if (data.new_setups) parts.push(`${data.new_setups} setup`);
-                if (data.activated) parts.push(`${data.activated} active`);
-                if (data.closed) parts.push(`${data.closed} closed`);
-                status.textContent = `Tamamlandı – ${parts.join(', ')}`;
-                status.className = 'text-sm text-green-400';
-
-                let html = '';
-                if (data.setups) {
-                    html += data.setups.map(s =>
-                        `<div class="flex items-center gap-2 text-xs">
-                            <span class="font-medium text-white">${s.symbol}</span>
-                            <span class="px-1.5 py-0.5 rounded ${s.direction === 'LONG' ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'} font-bold">${s.direction}</span>
-                            <span class="text-yellow-400">CISD Bekliyor</span>
-                        </div>`
-                    ).join('');
-                }
-                if (data.active_signals) {
-                    html += data.active_signals.map(s =>
-                        `<div class="flex items-center gap-2 text-xs">
-                            <span class="font-medium text-white">${s.symbol}</span>
-                            <span class="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-bold">ACTIVE</span>
-                            <span class="text-gray-400">Entry: ${s.entry} | SL: ${s.sl} | TP: ${s.tp}</span>
-                        </div>`
-                    ).join('');
-                }
-                if (html) {
-                    resultsContent.innerHTML = html;
-                    results.classList.remove('hidden');
-                }
-            } else {
-                status.textContent = 'Tamamlandı – şu an yeni CRT sinyali yok.';
-                status.className = 'text-sm text-gray-400';
-            }
-        } else {
-            status.textContent = `Hata: ${data.error}`;
-            status.className = 'text-sm text-red-400';
-        }
-    } catch (e) {
-        status.textContent = `Bağlantı hatası: ${e.message}`;
-        status.className = 'text-sm text-red-400';
-    } finally {
-        btn.disabled = false;
-        btn.classList.remove('opacity-60', 'cursor-not-allowed');
-        icon.classList.remove('hidden');
-        spinner.classList.add('hidden');
-        btnText.textContent = 'Scan Now';
-    }
-}
-</script>
 {% endblock %}

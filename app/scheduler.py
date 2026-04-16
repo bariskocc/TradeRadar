@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -17,9 +17,9 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 
 SCAN_SCHEDULE = {
     "4h_candles": {
-        "trigger": CronTrigger(hour="0,4,8,12,16,20", minute=5, timezone="UTC"),
+        "trigger": CronTrigger(minute=5, timezone="UTC"),
         "timeframe": "4h",
-        "description": "4H mum kapanışından 5 dk sonra",
+        "description": "Her saat 5. dakikada",
     },
 }
 
@@ -28,7 +28,7 @@ async def _scheduled_scan(timeframe: str) -> None:
     log.info("Scheduled scan starting (timeframe=%s)...", timeframe)
     try:
         async with async_session() as session:
-            result = await run_scan(session, timeframe=timeframe)
+            result = await run_scan(session, timeframe=timeframe, source="scheduler")
             log.info(
                 "Scheduled scan done: %d setup(s), %d activated, %d closed, %d breakeven at %s",
                 len(result["new_setups"]),
@@ -70,10 +70,15 @@ def get_scheduler_status() -> dict:
     jobs = []
     for job in scheduler.get_jobs():
         next_run = job.next_run_time
+        next_run_tsi = (
+            next_run.astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M UTC+3")
+            if next_run
+            else "paused"
+        )
         jobs.append({
             "id": job.id,
             "name": job.name,
-            "next_run": next_run.strftime("%Y-%m-%d %H:%M UTC") if next_run else "paused",
+            "next_run": next_run_tsi,
         })
     return {
         "running": scheduler.running,

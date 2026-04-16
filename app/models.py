@@ -45,3 +45,22 @@ class Signal(Base):
     market_type = Column(String, default="crypto")
     timeframe = Column(String, default="4h")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ScanLog(Base):
+    __tablename__ = "scan_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String, nullable=False)                # manual / scheduler
+    timeframe = Column(String, nullable=False)             # 4h, 1h...
+    status = Column(String, nullable=False, default="success")  # success / failed
+
+    new_setups = Column(Integer, default=0)
+    activated = Column(Integer, default=0)
+    closed = Column(Integer, default=0)
+    breakeven = Column(Integer, default=0)
+
+    started_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+    error_message = Column(String, nullable=True)

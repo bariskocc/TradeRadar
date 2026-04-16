@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR
 from app.database import init_db, get_db
-from app.models import Signal
+from app.models import Signal, ScanLog
 from app.auth import verify_credentials, create_access_token, get_current_user
 from app.scanner import run_scan
 from app.scheduler import start_scheduler, stop_scheduler, get_scheduler_status
@@ -42,7 +42,7 @@ def _fmt_date_tsi(value):
     if value is None:
         return "-"
     tsi = value + TSI_OFFSET
-    return tsi.strftime('%d.%m %H:%M')
+    return tsi.strftime('%d.%m.%Y %H:%M')
 
 
 def _calc_rr_ratio(entry, sl, tp):
@@ -111,17 +111,10 @@ async def logout():
 
 # ──────────────────── Dashboard (Stats) ────────────────────
 
-@app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
-    user = get_current_user(request)
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
 
-    result = await db.execute(select(Signal))
-    all_signals = result.scalars().all()
-
-    closed = [s for s in all_signals if s.result is not None]
-    active = [s for s in all_signals if s.status == "active"]
+def _build_dashboard_stats(signals: list[Signal]) -> dict:
+    closed = [s for s in signals if s.result is not None]
+    active = [s for s in signals if s.status == "active"]
     wins = [s for s in closed if s.result == "win"]
     losses = [s for s in closed if s.result == "loss"]
     breakevens = [s for s in closed if s.result == "breakeven"]
@@ -139,9 +132,8 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     durations = [s.duration_hours for s in closed if s.duration_hours is not None]
     avg_duration = round(sum(durations) / len(durations), 1) if durations else 0
 
-    # Most profitable pair
     pair_rr: dict[str, float] = {}
-    pair_wins: dict[str, list] = {}
+    pair_wins: dict[str, list[int]] = {}
     pair_trades: Counter = Counter()
     for s in closed:
         pair_rr[s.symbol] = pair_rr.get(s.symbol, 0) + (s.rr_value or 0)
@@ -152,9 +144,13 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
             pair_wins[s.symbol][0] += 1
         pair_wins[s.symbol][1] += 1
 
-    most_profitable = max(pair_rr, key=pair_rr.get) if pair_rr else "-"
-    most_profitable_rr = round(pair_rr.get(most_profitable, 0), 2) if pair_rr else 0
-
+    profitable_pairs = {sym: total for sym, total in pair_rr.items() if total > 0}
+    if profitable_pairs:
+        most_profitable = max(profitable_pairs, key=profitable_pairs.get)
+        most_profitable_rr = round(profitable_pairs[most_profitable], 2)
+    else:
+        most_profitable = "-"
+        most_profitable_rr = 0
     most_traded = pair_trades.most_common(1)[0] if pair_trades else ("-", 0)
 
     best_wr_pair = "-"
@@ -166,7 +162,6 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
                 best_wr_pct = round(wr, 1)
                 best_wr_pair = sym
 
-    # Win streak
     streak = 0
     max_streak = 0
     for s in sorted(closed, key=lambda x: x.created_at):
@@ -176,7 +171,6 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
         else:
             streak = 0
 
-    # Best week
     week_rr: dict[str, float] = {}
     for s in closed:
         if s.created_at and s.rr_value is not None:
@@ -185,7 +179,6 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     best_week = max(week_rr, key=week_rr.get) if week_rr else "-"
     best_week_rr = round(week_rr.get(best_week, 0), 2) if week_rr else 0
 
-    # Top symbol edge (highest avg RR per trade, min 3 trades)
     top_edge_sym = "-"
     top_edge_rr = 0
     for sym, total_r in pair_rr.items():
@@ -196,7 +189,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
                 top_edge_rr = round(avg, 2)
                 top_edge_sym = sym
 
-    stats = {
+    return {
         "total_signals": total,
         "active_signals": len(active),
         "win_count": win_count,
@@ -219,15 +212,36 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
         "top_edge_rr": top_edge_rr,
     }
 
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    result = await db.execute(select(Signal))
+    all_signals = result.scalars().all()
+
+    stats = _build_dashboard_stats(all_signals)
+    crypto_signals = [s for s in all_signals if s.market_type == "crypto"]
+    global_signals = [s for s in all_signals if s.market_type in ("fx", "index", "metal")]
+
+    stats_crypto = _build_dashboard_stats(crypto_signals)
+    stats_global = _build_dashboard_stats(global_signals)
+
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "user": user,
         "stats": stats,
+        "stats_crypto": stats_crypto,
+        "stats_global": stats_global,
+        "global_markets_label": "Global Markets",
     })
 
 
 # ──────────────────── All Signals ────────────────────
 
 ITEMS_PER_PAGE = 20
+LOGS_PER_PAGE = 50
 
 
 @app.get("/signals", response_class=HTMLResponse)
@@ -397,6 +411,39 @@ async def analytics_page(request: Request, db: AsyncSession = Depends(get_db)):
     })
 
 
+# ──────────────────── Scan Logs Page ────────────────────
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(default=1, ge=1),
+):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    count_result = await db.execute(select(func.count()).select_from(ScanLog))
+    total = count_result.scalar() or 0
+    total_pages = max(1, (total + LOGS_PER_PAGE - 1) // LOGS_PER_PAGE)
+
+    logs_result = await db.execute(
+        select(ScanLog)
+        .order_by(desc(ScanLog.started_at))
+        .offset((page - 1) * LOGS_PER_PAGE)
+        .limit(LOGS_PER_PAGE)
+    )
+    logs = logs_result.scalars().all()
+
+    return templates.TemplateResponse(request=request, name="logs.html", context={
+        "user": user,
+        "logs": logs,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+    })
+
+
 # ──────────────────── Scanner Page ────────────────────
 
 @app.get("/scanner", response_class=HTMLResponse)
@@ -444,7 +491,7 @@ async def trigger_scan(request: Request, db: AsyncSession = Depends(get_db)):
 
     scan_state["running"] = True
     try:
-        scan_result = await run_scan(db, timeframe="4h")
+        scan_result = await run_scan(db, timeframe="4h", source="manual")
         scan_state["last_run"] = datetime.now(timezone.utc).isoformat()
         scan_state["last_result"] = (
             f"{len(scan_result['new_setups'])} setup, "
