@@ -1,9 +1,8 @@
 """Piyasa veri katmani - ccxt + yfinance OHLCV cekimi.
 
 Desteklenen kaynaklar:
-  - Binance (ccxt): Crypto spot
-  - Bybit (ccxt):   Metal
-  - Yahoo Finance:  Index + FX
+  - Binance (ccxt): Crypto perpetual (USDT-M)
+  - Yahoo Finance:  Index + FX + Metal
 """
 
 from __future__ import annotations
@@ -21,31 +20,35 @@ log = logging.getLogger(__name__)
 
 EXCHANGE_PER_MARKET: dict[str, str] = {
     "crypto": "binance",
-    "metal":  "bybit",
+    "metal":  "yfinance",
     "index":  "yfinance",
     "fx":     "yfinance",
 }
 
 SYMBOLS_BY_MARKET: dict[str, list[str]] = {
     "crypto": [
-        "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-        "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
-        "SHIB/USDT", "TRX/USDT", "NEAR/USDT", "SUI/USDT", "APT/USDT",
-        "OP/USDT", "ARB/USDT", "INJ/USDT", "FTM/USDT", "PEPE/USDT",
-        "WIF/USDT", "FET/USDT", "ONDO/USDT", "RENDER/USDT", "TIA/USDT",
-        "SEI/USDT", "AAVE/USDT", "UNI/USDT", "LTC/USDT", "BCH/USDT",
+        "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT",
+        "DOGE/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT", "DOT/USDT:USDT",
+        "1000SHIB/USDT:USDT", "TRX/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
+        "OP/USDT:USDT", "ARB/USDT:USDT", "INJ/USDT:USDT", "FTM/USDT:USDT", "1000PEPE/USDT:USDT",
+        "WIF/USDT:USDT", "FET/USDT:USDT", "ONDO/USDT:USDT", "RENDER/USDT:USDT", "TIA/USDT:USDT",
+        "SEI/USDT:USDT", "AAVE/USDT:USDT", "UNI/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
+        "FIL/USDT:USDT", "ATOM/USDT:USDT", "1000BONK/USDT:USDT", "ETC/USDT:USDT", "ENA/USDT:USDT",
+        "1000FLOKI/USDT:USDT",
     ],
     "metal": [
-        "XAU/USDT:USDT",       # Gold
-        "XAG/USDT:USDT",       # Silver
+        "GC=F",                # Gold futures
+        "SI=F",                # Silver futures
     ],
     "index": [
         "^NDX",                # Nasdaq 100 (US100)
+        "^GSPC",               # S&P 500 (US500)
     ],
     # Populer ve gorece korelasyonu dusuk 10 FX paritesi
     # (EURUSD varsa GBPUSD alinmiyor gibi):
     "fx": [
         "EURUSD=X",
+        "GBPUSD=X",
         "USDJPY=X",
         "AUDUSD=X",
         "USDCAD=X",
@@ -57,13 +60,18 @@ SYMBOLS_BY_MARKET: dict[str, list[str]] = {
         "CADJPY=X",
     ],
 }
+_CRYPTO_SYMBOL_SET = set(SYMBOLS_BY_MARKET["crypto"])
 
 # ccxt symbol → temiz gösterim adı
 DISPLAY_NAMES: dict[str, str] = {
-    "XAU/USDT:USDT": "XAUUSD",
-    "XAG/USDT:USDT": "XAGUSD",
+    "1000SHIB/USDT:USDT": "SHIBUSDT",
+    "1000PEPE/USDT:USDT": "PEPEUSDT",
+    "GC=F": "XAUUSD",
+    "SI=F": "XAGUSD",
     "^NDX": "US100",
+    "^GSPC": "US500",
     "EURUSD=X": "EURUSD",
+    "GBPUSD=X": "GBPUSD",
     "USDJPY=X": "USDJPY",
     "AUDUSD=X": "AUDUSD",
     "USDCAD=X": "USDCAD",
@@ -81,21 +89,33 @@ for _market, _symbols in SYMBOLS_BY_MARKET.items():
     _exc = EXCHANGE_PER_MARKET[_market]
     for _sym in _symbols:
         _db_name = DISPLAY_NAMES.get(_sym, _sym.replace("/", "").replace(":USDT", ""))
+        if _market == "crypto" and not _db_name.endswith(".P"):
+            _db_name = f"{_db_name}.P"
         _REVERSE_DISPLAY[_db_name] = (_sym, _exc)
 
 
 def to_display_symbol(raw_symbol: str) -> str:
     """Kaynak sembolunu DB/UI adina cevir."""
     if raw_symbol in DISPLAY_NAMES:
-        return DISPLAY_NAMES[raw_symbol]
-    return raw_symbol.replace("/", "").replace(":USDT", "").replace("=X", "")
+        display = DISPLAY_NAMES[raw_symbol]
+    else:
+        display = raw_symbol.replace("/", "").replace(":USDT", "").replace("=X", "")
+    # Binance kripto perpetual pariteleri UI/DB'de ".P" ile gosterilir.
+    if raw_symbol in _CRYPTO_SYMBOL_SET and not display.endswith(".P"):
+        display = f"{display}.P"
+    return display
 
 
 def from_display_symbol(db_symbol: str) -> tuple[str, str]:
     """DB sembolünden (ccxt_symbol, exchange_id) döndür."""
     if db_symbol in _REVERSE_DISPLAY:
         return _REVERSE_DISPLAY[db_symbol]
-    return db_symbol.replace("USDT", "/USDT"), "binance"
+    normalized = db_symbol.upper().strip()
+    if normalized.endswith(".P"):
+        normalized = normalized[:-2]
+    if normalized.endswith("USDT"):
+        return normalized.replace("USDT", "/USDT:USDT"), "binance"
+    return normalized, "binance"
 
 
 # ──────────────────── Exchange factory ────────────────────
@@ -103,6 +123,7 @@ def from_display_symbol(db_symbol: str) -> tuple[str, str]:
 _EXCHANGE_CONFIGS: dict[str, dict] = {
     "binance": {
         "enableRateLimit": True,
+        "options": {"defaultType": "future"},
     },
     "bybit": {
         "enableRateLimit": True,

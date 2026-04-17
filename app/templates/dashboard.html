@@ -14,7 +14,7 @@
             <!-- Header -->
             <div class="mb-6">
                 <h1 class="text-xl font-bold text-white">Dashboard</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Sinyal performans özeti</p>
+                <p class="text-sm text-gray-500 mt-0.5">Signal performance summary</p>
             </div>
 
             <!-- Split Dashboard: Crypto vs Global Markets -->
@@ -45,17 +45,17 @@
                         </div>
                         <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                             <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Profitable</p>
-                            <p class="text-sm font-bold text-white">{{ stats_crypto.most_profitable }}</p>
+                            <p class="text-sm font-bold text-white">{{ fmt_ui_symbol(stats_crypto.most_profitable, 'crypto') }}</p>
                             <p class="text-xs text-green-400 mt-1">{{ '%+.2f'|format(stats_crypto.most_profitable_rr) }}R</p>
                         </div>
                         <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                             <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Traded</p>
-                            <p class="text-sm font-bold text-white">{{ stats_crypto.most_traded }}</p>
+                            <p class="text-sm font-bold text-white">{{ fmt_ui_symbol(stats_crypto.most_traded, 'crypto') }}</p>
                             <p class="text-xs text-gray-400 mt-1">{{ stats_crypto.most_traded_count }} trades</p>
                         </div>
                         <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                             <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Highest Win Rate</p>
-                            <p class="text-sm font-bold text-white">{{ stats_crypto.best_wr_pair }}</p>
+                            <p class="text-sm font-bold text-white">{{ fmt_ui_symbol(stats_crypto.best_wr_pair, 'crypto') }}</p>
                             <p class="text-xs text-green-400 mt-1">{{ stats_crypto.best_wr_pct }}%</p>
                         </div>
                         <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">

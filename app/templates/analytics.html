@@ -18,19 +18,19 @@
             <!-- Header -->
             <div class="mb-6">
                 <h1 class="text-xl font-bold text-white">Analytics</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Performans grafikleri ve detaylı analiz ({{ total_closed }} kapalı trade)</p>
+                <p class="text-sm text-gray-500 mt-0.5">Performance charts and detailed analysis ({{ total_closed }} closed trades)</p>
             </div>
 
             {% if total_closed == 0 %}
             <div class="bg-dark-800 rounded-xl border border-dark-600 p-12 text-center">
                 <svg class="w-12 h-12 text-gray-600 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                <p class="text-gray-500">Henüz kapalı trade yok. Sinyaller kapandığında grafikler burada görünecek.</p>
+                <p class="text-gray-500">No closed trades yet. Charts will appear here when signals close.</p>
             </div>
             {% else %}
 
             <!-- Row 1: Equity Curve -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-4">
-                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Equity Curve (Kümülatif R:R)</p>
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Equity Curve (Cumulative R:R)</p>
                 <div style="height: 280px;">
                     <canvas id="equityChart"></canvas>
                 </div>
@@ -40,7 +40,7 @@
             <div class="grid grid-cols-3 gap-4 mb-4">
                 <!-- Win/Loss/BE -->
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Sonuç Dağılımı</p>
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Result Distribution</p>
                     <div style="height: 200px;">
                         <canvas id="resultChart"></canvas>
                     </div>
@@ -48,7 +48,7 @@
 
                 <!-- Direction Distribution -->
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Yön Dağılımı</p>
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Direction Distribution</p>
                     <div style="height: 200px;">
                         <canvas id="directionChart"></canvas>
                     </div>
@@ -56,7 +56,7 @@
 
                 <!-- Market Distribution -->
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Piyasa Dağılımı</p>
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Market Distribution</p>
                     <div style="height: 200px;">
                         <canvas id="marketChart"></canvas>
                     </div>
@@ -65,7 +65,7 @@
 
             <!-- Row 3: Weekly Performance -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-4">
-                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Haftalık Performans (R:R)</p>
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Weekly Performance (R:R)</p>
                 <div style="height: 240px;">
                     <canvas id="weeklyChart"></canvas>
                 </div>
@@ -73,7 +73,7 @@
 
             <!-- Row 4: Top Symbols -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 p-5">
-                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">En İyi Semboller (Toplam R:R)</p>
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Top Symbols (Total R:R)</p>
                 <div style="height: 260px;">
                     <canvas id="symbolChart"></canvas>
                 </div>

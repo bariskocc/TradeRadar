@@ -24,6 +24,8 @@ MIN_RANGE_ATR_RATIO = 0.4
 MAX_RANGE_ATR_RATIO = 3.0
 PURGE_THRESHOLD_PCT = 0.0005
 REVERSAL_BODY_PCT = 0.25
+MIN_CISD_TREND_CANDLES = 2
+DOJI_BODY_RATIO_MAX = 0.10
 
 
 @dataclass
@@ -217,92 +219,46 @@ def _calc_live_setup_bias(direction: str, htf_bias: str = "NEUTRAL") -> tuple[st
     return bias, score
 
 
+def _candle_state(row: pd.Series) -> str:
+    """Mum durumunu siniflandir: bullish / bearish / doji."""
+    o = float(row["open"])
+    c = float(row["close"])
+    h = float(row["high"])
+    l = float(row["low"])
+    rng = h - l
+    if rng <= 0:
+        return "doji"
+
+    body = abs(c - o)
+    body_to_range = body / rng
+    if body_to_range <= DOJI_BODY_RATIO_MAX:
+        return "doji"
+    if c > o:
+        return "bullish"
+    if c < o:
+        return "bearish"
+    return "doji"
+
+
 def detect_crt_setup(
     df_4h: pd.DataFrame,
     symbol: str,
     market_type: str = "crypto",
     htf_bias: str = "NEUTRAL",
 ) -> Optional[CRTSetup]:
-    """4H verisinde CRT pattern tespit et. Henüz CISD konfirmasyonu yok."""
+    """4H verisinde CRT pattern tespit et (son 3 mum icinde)."""
     df_4h = df_4h.sort_index()
 
     if len(df_4h) < 16:
         return None
 
     atr = compute_atr(df_4h)
-    i = len(df_4h) - 3
-    crt_bar = df_4h.iloc[i]
-    next_bar = df_4h.iloc[i + 1]
-    confirm_bar = df_4h.iloc[i + 2]
-
-    crt_range = crt_bar["high"] - crt_bar["low"]
-    current_atr = atr.iloc[i]
-
-    if current_atr == 0:
-        return None
-
-    ratio = crt_range / current_atr
-    if ratio < MIN_RANGE_ATR_RATIO or ratio > MAX_RANGE_ATR_RATIO:
-        return None
-
-    mid_level = crt_bar["low"] + (crt_range * 0.5)
-
-    # HIGH PURGE → SHORT setup
-    purge_above = next_bar["high"] > crt_bar["high"] * (1 + PURGE_THRESHOLD_PCT)
-    if purge_above:
-        reversal_body = next_bar["open"] - next_bar["close"]
-        if reversal_body > 0 and reversal_body > crt_range * REVERSAL_BODY_PCT:
-            if confirm_bar["close"] < crt_bar["high"]:
-                bias, score = _calc_bias(df_4h, i, "SHORT", htf_bias)
-                return CRTSetup(
-                    symbol=symbol,
-                    direction="SHORT",
-                    purge_type="HIGH",
-                    bias=bias,
-                    bias_score=score,
-                    key_level_high=round(crt_bar["high"], 8),
-                    key_level_low=round(crt_bar["low"], 8),
-                    crt_bar_time=crt_bar.name.to_pydatetime(),
-                    purge_time=next_bar.name.to_pydatetime(),
-                    invalidation_level=round(mid_level, 8),
-                    purge_extreme=round(next_bar["high"], 8),
-                    last_4h_high=round(confirm_bar["high"], 8),
-                    last_4h_low=round(confirm_bar["low"], 8),
-                    market_type=market_type,
-                )
-
-    # LOW PURGE → LONG setup
-    purge_below = next_bar["low"] < crt_bar["low"] * (1 - PURGE_THRESHOLD_PCT)
-    if purge_below:
-        reversal_body = next_bar["close"] - next_bar["open"]
-        if reversal_body > 0 and reversal_body > crt_range * REVERSAL_BODY_PCT:
-            if confirm_bar["close"] > crt_bar["low"]:
-                bias, score = _calc_bias(df_4h, i, "LONG", htf_bias)
-                return CRTSetup(
-                    symbol=symbol,
-                    direction="LONG",
-                    purge_type="LOW",
-                    bias=bias,
-                    bias_score=score,
-                    key_level_high=round(crt_bar["high"], 8),
-                    key_level_low=round(crt_bar["low"], 8),
-                    crt_bar_time=crt_bar.name.to_pydatetime(),
-                    purge_time=next_bar.name.to_pydatetime(),
-                    invalidation_level=round(mid_level, 8),
-                    purge_extreme=round(next_bar["low"], 8),
-                    last_4h_high=round(confirm_bar["high"], 8),
-                    last_4h_low=round(confirm_bar["low"], 8),
-                    market_type=market_type,
-                )
-
-    # FALLBACK (2-bar canli setup):
-    # Son 3 mum icindeki iki olasi 2'li kombinasyonu kontrol et:
-    #   - (len-2 -> len-1)
-    #   - (len-3 -> len-2)
-    # Boylece son mum acik olsa bile bir onceki 2'li (05->09 gibi) yakalanabilir.
-    candidate_indices = [len(df_4h) - 2, len(df_4h) - 3]
     purge_threshold = 0.0 if market_type in {"fx", "index"} else PURGE_THRESHOLD_PCT
-    for live_i in candidate_indices:
+
+    # Son 3 mum icindeki ardışık 2'li kombinasyonlari kontrol et:
+    #   1) len-2 -> len-1 (en guncel)
+    #   2) len-3 -> len-2 (bir onceki)
+    for live_i in (len(df_4h) - 2, len(df_4h) - 3):
         if live_i < 0 or live_i + 1 >= len(df_4h):
             continue
 
@@ -391,54 +347,84 @@ def check_cisd_confirmation(
     if len(recent) < 3:
         return None
 
-    if setup.direction == "LONG":
-        return _check_bullish_cisd(recent, setup)
-    else:
-        return _check_bearish_cisd(recent, setup)
-
-
-def _check_bullish_cisd(
-    df: pd.DataFrame,
-    setup: CRTSetup,
-) -> Optional[CISDConfirmation]:
-    """15M'de bullish CISD: son bearish (kirmizi) mumun HIGH'ini yukari kirmak.
-
-    Yesil mumdan onceki son kirmizi mumun HIGH'i = CISD seviyesi.
-    Fiyat bunun ustune kapanirsa → giris.
-    """
-    if len(df) < 3:
-        return None
-
-    work = df
+    min_confirm_time: Optional[pd.Timestamp] = None
     if setup.purge_time:
         purge_ts = pd.Timestamp(setup.purge_time)
         if purge_ts.tzinfo is None:
             purge_ts = purge_ts.tz_localize("UTC")
         else:
             purge_ts = purge_ts.tz_convert("UTC")
-        work = df[df.index >= purge_ts]
+        min_confirm_time = purge_ts
+
+    if setup.direction == "LONG":
+        return _check_bullish_cisd(recent, setup, min_confirm_time=min_confirm_time)
+    else:
+        return _check_bearish_cisd(recent, setup, min_confirm_time=min_confirm_time)
+
+
+def _check_bullish_cisd(
+    df: pd.DataFrame,
+    setup: CRTSetup,
+    min_confirm_time: Optional[pd.Timestamp] = None,
+) -> Optional[CISDConfirmation]:
+    """15M bullish CISD:
+    Son dusus (kirmizi) mum grubunun ilk mumunun OPEN seviyesinin
+    ustunde kapanis aranir.
+
+    Not: Tek mumluk dusus grubu CISD referansi olarak kabul edilmez.
+    """
+    if len(df) < 3:
+        return None
+
+    # CISD referansi, purge zamanindan once baslayan son mum grubunda da
+    # olabilecegi icin crt penceresinden itibaren tum 15M dizi kullanilir.
+    work = df
 
     if len(work) < 3:
         return None
 
     ref_time: Optional[pd.Timestamp] = None
     cisd_level: Optional[float] = None
+    bearish_group_start: Optional[int] = None
+    bearish_group_len = 0
 
-    for i in range(1, len(work)):
+    for i in range(len(work)):
         cur = work.iloc[i]
-        prev = work.iloc[i - 1]
+        cur_state = _candle_state(cur)
+        cur_is_bearish = cur_state == "bearish"
+        cur_is_bullish = cur_state == "bullish"
+        cur_is_doji = cur_state == "doji"
 
-        # Ilk gecerli CISD referansini sabitle:
-        # son bullish mumdan sonra gelen bearish mumun high'i.
-        if ref_time is None:
-            is_bearish = cur["close"] < cur["open"]
-            was_bullish = prev["close"] >= prev["open"]
-            if is_bearish and was_bullish:
-                ref_time = cur.name
-                cisd_level = float(cur["high"])
+        if cur_is_bearish:
+            if bearish_group_start is None:
+                bearish_group_start = i
+                bearish_group_len = 1
+            else:
+                bearish_group_len += 1
             continue
 
-        if cisd_level is not None and cur.name > ref_time and cur["close"] >= cisd_level:
+        # Doji mumlar trend blogunu bozmaz; CISD akisini etkilemesin.
+        if cur_is_doji:
+            continue
+
+        # Bearish grup bittiginde CISD referansini guncelle.
+        # Tek mumluk gruplar atlanir; onceki gecerli referans korunur.
+        if bearish_group_start is not None:
+            if bearish_group_len >= MIN_CISD_TREND_CANDLES:
+                first_bearish = work.iloc[bearish_group_start]
+                ref_time = first_bearish.name
+                cisd_level = float(first_bearish["open"])
+            bearish_group_start = None
+            bearish_group_len = 0
+
+        if (
+            ref_time is not None
+            and cisd_level is not None
+            and cur.name > ref_time
+            and (min_confirm_time is None or cur.name > min_confirm_time)
+            and cur_is_bullish
+            and float(cur["close"]) > cisd_level
+        ):
             entry = round(cisd_level, 8)
             sl = round(setup.purge_extreme, 8)
             tp = round(setup.key_level_high, 8)
@@ -448,7 +434,8 @@ def _check_bullish_cisd(
                 stop_loss=sl,
                 take_profit=tp,
                 invalidation_level=setup.invalidation_level,
-                cisd_time=ref_time.to_pydatetime(),
+                # Onay zamani, referans mum degil; kirilimi yapan mumdur.
+                cisd_time=cur.name.to_pydatetime(),
                 cisd_price=round(cisd_level, 8),
             )
 
@@ -458,45 +445,66 @@ def _check_bullish_cisd(
 def _check_bearish_cisd(
     df: pd.DataFrame,
     setup: CRTSetup,
+    min_confirm_time: Optional[pd.Timestamp] = None,
 ) -> Optional[CISDConfirmation]:
-    """15M'de bearish CISD: son bullish (yesil) mumun LOW'unu asagi kirmak.
+    """15M bearish CISD:
+    Son yukselis (yesil) mum grubunun ilk mumunun OPEN seviyesinin
+    altinda kapanis aranir.
 
-    Kirmizi mumdan onceki son yesil mumun LOW'u = CISD seviyesi.
-    Fiyat bunun altina kapanirsa → giris.
+    Not: Tek mumluk yukselis grubu CISD referansi olarak kabul edilmez.
     """
     if len(df) < 3:
         return None
 
+    # CISD referansi, purge zamanindan once baslayan son mum grubunda da
+    # olabilecegi icin crt penceresinden itibaren tum 15M dizi kullanilir.
     work = df
-    if setup.purge_time:
-        purge_ts = pd.Timestamp(setup.purge_time)
-        if purge_ts.tzinfo is None:
-            purge_ts = purge_ts.tz_localize("UTC")
-        else:
-            purge_ts = purge_ts.tz_convert("UTC")
-        work = df[df.index >= purge_ts]
 
     if len(work) < 3:
         return None
 
     ref_time: Optional[pd.Timestamp] = None
     cisd_level: Optional[float] = None
+    bullish_group_start: Optional[int] = None
+    bullish_group_len = 0
 
-    for i in range(1, len(work)):
+    for i in range(len(work)):
         cur = work.iloc[i]
-        prev = work.iloc[i - 1]
+        cur_state = _candle_state(cur)
+        cur_is_bullish = cur_state == "bullish"
+        cur_is_bearish = cur_state == "bearish"
+        cur_is_doji = cur_state == "doji"
 
-        # Ilk gecerli CISD referansini sabitle:
-        # son bearish mumdan sonra gelen bullish mumun low'u.
-        if ref_time is None:
-            is_bullish = cur["close"] > cur["open"]
-            was_bearish = prev["close"] <= prev["open"]
-            if is_bullish and was_bearish:
-                ref_time = cur.name
-                cisd_level = float(cur["low"])
+        if cur_is_bullish:
+            if bullish_group_start is None:
+                bullish_group_start = i
+                bullish_group_len = 1
+            else:
+                bullish_group_len += 1
             continue
 
-        if cisd_level is not None and cur.name > ref_time and cur["close"] <= cisd_level:
+        # Doji mumlar trend blogunu bozmaz; CISD akisini etkilemesin.
+        if cur_is_doji:
+            continue
+
+        # Bullish grup bittiginde CISD referansini guncelle.
+        # Tek mumluk gruplar atlanir; onceki gecerli referans korunur.
+        if bullish_group_start is not None:
+            if bullish_group_len >= MIN_CISD_TREND_CANDLES:
+                first_bullish = work.iloc[bullish_group_start]
+                ref_time = first_bullish.name
+                cisd_level = float(first_bullish["open"])
+            bullish_group_start = None
+            bullish_group_len = 0
+
+        if (
+            ref_time is not None
+            and cisd_level is not None
+            and cur.name > ref_time
+            and (min_confirm_time is None or cur.name > min_confirm_time)
+            and cur_is_bearish
+            and float(cur["close"]) < cisd_level
+        ):
             entry = round(cisd_level, 8)
             sl = round(setup.purge_extreme, 8)
             tp = round(setup.key_level_low, 8)
@@ -506,7 +514,8 @@ def _check_bearish_cisd(
                 stop_loss=sl,
                 take_profit=tp,
                 invalidation_level=setup.invalidation_level,
-                cisd_time=ref_time.to_pydatetime(),
+                # Onay zamani, referans mum degil; kirilimi yapan mumdur.
+                cisd_time=cur.name.to_pydatetime(),
                 cisd_price=round(cisd_level, 8),
             )
 

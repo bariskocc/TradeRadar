@@ -14,7 +14,7 @@
             <!-- Header -->
             <div class="mb-6">
                 <h1 class="text-xl font-bold text-white">All Signals</h1>
-                <p class="text-sm text-gray-500 mt-0.5">CRT signal history</p>
+                <p class="text-sm text-gray-500 mt-0.5">Signal history</p>
             </div>
 
             <!-- Tabs -->
@@ -87,12 +87,12 @@
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">DATE (Start)</label>
+                        <label class="block text-xs text-gray-500 mb-1">ARRIVAL DATE (Start)</label>
                         <input type="date" name="date_from" value="{{ filters.date_from }}"
                             class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">DATE (End)</label>
+                        <label class="block text-xs text-gray-500 mb-1">ARRIVAL DATE (End)</label>
                         <input type="date" name="date_to" value="{{ filters.date_to }}"
                             class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
                     </div>
@@ -112,7 +112,7 @@
 
             <!-- Signals Table -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto">
-                <table class="w-full min-w-[1200px]">
+                <table class="w-full min-w-[1320px]">
                     <thead>
                         <tr class="border-b border-dark-600">
                             <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">SYMBOL</th>
@@ -123,9 +123,10 @@
                             <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">ENTRY</th>
                             <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">SL</th>
                             <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">TP</th>
-                            <th class="px-3 py-3 text-right text-xs font-semibold text-gray-500 tracking-wider">%50 INV.</th>
                             <th class="px-3 py-3 text-center text-xs font-semibold text-gray-500 tracking-wider">R:R</th>
-                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">DATE</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">SETUP BAR TIME</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">CONFIRMATION TIME</th>
+                            <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">SIGNAL ARRIVAL DATE</th>
                             <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 tracking-wider">STATUS</th>
                         </tr>
                     </thead>
@@ -133,7 +134,7 @@
                         {% for signal in signals %}
                         <tr class="hover:bg-dark-700/50 transition-colors">
                             <td class="px-3 py-3">
-                                <div class="text-sm font-medium text-white">{{ signal.symbol }}</div>
+                                <div class="text-sm font-medium text-white">{{ fmt_ui_symbol(signal.symbol, signal.market_type) }}</div>
                             </td>
                             <td class="px-3 py-3">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-dark-700 text-gray-300">
@@ -183,9 +184,6 @@
                             <td class="px-3 py-3 text-right text-xs font-mono text-green-400">
                                 {{ signal.take_profit|fmt_price }}
                             </td>
-                            <td class="px-3 py-3 text-right text-xs font-mono text-yellow-400">
-                                {{ signal.invalidation_level|fmt_price }}
-                            </td>
                             <td class="px-3 py-3 text-center">
                                 {% set rr = calc_rr_ratio(signal.entry_price, signal.stop_loss, signal.take_profit) %}
                                 {% if rr is not none %}
@@ -193,6 +191,12 @@
                                 {% else %}
                                 <span class="text-gray-600 text-xs">-</span>
                                 {% endif %}
+                            </td>
+                            <td class="px-3 py-3 text-xs text-gray-400">
+                                {{ signal.crt_bar_time|fmt_date_tsi }}
+                            </td>
+                            <td class="px-3 py-3 text-xs text-gray-400">
+                                {{ signal.cisd_time|fmt_date_tsi }}
                             </td>
                             <td class="px-3 py-3 text-xs text-gray-400">
                                 {{ signal.created_at|fmt_date_tsi }}
@@ -225,7 +229,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="12" class="px-4 py-12 text-center text-gray-500">
+                            <td colspan="13" class="px-4 py-12 text-center text-gray-500">
                                 {% if tab == 'active' %}
                                 No active signals.
                                 {% else %}

@@ -45,6 +45,17 @@ def _fmt_date_tsi(value):
     return tsi.strftime('%d.%m.%Y %H:%M')
 
 
+def _fmt_ui_symbol(symbol: str | None, market_type: str | None = None) -> str:
+    """UI'da sembol gorunumunu sadeleştir."""
+    if not symbol:
+        return "-"
+    sym = str(symbol)
+    market = (market_type or "").lower()
+    if sym.endswith("USDT.P") and (market == "crypto" or market == ""):
+        return sym[:-6]
+    return sym
+
+
 def _calc_rr_ratio(entry, sl, tp):
     """Potansiyel R:R oranı hesapla."""
     if not entry or not sl or not tp:
@@ -73,6 +84,7 @@ templates = Jinja2Templates(directory=BASE_DIR / "app" / "templates")
 templates.env.filters["fmt_price"] = _fmt_price
 templates.env.filters["fmt_date_tsi"] = _fmt_date_tsi
 templates.env.globals["calc_rr_ratio"] = _calc_rr_ratio
+templates.env.globals["fmt_ui_symbol"] = _fmt_ui_symbol
 
 
 # ──────────────────── Auth Routes ────────────────────
@@ -88,7 +100,7 @@ async def login_page(request: Request):
 @app.post("/login", response_class=HTMLResponse)
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
     if not verify_credentials(username, password):
-        return templates.TemplateResponse(request=request, name="login.html", context={"error": "Kullanıcı adı veya şifre hatalı"})
+        return templates.TemplateResponse(request=request, name="login.html", context={"error": "Invalid username or password"})
 
     token = create_access_token(data={"sub": username})
     response = RedirectResponse(url="/", status_code=303)
@@ -262,6 +274,7 @@ async def signals_page(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    arrival_date_col = Signal.created_at
     query = select(Signal).where(Signal.status != "pending_cisd")
 
     if tab == "active":
@@ -282,7 +295,7 @@ async def signals_page(
     if date_from:
         try:
             dt_from = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            query = query.where(Signal.created_at >= dt_from)
+            query = query.where(arrival_date_col >= dt_from)
         except ValueError:
             pass
     if date_to:
@@ -290,7 +303,7 @@ async def signals_page(
             dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59, tzinfo=timezone.utc
             )
-            query = query.where(Signal.created_at <= dt_to)
+            query = query.where(arrival_date_col <= dt_to)
         except ValueError:
             pass
 
@@ -306,7 +319,7 @@ async def signals_page(
         (Signal.status == "expired", 3),
         else_=4,
     )
-    query = query.order_by(status_priority.asc(), desc(Signal.created_at))
+    query = query.order_by(status_priority.asc(), desc(arrival_date_col))
     query = query.offset((page - 1) * ITEMS_PER_PAGE).limit(ITEMS_PER_PAGE)
     result = await db.execute(query)
     signals = result.scalars().all()
@@ -459,7 +472,7 @@ async def scanner_page(request: Request):
     total_count = 0
     for market, syms in SYMBOLS_BY_MARKET.items():
         exchange_id = EXCHANGE_PER_MARKET.get(market, "?")
-        display_syms = [to_display_symbol(s) for s in syms]
+        display_syms = [_fmt_ui_symbol(to_display_symbol(s), market) for s in syms]
         markets_info.append({
             "name": market.upper(),
             "exchange": exchange_id.capitalize(),
@@ -506,17 +519,22 @@ async def trigger_scan(request: Request, db: AsyncSession = Depends(get_db)):
             "closed": len(scan_result["closed"]),
             "breakeven": len(scan_result["breakeven"]),
             "setups": [
-                {"symbol": s.symbol, "direction": s.direction, "purge_type": s.purge_type}
+                {
+                    "symbol": _fmt_ui_symbol(s.symbol, getattr(s, "market_type", None)),
+                    "direction": s.direction,
+                    "purge_type": s.purge_type,
+                }
                 for s in scan_result["new_setups"]
             ],
             "active_signals": [
                 {
-                    "symbol": s.symbol, "direction": s.direction,
+                    "symbol": _fmt_ui_symbol(s.symbol, s.market_type),
+                    "direction": s.direction,
                     "entry": s.entry_price, "sl": s.stop_loss, "tp": s.take_profit,
                 }
                 for s in scan_result["activated"]
             ],
-            "breakeven_symbols": scan_result["breakeven"],
+            "breakeven_symbols": [_fmt_ui_symbol(sym, "crypto") for sym in scan_result["breakeven"]],
         })
     except Exception as e:
         log.exception("Scan failed")
@@ -593,11 +611,11 @@ async def telegram_test(request: Request):
     if not is_configured():
         return JSONResponse(content={
             "success": False,
-            "error": "Telegram token veya chat ID ayarlanmamış. .env dosyasını kontrol edin.",
+            "error": "Telegram token or chat ID is not configured. Check your .env file.",
         })
 
     ok = await send_test_message()
     return JSONResponse(content={
         "success": ok,
-        "error": None if ok else "Mesaj gönderilemedi. Token ve chat ID'yi kontrol edin.",
+        "error": None if ok else "Message could not be sent. Check your token and chat ID.",
     })

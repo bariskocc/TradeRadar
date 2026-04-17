@@ -19,7 +19,7 @@ SCAN_SCHEDULE = {
     "4h_candles": {
         "trigger": CronTrigger(minute=5, timezone="UTC"),
         "timeframe": "4h",
-        "description": "Her saat 5. dakikada",
+        "description": "Every hour at minute 5",
     },
 }
 
@@ -67,6 +67,9 @@ def stop_scheduler() -> None:
 
 
 def get_scheduler_status() -> dict:
+    legacy_name_map = {
+        "Her saat 5. dakikada": "Every hour at minute 5",
+    }
     jobs = []
     for job in scheduler.get_jobs():
         next_run = job.next_run_time
@@ -77,7 +80,7 @@ def get_scheduler_status() -> dict:
         )
         jobs.append({
             "id": job.id,
-            "name": job.name,
+            "name": legacy_name_map.get(job.name, job.name),
             "next_run": next_run_tsi,
         })
     return {

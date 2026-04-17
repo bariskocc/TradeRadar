@@ -1,9 +1,10 @@
-"""Market tarayıcı – multi-exchange, 4 aşamalı sinyal yönetimi.
+"""Market tarayıcı – multi-exchange, sinyal yönetimi.
 
-1. Yeni CRT setup tespiti (4H) → status: pending_cisd
-2. Bekleyen setup'larda CISD konfirmasyonu (15M) → status: active
-3. Aktif sinyallerde sadece TP/SL takibi → status: expired (result: win/loss)
-4. Expired (invalidated) sinyallerde breakeven kontrolü → fiyat entry'ye dönerse breakeven
+1. Yeni CRT setup tespiti (4H)
+2. CISD konfirmasyonu varsa DB'ye active yaz (pending kayit tutulmaz)
+3. Legacy pending setup kontrolu/temizligi
+4. Aktif sinyallerde sadece TP/SL takibi → status: expired (result: win/loss)
+5. Expired (invalidated) sinyallerde breakeven kontrolü → fiyat entry'ye dönerse breakeven
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +20,6 @@ from app.crt_engine import (
     CRTSetup,
     check_breakeven,
     check_cisd_confirmation,
-    check_tp_sl_hit,
     compute_htf_bias,
     detect_crt_setup,
 )
@@ -90,6 +91,144 @@ def _calc_planned_rr(entry: float | None, sl: float | None, tp: float | None) ->
     return round(reward / risk, 2)
 
 
+def _detect_tp_sl_hit_from_ohlcv(
+    df_15m,
+    direction: str,
+    take_profit: float | None,
+    stop_loss: float | None,
+) -> str | None:
+    """TP/SL ihlalini mum high/low ile kontrol et.
+
+    Not: Veri sağlayıcı yuvarlama farklılıklarında false hit üretmemek için
+    seviyeye eşitlik (==) hit sayılmaz; seviye net olarak aşılmalıdır.
+    """
+    if take_profit is None or stop_loss is None or df_15m is None or df_15m.empty:
+        return None
+
+    for _, row in df_15m.iterrows():
+        high = float(row["high"])
+        low = float(row["low"])
+
+        if direction == "LONG":
+            if high > take_profit:
+                return "hit_tp"
+            if low < stop_loss:
+                return "hit_sl"
+        else:
+            if low < take_profit:
+                return "hit_tp"
+            if high > stop_loss:
+                return "hit_sl"
+
+    return None
+
+
+def _evaluate_active_signal_with_breakeven(
+    df_15m,
+    *,
+    direction: str,
+    take_profit: float | None,
+    stop_loss: float | None,
+    entry_price: float | None,
+    invalidation_level: float | None,
+    reached_50pct: bool,
+) -> tuple[str | None, bool]:
+    """Aktif sinyalde TP/SL ve %50 sonrasi breakeven stop akisini degerlendir.
+
+    Returns:
+        (event, arm_now)
+        - event: "hit_tp" | "hit_sl" | "hit_be" | None
+        - arm_now: Bu scan icinde %50 gecilip stop'un entry'ye tasinmasi gerekli mi?
+    """
+    if (
+        take_profit is None
+        or stop_loss is None
+        or entry_price is None
+        or invalidation_level is None
+        or df_15m is None
+        or df_15m.empty
+    ):
+        return None, False
+
+    work = df_15m.sort_index()
+    initial_armed = bool(reached_50pct)
+
+    def _crosses_invalidation(high: float, low: float) -> bool:
+        if direction == "LONG":
+            return high > float(invalidation_level)
+        return low < float(invalidation_level)
+
+    def _hits_tp(high: float, low: float) -> bool:
+        if direction == "LONG":
+            return high > float(take_profit)
+        return low < float(take_profit)
+
+    def _hits_sl(high: float, low: float, sl_value: float) -> bool:
+        if direction == "LONG":
+            return low < sl_value
+        return high > sl_value
+
+    first_cross_idx = None
+    for idx, (_, row) in enumerate(work.iterrows()):
+        high = float(row["high"])
+        low = float(row["low"])
+        if _crosses_invalidation(high, low):
+            first_cross_idx = idx
+            break
+
+    # Daha once %50 gorulduyse ve bu pencerede tekrar ilk gecis de gorunuyorsa,
+    # breakeven stop'u o mumdan SONRA etkinlestirip gecmisi yanlis yorumlamayiz.
+    armed = initial_armed and first_cross_idx is None
+    arm_now = False
+
+    for idx, (_, row) in enumerate(work.iterrows()):
+        high = float(row["high"])
+        low = float(row["low"])
+
+        if _hits_tp(high, low):
+            return "hit_tp", arm_now
+
+        if armed:
+            if _hits_sl(high, low, float(entry_price)):
+                return "hit_be", arm_now
+            continue
+
+        if initial_armed:
+            if first_cross_idx is not None and idx >= first_cross_idx:
+                armed = True
+            continue
+
+        if _hits_sl(high, low, float(stop_loss)):
+            return "hit_sl", arm_now
+
+        if _crosses_invalidation(high, low):
+            armed = True
+            arm_now = True
+            # Breakeven stop ayni mumda degil, bir sonraki mumdan itibaren gecerlidir.
+            continue
+
+    return None, arm_now
+
+
+async def _is_setup_already_past_invalidation(
+    exchange: object,
+    symbol: str,
+    setup: CRTSetup,
+) -> bool:
+    """Yeni setup'ta fiyat %50 invalidation seviyesini gecmis mi?"""
+    try:
+        df_latest = await fetch_ohlcv(exchange, symbol, "15m", limit=3)
+        if df_latest is None or df_latest.empty:
+            return False
+        current_price = float(df_latest.iloc[-1]["close"])
+        inv = float(setup.invalidation_level)
+        if setup.direction == "LONG":
+            return current_price > inv
+        return current_price < inv
+    except Exception:
+        return False
+
+
 async def _persist_scan_log(
     session: AsyncSession,
     *,
@@ -134,7 +273,8 @@ async def run_scan(
     result = {"new_setups": [], "activated": [], "closed": [], "breakeven": []}
 
     try:
-        # ─── AŞAMA 1: Yeni CRT Setup Tespiti (4H) ───
+        # ─── AŞAMA 1: Yeni CRT Setup + CISD Onayi (4H + 15M) ───
+        stage1_activated: list[Signal] = []
         for market in market_types:
             symbols = SYMBOLS_BY_MARKET.get(market, [])
             exchange_id = EXCHANGE_PER_MARKET.get(market, "binance")
@@ -167,27 +307,105 @@ async def run_scan(
                         continue
                     if await _is_duplicate_setup(session, setup):
                         continue
+                    if await _is_setup_already_past_invalidation(exchange, symbol, setup):
+                        log.info(
+                            "SKIPPED (PAST %%50): %s %s current already beyond invalidation.",
+                            setup.symbol,
+                            setup.direction,
+                        )
+                        continue
+
+                    since_ms = None
+                    if setup.crt_bar_time:
+                        crt_ts = setup.crt_bar_time
+                        if crt_ts.tzinfo is None:
+                            crt_ts = crt_ts.replace(tzinfo=timezone.utc)
+                        since_ms = int((crt_ts - timedelta(minutes=30)).timestamp() * 1000)
+
+                    df_15m = await fetch_ohlcv(
+                        exchange,
+                        symbol,
+                        "15m",
+                        limit=200,
+                        since_ms=since_ms,
+                    )
+                    if df_15m is None or df_15m.empty:
+                        continue
+
+                    temp_setup = CRTSetup(
+                        symbol=setup.symbol,
+                        direction=setup.direction,
+                        purge_type=setup.purge_type,
+                        bias=setup.bias or "NEUTRAL",
+                        bias_score=int(setup.bias_score or 0),
+                        key_level_high=setup.key_level_high,
+                        key_level_low=setup.key_level_low,
+                        crt_bar_time=setup.crt_bar_time,
+                        purge_time=setup.purge_time,
+                        invalidation_level=setup.invalidation_level,
+                        purge_extreme=setup.purge_extreme,
+                        last_4h_high=setup.last_4h_high,
+                        last_4h_low=setup.last_4h_low,
+                        market_type=setup.market_type,
+                    )
+
+                    cisd = check_cisd_confirmation(df_15m, temp_setup)
+                    if cisd is None:
+                        log.info(
+                            "SKIPPED (NO CISD): %s %s setup not confirmed yet.",
+                            setup.symbol,
+                            setup.direction,
+                        )
+                        continue
+
+                    planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
+                    if planned_rr is None or planned_rr < MIN_RR_RATIO:
+                        log.info(
+                            "SKIPPED (LOW RR): %s %s → RR: %s (< %.2f)",
+                            setup.symbol,
+                            setup.direction,
+                            planned_rr,
+                            MIN_RR_RATIO,
+                        )
+                        continue
 
                     db_signal = _setup_to_db(setup)
+                    _apply_cisd(db_signal, cisd)
                     db_signal.htf_bias = htf_bias
                     session.add(db_signal)
+                    stage1_activated.append(db_signal)
                     result["new_setups"].append(setup)
-                    log.info("NEW SETUP: %s %s %s HTF:%s (pending CISD) [%s]",
-                             setup.symbol, setup.direction, setup.purge_type, htf_bias, exchange_id)
+                    result["activated"].append(db_signal)
+                    log.info(
+                        "NEW ACTIVE: %s %s %s HTF:%s Entry:%s SL:%s TP:%s RR:%.2f [%s]",
+                        setup.symbol,
+                        setup.direction,
+                        setup.purge_type,
+                        htf_bias,
+                        cisd.entry_price,
+                        cisd.stop_loss,
+                        cisd.take_profit,
+                        planned_rr or 0.0,
+                        exchange_id,
+                    )
 
                 except Exception as e:
                     log.warning("4H scan failed for %s on %s: %s", symbol, exchange_id, e)
 
         if result["new_setups"]:
             await session.commit()
+            if stage1_activated and tg_configured():
+                for sig in stage1_activated:
+                    await send_signal_active(sig)
 
-        # ─── AŞAMA 2: CISD Konfirmasyonu (15M) ───
+        # ─── AŞAMA 2: Legacy Pending CISD Konfirmasyonu (15M) ───
         pending = await session.execute(
             select(Signal).where(Signal.status == "pending_cisd")
         )
         pending_signals = pending.scalars().all()
 
         pending_changed = False
+        pending_activated: list[Signal] = []
         for sig in pending_signals:
             try:
                 ccxt_symbol, exchange_id = from_display_symbol(sig.symbol)
@@ -277,6 +495,7 @@ async def run_scan(
 
                     _apply_cisd(sig, cisd)
                     pending_changed = True
+                    pending_activated.append(sig)
                     result["activated"].append(sig)
                     log.info(
                         "CISD CONFIRMED: %s %s → Entry: %s, SL: %s, TP: %s, RR: %.2f [%s]",
@@ -290,8 +509,8 @@ async def run_scan(
 
         if pending_changed:
             await session.commit()
-            if result["activated"] and tg_configured():
-                for sig in result["activated"]:
+            if pending_activated and tg_configured():
+                for sig in pending_activated:
                     await send_signal_active(sig)
 
         # Pending CISD kayitlari UI/DB'de tutulmasin.
@@ -304,11 +523,12 @@ async def run_scan(
             await session.commit()
             log.info("PENDING CLEANUP: %d pending_cisd row deleted.", len(pending_ids))
 
-        # ─── AŞAMA 3: Aktif Sinyal Takibi (yalnizca TP/SL) ───
+        # ─── AŞAMA 3: Aktif Sinyal Takibi (TP/SL + %50 sonra breakeven stop) ───
         active = await session.execute(
             select(Signal).where(Signal.status == "active")
         )
         active_signals = active.scalars().all()
+        active_changed = False
 
         for sig in active_signals:
             try:
@@ -317,36 +537,86 @@ async def run_scan(
                 if not exchange:
                     continue
 
-                df_latest = await fetch_ohlcv(exchange, ccxt_symbol, "15m", limit=2)
+                since_ms = None
+                cisd_ts = None
+                if sig.cisd_time:
+                    cisd_ts = sig.cisd_time
+                    if cisd_ts.tzinfo is None:
+                        cisd_ts = cisd_ts.replace(tzinfo=timezone.utc)
+                    since_ms = int(cisd_ts.timestamp() * 1000)
+
+                df_latest = await fetch_ohlcv(
+                    exchange,
+                    ccxt_symbol,
+                    "15m",
+                    limit=500,
+                    since_ms=since_ms,
+                )
                 if df_latest.empty:
                     continue
+                if cisd_ts is not None:
+                    ts = pd.Timestamp(cisd_ts)
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize("UTC")
+                    else:
+                        ts = ts.tz_convert("UTC")
+                    # Entry, CISD onay mumu kapandiktan sonra kabul edilir.
+                    # Bu nedenle ayni mumun intrabar hareketi TP/SL'e dahil edilmez.
+                    df_latest = df_latest[df_latest.index > ts]
+                    if df_latest.empty:
+                        continue
 
-                current_price = float(df_latest.iloc[-1]["close"])
+                event, arm_now = _evaluate_active_signal_with_breakeven(
+                    df_latest,
+                    direction=sig.direction,
+                    take_profit=sig.take_profit,
+                    stop_loss=sig.stop_loss,
+                    entry_price=sig.entry_price,
+                    invalidation_level=sig.invalidation_level,
+                    reached_50pct=bool(sig.reached_50pct),
+                )
 
-                hit = check_tp_sl_hit(current_price, sig.direction, sig.take_profit, sig.stop_loss)
-                if hit:
+                if arm_now:
+                    sig.reached_50pct = True
+                    sig.stop_loss = sig.entry_price
+                    active_changed = True
+                    log.info(
+                        "BREAKEVEN ARMED: %s %s reached %%50, SL moved to entry %s",
+                        sig.symbol,
+                        sig.direction,
+                        sig.entry_price,
+                    )
+
+                if event:
                     sig.status = "expired"
-                    if hit == "hit_tp":
+                    if event == "hit_tp":
                         sig.result = "win"
                         risk = abs(sig.entry_price - sig.stop_loss)
                         reward = abs(sig.take_profit - sig.entry_price)
                         sig.rr_value = round(reward / risk, 2) if risk > 0 else 0
+                        result["closed"].append({"symbol": sig.symbol, "status": "expired", "result": sig.result})
+                    elif event == "hit_be":
+                        sig.status = "breakeven"
+                        sig.result = "breakeven"
+                        sig.rr_value = 0.0
+                        result["breakeven"].append(sig.symbol)
                     else:
                         sig.result = "loss"
                         sig.rr_value = -1.0
+                        result["closed"].append({"symbol": sig.symbol, "status": "expired", "result": sig.result})
 
                     if sig.cisd_time:
                         delta = datetime.now(timezone.utc) - sig.cisd_time
                         sig.duration_hours = round(delta.total_seconds() / 3600, 1)
 
-                    result["closed"].append({"symbol": sig.symbol, "status": "expired", "result": sig.result})
-                    log.info("EXPIRED (%s): %s %s (R:R %.2f)", hit.upper(), sig.symbol, sig.direction, sig.rr_value)
+                    active_changed = True
+                    log.info("CLOSED (%s): %s %s (R:R %.2f)", event.upper(), sig.symbol, sig.direction, sig.rr_value)
                     continue
 
             except Exception as e:
                 log.warning("Active signal check failed for %s: %s", sig.symbol, e)
 
-        if result["closed"]:
+        if result["closed"] or result["breakeven"] or active_changed:
             await session.commit()
 
         # ─── AŞAMA 4: Expired (invalidated) Sinyallerde Breakeven Kontrolü ───
