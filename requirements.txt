@@ -8,7 +8,6 @@ sqlalchemy
 aiosqlite
 python-dotenv
 httpx
-ccxt
+websockets
 pandas
 apscheduler
-yfinance

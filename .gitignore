@@ -9,3 +9,8 @@ venv/
 env/
 traderadar.db
 .cursor/
+*.log
+server.log
+tmp_*
+tmp_*.py
+tmp_*.json

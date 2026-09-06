@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - Radar{% endblock %}
+
+{% block body %}
+<div class="flex h-full">
+
+    {% set active_page = 'radar' %}
+    {% include 'sidebar.html' %}
+
+    <!-- Main Content -->
+    <main class="flex-1 overflow-auto">
+        <div class="p-6 max-w-none">
+            <!-- Header -->
+            <div class="mb-6 flex items-start justify-between">
+                <div>
+                    <h1 class="text-xl font-bold text-white">Radar</h1>
+                    <p class="text-sm text-gray-500 mt-0.5">Live view of what the system sees per symbol — {{ tf_label }}</p>
+                    <div class="flex items-center gap-1 mt-3">
+                        <a href="/radar?tf=4h" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '4h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">4H-15M</a>
+                        <a href="/radar?tf=1d" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '1d' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1D-1H</a>
+                        <a href="/radar?tf=1h" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '1h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1H-5M</a>
+                    </div>
+                </div>
+                <div class="text-right">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Page refresh</p>
+                    <p id="refresh-info" class="text-xs text-gray-400">Auto every 30s</p>
+                </div>
+            </div>
+
+            <!-- Status Cards -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">WebSocket</p>
+                    <div class="flex items-center gap-2">
+                        <span id="ws-dot" class="w-2 h-2 rounded-full bg-gray-500"></span>
+                        <span id="ws-status" class="text-sm font-medium text-white">-</span>
+                    </div>
+                    <p id="ws-last" class="text-[10px] text-gray-500 mt-1">last data: -</p>
+                </div>
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Last scan</p>
+                    <p id="last-update" class="text-sm font-medium text-white">-</p>
+                    <p id="sub-count" class="text-[10px] text-gray-500 mt-1">- subscriptions</p>
+                </div>
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Active setups</p>
+                    <p id="sum-setups" class="text-sm font-medium text-white">-</p>
+                    <p id="sum-potential" class="text-[10px] text-blue-400 mt-1">- potential</p>
+                </div>
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Waiting signals</p>
+                    <p id="sum-waiting" class="text-sm font-medium text-green-400">-</p>
+                    <p id="sum-idle" class="text-[10px] text-gray-500 mt-1">- no setup</p>
+                </div>
+            </div>
+
+            <!-- Radar Table -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto">
+                <div class="px-4 py-3 border-b border-dark-600 flex items-center justify-between">
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Symbol Radar</h3>
+                    <button onclick="loadRadar()" class="text-[11px] text-gray-400 hover:text-white flex items-center gap-1 transition">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                        Refresh
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full min-w-[1100px] text-sm">
+                        <thead>
+                            <tr class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-dark-600">
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Symbol</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Market</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Direction</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">1D Bias</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">1W Bias</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Score</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">SMT</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">PD Array</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">C2</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">IFVG</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">RR</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Status</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Updated</th>
+                            </tr>
+                        </thead>
+                        <tbody id="radar-body">
+                            <tr><td colspan="13" class="px-2 py-8 text-center text-gray-600">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </main>
+</div>
+
+<script>
+const COLOR_CLASSES = {
+    green:  "text-green-400 bg-green-400/10",
+    blue:   "text-accent-blue bg-accent-blue/10",
+    yellow: "text-yellow-400 bg-yellow-400/10",
+    orange: "text-orange-400 bg-orange-400/10",
+    red:    "text-red-400 bg-red-400/10",
+    purple: "text-accent-purple bg-accent-purple/10",
+    gray:   "text-gray-300 bg-dark-600",
+    dim:    "text-gray-500 bg-dark-700",
+};
+
+function dirBadge(dir) {
+    if (!dir) return '<span class="text-gray-600">-</span>';
+    const c = dir === 'LONG' ? 'text-green-400' : 'text-red-400';
+    return `<span class="${c} font-bold text-xs">${dir}</span>`;
+}
+
+function biasBadge(bias) {
+    if (!bias) return '<span class="text-gray-600">-</span>';
+    let c = 'text-gray-400';
+    if (bias === 'BULLISH') c = 'text-green-400';
+    else if (bias === 'BEARISH') c = 'text-red-400';
+    return `<span class="${c} text-xs">${bias}</span>`;
+}
+
+function smtBadge(smt) {
+    if (!smt) return '<span class="text-gray-600">-</span>';
+    const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : '15M');
+    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-purple bg-accent-purple/10" title="${ltf} SMT divergence: ${smt}">✓ ${smt}</span>`;
+}
+
+function pdBadge(pd) {
+    if (!pd) return '<span class="text-gray-600">-</span>';
+    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="PD array touched by the purge (C2) candle: ${pd}">${pd}</span>`;
+}
+
+function c2Badge(closed) {
+    if (closed === null || closed === undefined) return '<span class="text-gray-600">-</span>';
+    const htf = currentTf === '1h' ? '1H' : (currentTf === '1d' ? '1D' : '4H');
+    if (closed) {
+        return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-green-400 bg-green-500/15" title="Purge (C2) ${htf} candle is closed">Closed</span>`;
+    }
+    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-orange-400 bg-orange-500/15" title="Purge (C2) ${htf} candle is still open">Not closed</span>`;
+}
+
+function ifvgBadge(ifvg) {
+    if (!ifvg) return '<span class="text-gray-600">-</span>';
+    const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : '15M');
+    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-purple bg-accent-purple/10" title="${ltf} inverted FVG (open)">✓</span>`;
+}
+
+const currentTf = {{ tf|tojson }};
+
+async function loadRadar() {
+    try {
+        const res = await fetch('/api/radar?tf=' + encodeURIComponent(currentTf));
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // WS
+        const wsDot = document.getElementById('ws-dot');
+        const wsStatus = document.getElementById('ws-status');
+        if (data.ws.connected) {
+            wsDot.className = 'w-2 h-2 rounded-full bg-green-400 animate-pulse';
+            wsStatus.textContent = 'Connected';
+            wsStatus.className = 'text-sm font-medium text-green-400';
+        } else {
+            wsDot.className = 'w-2 h-2 rounded-full bg-red-400';
+            wsStatus.textContent = data.ws.running ? 'Connecting...' : 'Disconnected';
+            wsStatus.className = 'text-sm font-medium text-red-400';
+        }
+        document.getElementById('ws-last').textContent = 'last data: ' + (data.ws.last_message_at || '-');
+        document.getElementById('sub-count').textContent = (data.ws.subscription_count || 0) + ' subscriptions';
+        document.getElementById('last-update').textContent = data.last_update || '-';
+
+        // Summary
+        document.getElementById('sum-setups').textContent = data.summary.setups + ' / ' + data.summary.total;
+        document.getElementById('sum-potential').textContent = data.summary.potential + ' potential';
+        document.getElementById('sum-waiting').textContent = data.summary.waiting;
+        document.getElementById('sum-idle').textContent = data.summary.idle + ' no setup';
+
+        // Table
+        const body = document.getElementById('radar-body');
+        if (!data.symbols.length) {
+            body.innerHTML = '<tr><td colspan="13" class="px-2 py-8 text-center text-gray-600">No scan yet (first scan starts ~15s after startup).</td></tr>';
+        } else {
+            body.innerHTML = data.symbols.map(s => {
+                const badge = COLOR_CLASSES[s.color] || COLOR_CLASSES.gray;
+                const hideRr = s.state === 'no_setup' || s.state === 'no_data';
+                const rr = hideRr || s.rr === null || s.rr === undefined ? '-' : s.rr;
+                const scoreNum = (s.score !== null && s.score !== undefined) ? Number(s.score) : null;
+                const score = scoreNum === null || Number.isNaN(scoreNum)
+                    ? '-'
+                    : (scoreNum >= 11
+                        ? `<span class="text-accent-purple font-semibold">${scoreNum}/10</span> <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide text-accent-purple bg-accent-purple/10" title="Full confluence + SMT">Premium</span>`
+                        : `${scoreNum}`);
+                return `<tr class="border-b border-dark-700/50 hover:bg-dark-700/30 transition">
+                    <td class="px-2 py-2 font-medium text-white whitespace-nowrap">${s.symbol}</td>
+                    <td class="px-2 py-2 text-gray-500 text-xs whitespace-nowrap">${s.market || '-'}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${dirBadge(s.direction)}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${biasBadge(s.bias)}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${biasBadge(s.weekly_bias)}</td>
+                    <td class="px-2 py-2 text-gray-300 whitespace-nowrap">${score}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${smtBadge(s.smt)}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${pdBadge(s.pd)}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${c2Badge(s.c2_closed)}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${hideRr ? '<span class="text-gray-600">-</span>' : ifvgBadge(s.ifvg)}</td>
+                    <td class="px-2 py-2 text-gray-300 whitespace-nowrap">${rr}</td>
+                    <td class="px-2 py-2 whitespace-nowrap"><span class="px-2 py-0.5 rounded text-[11px] font-medium ${badge}">${s.label}</span></td>
+                    <td class="px-2 py-2 text-gray-500 text-xs whitespace-nowrap">${s.updated_at || '-'}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        const now = new Date().toLocaleTimeString('en-GB');
+        document.getElementById('refresh-info').textContent = 'Last refresh: ' + now;
+    } catch (e) {
+        // retry on next interval
+    }
+}
+
+loadRadar();
+setInterval(loadRadar, 30000);
+</script>
+{% endblock %}

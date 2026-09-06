@@ -1,276 +1,425 @@
-"""Piyasa veri katmani - ccxt + yfinance OHLCV cekimi.
+"""Piyasa veri katmani - BingX OHLCV cekimi (REST bootstrap + WS icin sembol haritasi).
 
-Desteklenen kaynaklar:
-  - Binance (ccxt): Crypto perpetual (USDT-M)
-  - Yahoo Finance:  Index + FX + Metal
+Tek kaynak: BingX USDT-M Perpetual Swap.
+  - Kripto:  BTC-USDT, ETH-USDT, ...
+  - Metal:   NCCOGOLD2USD (XAUUSD), NCCOXAG2USD (XAGUSD)
+  - Petrol:  NCCO1OILWTI2USD (OILWTI), NCCO1OILBRENT2USD (OILBRENT)
+  - Endeks:  NCSINASDAQ1002USD (US100), NCSISP5002USD (US500)
+  - Forex:   NCFXEUR2USD (EURUSD), ...
+
+Forex/endeks/metal/petrol enstrumanlari piyasa saatlerine tabidir; seans disinda
+veri gelmeyebilir. Hafta sonu yalnizca kripto aktiftir.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from datetime import datetime, timezone
 
-import ccxt.async_support as ccxt
+import httpx
 import pandas as pd
-import yfinance as yf
+
+from app.config import BINGX_REST_BASE
 
 log = logging.getLogger(__name__)
 
-# ──────────────────── Market → Exchange mapping ────────────────────
+# ──────────────────── Sembol listeleri (BingX) ────────────────────
 
-EXCHANGE_PER_MARKET: dict[str, str] = {
-    "crypto": "binance",
-    "metal":  "yfinance",
-    "index":  "yfinance",
-    "fx":     "yfinance",
-}
+# Kripto listesi 7 gun (haftaici + haftasonu) aktiftir.
+_CRYPTO: list[str] = [
+    # ── Ust sira (piyasa degeri + hacim liderleri) ──
+    "BTC-USDT", "ETH-USDT",
+    "BNB-USDT", "SOL-USDT", "XRP-USDT", "TRX-USDT", "DOGE-USDT",
+    "HYPE-USDT", "ADA-USDT",
+    # ── Layer-1 / Layer-2 ──
+    "AVAX-USDT", "DOT-USDT", "LTC-USDT", "BCH-USDT", "ATOM-USDT",
+    "XLM-USDT", "APT-USDT", "ARB-USDT", "OP-USDT", "SUI-USDT",
+    "NEAR-USDT", "SEI-USDT", "TIA-USDT", "ETC-USDT",
+    "KAS-USDT", "HBAR-USDT", "ICP-USDT",
+    # ── DeFi / RWA / altyapi ──
+    "LINK-USDT", "UNI-USDT", "AAVE-USDT", "ENA-USDT", "ONDO-USDT",
+    "PENDLE-USDT", "LDO-USDT", "CRV-USDT", "INJ-USDT",
+    "RUNE-USDT", "FIL-USDT", "POL-USDT", "JUP-USDT",
+    "DYDX-USDT",
+    # ── AI ──
+    "TAO-USDT", "FET-USDT", "RENDER-USDT", "WLD-USDT",
+    # ── Gizlilik ──
+    "ZEC-USDT", "XMR-USDT",
+    # ── Meme ──
+    "1000PEPE-USDT",
+]
+
+# 1D-1H CRT: kripto yalnizca BTC + ETH (alt yok).
+_D1H_CRYPTO: list[str] = ["BTC-USDT", "ETH-USDT"]
 
 SYMBOLS_BY_MARKET: dict[str, list[str]] = {
-    "crypto": [
-        "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT",
-        "DOGE/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT", "DOT/USDT:USDT",
-        "1000SHIB/USDT:USDT", "TRX/USDT:USDT", "NEAR/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
-        "OP/USDT:USDT", "ARB/USDT:USDT", "INJ/USDT:USDT", "FTM/USDT:USDT", "1000PEPE/USDT:USDT",
-        "WIF/USDT:USDT", "FET/USDT:USDT", "ONDO/USDT:USDT", "RENDER/USDT:USDT", "TIA/USDT:USDT",
-        "SEI/USDT:USDT", "AAVE/USDT:USDT", "UNI/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
-        "FIL/USDT:USDT", "ATOM/USDT:USDT", "1000BONK/USDT:USDT", "ETC/USDT:USDT", "ENA/USDT:USDT",
-        "1000FLOKI/USDT:USDT",
-    ],
+    "crypto": _CRYPTO,
     "metal": [
-        "GC=F",                # Gold futures
-        "SI=F",                # Silver futures
+        "NCCOGOLD2USD-USDT",       # Gold  (XAUUSD)
+        "NCCOXAG2USD-USDT",        # Silver (XAGUSD)
+    ],
+    "oil": [
+        "NCCO1OILWTI2USD-USDT",    # WTI Crude (OILWTI)
+        "NCCO1OILBRENT2USD-USDT",  # Brent Crude (OILBRENT)
     ],
     "index": [
-        "^NDX",                # Nasdaq 100 (US100)
-        "^GSPC",               # S&P 500 (US500)
+        "NCSINASDAQ1002USD-USDT",  # Nasdaq 100 (US100)
+        "NCSISP5002USD-USDT",      # S&P 500 (US500)
     ],
-    # Populer ve gorece korelasyonu dusuk 10 FX paritesi
-    # (EURUSD varsa GBPUSD alinmiyor gibi):
     "fx": [
-        "EURUSD=X",
-        "GBPUSD=X",
-        "USDJPY=X",
-        "AUDUSD=X",
-        "USDCAD=X",
-        "USDCHF=X",
-        "NZDUSD=X",
-        "EURJPY=X",
-        "GBPJPY=X",
-        "AUDJPY=X",
-        "CADJPY=X",
+        "NCFXEUR2USD-USDT",        # EURUSD
+        "NCFXGBP2USD-USDT",        # GBPUSD
+        "NCFXUSD2JPY-USDT",        # USDJPY
+        "NCFXAUD2USD-USDT",        # AUDUSD
+        "NCFXUSD2CAD-USDT",        # USDCAD
+        "NCFXUSD2CHF-USDT",        # USDCHF
+        "NCFXNZD2USD-USDT",        # NZDUSD
+        "NCFXEUR2JPY-USDT",        # EURJPY
+        "NCFXGBP2JPY-USDT",        # GBPJPY
+        "NCFXAUD2JPY-USDT",        # AUDJPY
+        "NCFXCAD2JPY-USDT",        # CADJPY
+        "NCFXNZD2JPY-USDT",        # NZDJPY
+        "NCFXEUR2GBP-USDT",        # EURGBP
+        "NCFXEUR2CHF-USDT",        # EURCHF
+        "NCFXEUR2CAD-USDT",        # EURCAD
+        "NCFXGBP2AUD-USDT",        # GBPAUD
+        "NCFXGBP2CHF-USDT",        # GBPCHF
+        "NCFXNZD2CAD-USDT",        # NZDCAD
     ],
 }
-_CRYPTO_SYMBOL_SET = set(SYMBOLS_BY_MARKET["crypto"])
+_CRYPTO_SYMBOL_SET = set(_CRYPTO)
 
-# ccxt symbol → temiz gösterim adı
+# BingX ham sembol → temiz gosterim adi (DB/UI)
+# NOT: 1000x carpanli meme kontratlari (1000PEPE/1000SHIB/1000BONK) BingX
+# vadelide bu adlarla islem gorur; ozel eslemesi YOKTUR ki gosterimde de
+# gercek vadeli ticker korunsun (or. "1000PEPEUSDT.P"). Spot adiyla
+# ("PEPEUSDT") gosterilirse vadelide olmayan bir sembolle karistirilir.
 DISPLAY_NAMES: dict[str, str] = {
-    "1000SHIB/USDT:USDT": "SHIBUSDT",
-    "1000PEPE/USDT:USDT": "PEPEUSDT",
-    "GC=F": "XAUUSD",
-    "SI=F": "XAGUSD",
-    "^NDX": "US100",
-    "^GSPC": "US500",
-    "EURUSD=X": "EURUSD",
-    "GBPUSD=X": "GBPUSD",
-    "USDJPY=X": "USDJPY",
-    "AUDUSD=X": "AUDUSD",
-    "USDCAD=X": "USDCAD",
-    "USDCHF=X": "USDCHF",
-    "NZDUSD=X": "NZDUSD",
-    "EURJPY=X": "EURJPY",
-    "GBPJPY=X": "GBPJPY",
-    "AUDJPY=X": "AUDJPY",
-    "CADJPY=X": "CADJPY",
+    # Metal
+    "NCCOGOLD2USD-USDT": "XAUUSD",
+    "NCCOXAG2USD-USDT": "XAGUSD",
+    # Petrol
+    "NCCO1OILWTI2USD-USDT": "OILWTI",
+    "NCCO1OILBRENT2USD-USDT": "OILBRENT",
+    # Endeks
+    "NCSINASDAQ1002USD-USDT": "US100",
+    "NCSISP5002USD-USDT": "US500",
+    # Forex
+    "NCFXEUR2USD-USDT": "EURUSD",
+    "NCFXGBP2USD-USDT": "GBPUSD",
+    "NCFXUSD2JPY-USDT": "USDJPY",
+    "NCFXAUD2USD-USDT": "AUDUSD",
+    "NCFXUSD2CAD-USDT": "USDCAD",
+    "NCFXUSD2CHF-USDT": "USDCHF",
+    "NCFXNZD2USD-USDT": "NZDUSD",
+    "NCFXEUR2JPY-USDT": "EURJPY",
+    "NCFXGBP2JPY-USDT": "GBPJPY",
+    "NCFXAUD2JPY-USDT": "AUDJPY",
+    "NCFXCAD2JPY-USDT": "CADJPY",
+    "NCFXNZD2JPY-USDT": "NZDJPY",
+    "NCFXEUR2GBP-USDT": "EURGBP",
+    "NCFXEUR2CHF-USDT": "EURCHF",
+    "NCFXEUR2CAD-USDT": "EURCAD",
+    "NCFXGBP2AUD-USDT": "GBPAUD",
+    "NCFXGBP2CHF-USDT": "GBPCHF",
+    "NCFXNZD2CAD-USDT": "NZDCAD",
 }
 
-# DB'deki temiz isimden → ccxt sembolüne geri dönüş
-_REVERSE_DISPLAY: dict[str, tuple[str, str]] = {}
+# Her sembolun ait oldugu market
+MARKET_BY_SYMBOL: dict[str, str] = {}
 for _market, _symbols in SYMBOLS_BY_MARKET.items():
-    _exc = EXCHANGE_PER_MARKET[_market]
     for _sym in _symbols:
-        _db_name = DISPLAY_NAMES.get(_sym, _sym.replace("/", "").replace(":USDT", ""))
-        if _market == "crypto" and not _db_name.endswith(".P"):
-            _db_name = f"{_db_name}.P"
-        _REVERSE_DISPLAY[_db_name] = (_sym, _exc)
+        MARKET_BY_SYMBOL[_sym] = _market
+
+
+# ──────────────────── SMT korelasyon haritasi ────────────────────
+# SMT (Smart Money Technique) divergence icin POZITIF korele parite ciftleri.
+# Ikisi de ayni yone hareket etmesi beklenir; biri yeni tepe/dip yaparken
+# digeri yapamiyorsa divergence vardir. Asagidaki ciftler cift yonlu
+# (a->b ve b->a). Kripto: BTC <-> ETH ozel cift; DIGER TUM ALTLAR -> BTC
+# (bkz. correlated_symbol). Alt->BTC eslemesi BTC'nin ETH referansini
+# ezmemek icin tek yonlu tutulur.
+_SMT_BTC = "BTC-USDT"
+_SMT_PAIRS: list[tuple[str, str]] = [
+    (_SMT_BTC, "ETH-USDT"),                                # kripto majors
+    ("NCSINASDAQ1002USD-USDT", "NCSISP5002USD-USDT"),      # US100 <-> US500
+    ("NCCO1OILWTI2USD-USDT", "NCCO1OILBRENT2USD-USDT"),    # OILWTI <-> OILBRENT
+    ("NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"),             # XAUUSD <-> XAGUSD
+    ("NCFXEUR2USD-USDT", "NCFXGBP2USD-USDT"),              # EURUSD <-> GBPUSD
+    ("NCFXAUD2USD-USDT", "NCFXNZD2USD-USDT"),              # AUDUSD <-> NZDUSD
+    ("NCFXEUR2JPY-USDT", "NCFXGBP2JPY-USDT"),              # EURJPY <-> GBPJPY
+    ("NCFXAUD2JPY-USDT", "NCFXNZD2JPY-USDT"),              # AUDJPY <-> NZDJPY (risk-on JPY)
+    ("NCFXUSD2JPY-USDT", "NCFXUSD2CHF-USDT"),              # USDJPY <-> USDCHF (USD gucu)
+    ("NCFXEUR2CHF-USDT", "NCFXGBP2CHF-USDT"),              # EURCHF <-> GBPCHF (CHF quote)
+]
+
+SMT_CORRELATION: dict[str, str] = {}
+for _a, _b in _SMT_PAIRS:
+    SMT_CORRELATION[_a] = _b
+    SMT_CORRELATION[_b] = _a
+
+
+def correlated_symbol(bingx_symbol: str) -> str | None:
+    """SMT icin korele parite.
+
+    - Acik ciftler (BTC<->ETH, FX/metal/endeks/petrol): SMT_CORRELATION
+    - Diger tum kripto altlar: BTC (tek yon; BTC tarafinda ETH kalir)
+    - Eslesme yoksa None
+    """
+    if bingx_symbol in SMT_CORRELATION:
+        return SMT_CORRELATION[bingx_symbol]
+    if bingx_symbol in _CRYPTO_SYMBOL_SET and bingx_symbol != _SMT_BTC:
+        return _SMT_BTC
+    return None
 
 
 def to_display_symbol(raw_symbol: str) -> str:
-    """Kaynak sembolunu DB/UI adina cevir."""
+    """BingX ham sembolunu DB/UI adina cevir."""
     if raw_symbol in DISPLAY_NAMES:
         display = DISPLAY_NAMES[raw_symbol]
     else:
-        display = raw_symbol.replace("/", "").replace(":USDT", "").replace("=X", "")
-    # Binance kripto perpetual pariteleri UI/DB'de ".P" ile gosterilir.
+        # Kripto: "BTC-USDT" → "BTCUSDT"
+        display = raw_symbol.replace("-", "")
+    # Kripto perpetual pariteleri UI/DB'de ".P" ile gosterilir.
     if raw_symbol in _CRYPTO_SYMBOL_SET and not display.endswith(".P"):
         display = f"{display}.P"
     return display
 
 
+# DB'deki temiz isimden → (BingX sembolu, market) geri donus
+_REVERSE_DISPLAY: dict[str, tuple[str, str]] = {}
+for _market, _symbols in SYMBOLS_BY_MARKET.items():
+    for _sym in _symbols:
+        _REVERSE_DISPLAY[to_display_symbol(_sym)] = (_sym, _market)
+
+
 def from_display_symbol(db_symbol: str) -> tuple[str, str]:
-    """DB sembolünden (ccxt_symbol, exchange_id) döndür."""
+    """DB sembolunden (bingx_symbol, market) dondur."""
     if db_symbol in _REVERSE_DISPLAY:
         return _REVERSE_DISPLAY[db_symbol]
+    # Bilinmeyen kripto: "BTCUSDT.P" → "BTC-USDT"
     normalized = db_symbol.upper().strip()
     if normalized.endswith(".P"):
         normalized = normalized[:-2]
     if normalized.endswith("USDT"):
-        return normalized.replace("USDT", "/USDT:USDT"), "binance"
-    return normalized, "binance"
+        base = normalized[:-4]
+        return f"{base}-USDT", "crypto"
+    return normalized, "crypto"
 
 
-# ──────────────────── Exchange factory ────────────────────
+def market_of(bingx_symbol: str) -> str:
+    return MARKET_BY_SYMBOL.get(bingx_symbol, "crypto")
 
-_EXCHANGE_CONFIGS: dict[str, dict] = {
-    "binance": {
-        "enableRateLimit": True,
-        "options": {"defaultType": "future"},
-    },
-    "bybit": {
-        "enableRateLimit": True,
-        "options": {"defaultType": "swap"},
-    },
+
+# ──────────────────── Gun bazli aktif market secimi ────────────────────
+
+
+def is_weekend() -> bool:
+    return datetime.now(timezone.utc).weekday() >= 5
+
+
+def get_active_markets() -> dict[str, list[str]]:
+    """Gun bazli aktif market ve sembol listesini dondur (BingX sembolleri).
+
+    Kripto: 7 gun (haftaici + haftasonu) tum coinlerle aktif.
+    FX / metal / endeks / petrol: yalnizca haftaici (Pzt-Cum) aktif;
+    bu piyasalar hafta sonu kapali oldugundan veri akmaz.
+    """
+    active: dict[str, list[str]] = {"crypto": _CRYPTO}
+    if not is_weekend():
+        active["metal"] = SYMBOLS_BY_MARKET["metal"]
+        active["oil"] = SYMBOLS_BY_MARKET["oil"]
+        active["index"] = SYMBOLS_BY_MARKET["index"]
+        active["fx"] = SYMBOLS_BY_MARKET["fx"]
+    return active
+
+
+def get_active_symbols_flat() -> list[str]:
+    """Gun bazli aktif tum BingX sembollerini tek listede dondur."""
+    result: list[str] = []
+    for syms in get_active_markets().values():
+        result.extend(syms)
+    return result
+
+
+def get_d1h_markets() -> dict[str, list[str]]:
+    """1D-1H CRT evreni: kripto yalnizca BTC+ETH; global marketler 4H ile ayni.
+
+    Hafta sonu yalnizca BTC ve ETH (FX/metal/endeks/petrol kapali).
+    """
+    active: dict[str, list[str]] = {"crypto": list(_D1H_CRYPTO)}
+    if not is_weekend():
+        active["metal"] = SYMBOLS_BY_MARKET["metal"]
+        active["oil"] = SYMBOLS_BY_MARKET["oil"]
+        active["index"] = SYMBOLS_BY_MARKET["index"]
+        active["fx"] = SYMBOLS_BY_MARKET["fx"]
+    return active
+
+
+def get_d1h_symbols_flat() -> list[str]:
+    """1D-1H CRT icin gun bazli BingX sembolleri."""
+    result: list[str] = []
+    for syms in get_d1h_markets().values():
+        result.extend(syms)
+    return result
+
+
+_D1H_ALL: set[str] = set(_D1H_CRYPTO)
+for _m in ("metal", "oil", "index", "fx"):
+    _D1H_ALL.update(SYMBOLS_BY_MARKET[_m])
+
+
+def is_d1h_symbol(bingx_symbol: str) -> bool:
+    return bingx_symbol in _D1H_ALL
+
+
+# 1H-5M CRT: XAU, EURUSD, Nasdaq (US100), BTC.
+# SMT esleri CRT degil; 5M abone edilir (XAG, GBPUSD, US500, ETH).
+_H1_CRT: list[str] = [
+    "NCCOGOLD2USD-USDT",       # XAUUSD
+    "NCFXEUR2USD-USDT",        # EURUSD
+    "NCSINASDAQ1002USD-USDT",  # US100
+    "BTC-USDT",
+]
+_H1_CRT_SET = set(_H1_CRT)
+_H1_SMT_EXTRA: list[str] = [
+    "NCCOXAG2USD-USDT",        # XAU SMT
+    "NCFXGBP2USD-USDT",        # EUR SMT
+    "NCSISP5002USD-USDT",      # US100 SMT
+    "ETH-USDT",                # BTC SMT
+]
+
+
+def _h1_open_now(bingx_symbol: str) -> bool:
+    """FX/metal/endeks hafta sonu kapali; kripto 7 gun."""
+    if not is_weekend():
+        return True
+    return MARKET_BY_SYMBOL.get(bingx_symbol, "crypto") == "crypto"
+
+
+def get_h1_symbols_flat() -> list[str]:
+    """1H-5M CRT evreni. Hafta sonu yalnizca BTC."""
+    return [s for s in _H1_CRT if _h1_open_now(s)]
+
+
+def get_h1_5m_symbols() -> list[str]:
+    """5M WS/bootstrap: CRT + SMT esleri. Hafta sonu BTC+ETH."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in _H1_CRT + _H1_SMT_EXTRA:
+        if not _h1_open_now(s) or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def is_h1_symbol(bingx_symbol: str) -> bool:
+    return bingx_symbol in _H1_CRT_SET
+
+
+def get_h1_markets() -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for s in get_h1_symbols_flat():
+        result.setdefault(market_of(s), []).append(s)
+    return result
+
+
+# ──────────────────── Timeframe eslemesi ────────────────────
+
+# Uygulama timeframe'i → BingX interval (native destekli)
+_TIMEFRAME_MAP: dict[str, str] = {
+    "5m": "5m",
+    "15m": "15m",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
 }
 
 
-async def create_exchange(exchange_id: str = "binance") -> ccxt.Exchange:
-    exchange_cls = getattr(ccxt, exchange_id)
-    config = _EXCHANGE_CONFIGS.get(exchange_id, {"enableRateLimit": True})
-    exchange: ccxt.Exchange = exchange_cls(config)
-    return exchange
+def to_bingx_interval(timeframe: str) -> str:
+    if timeframe not in _TIMEFRAME_MAP:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return _TIMEFRAME_MAP[timeframe]
 
 
-async def create_exchanges() -> dict[str, object]:
-    """Her kaynak için bir instance oluştur."""
-    needed = set(EXCHANGE_PER_MARKET.values())
-    exchanges: dict[str, object] = {}
-    for eid in needed:
-        if eid == "yfinance":
-            exchanges[eid] = {"provider": "yfinance"}
-            continue
-        exchanges[eid] = await create_exchange(eid)
-    return exchanges
+# ──────────────────── OHLCV (REST bootstrap) ────────────────────
+
+_KLINES_PATH = "/openApi/swap/v3/quote/klines"
 
 
-async def close_exchanges(exchanges: dict[str, object]) -> None:
-    for exc in exchanges.values():
-        if isinstance(exc, dict):
-            continue
-        try:
-            await exc.close()
-        except Exception:
-            pass
+def _klines_to_df(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
+    records = []
+    for r in rows:
+        records.append({
+            "timestamp": pd.to_datetime(int(r["time"]), unit="ms", utc=True),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r.get("volume", 0.0)),
+        })
+    df = pd.DataFrame(records)
+    df.set_index("timestamp", inplace=True)
+    df.sort_index(inplace=True)
+    # Ayni timestamp tekrar gelirse sonuncuyu koru.
+    df = df[~df.index.duplicated(keep="last")]
+    return df
 
-async def close_exchange(exchange: ccxt.Exchange) -> None:
-    await exchange.close()
-
-
-# ──────────────────── OHLCV data ────────────────────
 
 async def fetch_ohlcv(
-    exchange: object,
     symbol: str,
     timeframe: str = "4h",
     limit: int = 50,
     since_ms: int | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> pd.DataFrame:
-    if isinstance(exchange, dict) and exchange.get("provider") == "yfinance":
-        return await _fetch_yfinance_ohlcv(symbol, timeframe, limit, since_ms)
+    """BingX REST ile OHLCV cek (bootstrap / reconciliation icin).
 
-    raw = await exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df.set_index("timestamp", inplace=True)
-    return df
+    `symbol` BingX ham sembolu (or. "BTC-USDT", "NCFXEUR2USD-USDT").
+    """
+    interval = to_bingx_interval(timeframe)
+    params: dict[str, object] = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": max(1, min(int(limit), 1000)),
+    }
+    if since_ms is not None:
+        params["startTime"] = int(since_ms)
 
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0)
+    try:
+        resp = await client.get(_KLINES_PATH, params=params)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as e:
+        log.warning("BingX kline fetch failed for %s %s: %s", symbol, timeframe, e)
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    finally:
+        if owns_client:
+            await client.aclose()
 
-def _normalize_yf_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+    if payload.get("code") not in (0, None):
+        log.warning("BingX kline error %s for %s: %s",
+                    payload.get("code"), symbol, payload.get("msg"))
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
-    if isinstance(df.columns, pd.MultiIndex):
-        # yfinance bazi surumlerde multi-index donebilir
-        df.columns = df.columns.get_level_values(0)
-
-    rename_map = {
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Volume": "volume",
-    }
-    df = df.rename(columns=rename_map)
-    keep = ["open", "high", "low", "close", "volume"]
-    df = df[[c for c in keep if c in df.columns]].copy()
-    if "volume" not in df.columns:
-        df["volume"] = 0.0
-
-    idx = pd.to_datetime(df.index, utc=True)
-    df.index = idx
-    return df[keep].dropna(subset=["open", "high", "low", "close"])
-
-
-def _resample_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
-    if df_1h.empty:
-        return df_1h
-
-    # FX/Index tarafinda 4H mumlarin 01/05/09/... UTC eksenine hizalanmasi
-    out = df_1h.resample("4h", origin="start_day", offset="1h").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    })
-    return out.dropna(subset=["open", "high", "low", "close"])
-
-
-async def _fetch_yfinance_ohlcv(
-    symbol: str,
-    timeframe: str,
-    limit: int,
-    since_ms: int | None,
-) -> pd.DataFrame:
-    if timeframe == "4h":
-        interval = "60m"
-        period = "60d"
-    elif timeframe == "15m":
-        interval = "15m"
-        period = "60d"
-    elif timeframe == "1d":
-        interval = "1d"
-        period = "1y"
-    else:
-        raise ValueError(f"Unsupported yfinance timeframe: {timeframe}")
-
-    def _download() -> pd.DataFrame:
-        return yf.download(
-            tickers=symbol,
-            interval=interval,
-            period=period,
-            progress=False,
-            auto_adjust=False,
-            threads=False,
-        )
-
-    raw = await asyncio.to_thread(_download)
-    df = _normalize_yf_df(raw)
-    if timeframe == "4h":
-        df = _resample_4h(df)
-
-    if since_ms is not None and not df.empty:
-        since_ts = pd.to_datetime(since_ms, unit="ms", utc=True)
-        df = df[df.index >= since_ts]
-
+    rows = payload.get("data") or []
+    df = _klines_to_df(rows)
     if limit > 0 and not df.empty:
         df = df.tail(limit)
     return df
 
 
 def get_all_symbols_flat() -> list[str]:
-    """UI'da gösterim için tüm display sembollerini döndür."""
+    """UI'da gosterim icin tum display sembollerini dondur."""
     result = []
-    for market, symbols in SYMBOLS_BY_MARKET.items():
+    for symbols in SYMBOLS_BY_MARKET.values():
         for sym in symbols:
             result.append(to_display_symbol(sym))
     return result

@@ -14,7 +14,12 @@
             <!-- Header -->
             <div class="mb-6">
                 <h1 class="text-xl font-bold text-white">Dashboard</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Signal performance summary</p>
+                <p class="text-sm text-gray-500 mt-0.5">Signal performance summary — {{ tf_label }}</p>
+            </div>
+            <div class="flex items-center gap-1 mb-6">
+                <a href="/?tf=4h" class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tf == '4h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">4H-15M</a>
+                <a href="/?tf=1d" class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tf == '1d' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1D-1H</a>
+                <a href="/?tf=1h" class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tf == '1h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1H-5M</a>
             </div>
 
             <!-- Split Dashboard: Crypto vs Global Markets -->
@@ -69,7 +74,7 @@
                 <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
                     <div class="mb-3">
                         <h2 class="text-sm font-bold text-white">{{ global_markets_label }}</h2>
-                        <p class="text-xs text-gray-500">FX + Index + Metal stats</p>
+                        <p class="text-xs text-gray-500">FX + Index + Metal + Oil stats</p>
                     </div>
                     <div class="grid grid-cols-4 gap-3">
                         <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
