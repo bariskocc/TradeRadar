@@ -4,7 +4,10 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import DATABASE_URL
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+_ENGINE_KW: dict = {"echo": False}
+if "sqlite" in (DATABASE_URL or ""):
+    _ENGINE_KW["connect_args"] = {"timeout": 30}
+engine = create_async_engine(DATABASE_URL, **_ENGINE_KW)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -47,6 +50,10 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _apply_column_migrations(conn)
+        if "sqlite" in (DATABASE_URL or ""):
+            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+            await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
 
 
 async def get_db():

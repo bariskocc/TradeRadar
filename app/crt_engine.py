@@ -40,7 +40,7 @@ CISD_STRONG_CLOSE_PCT = 0.0006
 CISD_STRONG_CLOSE_RANGE_MULT = 0.30
 CISD_MARGIN_LOOKBACK = 20
 # Purge rejection wick: fitil / CRT range esigi (kalite skoru)
-PURGE_WICK_SCORE_PCT = 0.15
+PURGE_WICK_SCORE_PCT = 0.10
 _PD_MAJOR_LABELS = frozenset({"PDH", "PDL", "PWH", "PWL"})
 _PD_MONTHLY_LABELS = frozenset({"PMH", "PML"})
 _PD_STRUCT_LABELS = frozenset({"FVG", "OB"})

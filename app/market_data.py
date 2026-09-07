@@ -357,6 +357,7 @@ class BingXMarketData:
                 while not self._closed_queue.empty():
                     symbol, tf = self._closed_queue.get_nowait()
                     await scanner.on_candle_closed(symbol, tf, self.store)
+                    await asyncio.sleep(0)
 
                 # Sonra forming fiyat guncellemeleri (coalesced).
                 if self._pending_price:
@@ -364,6 +365,7 @@ class BingXMarketData:
                     self._pending_price = {}
                     for (symbol, ltf), candle in pending.items():
                         await scanner.on_price_update(symbol, candle, self.store, ltf=ltf)
+                        await asyncio.sleep(0)
 
                 await asyncio.sleep(0.2)
             except asyncio.CancelledError:

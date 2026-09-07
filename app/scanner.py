@@ -19,6 +19,7 @@ run_scan() ise manuel tetikleme / REST mutabakati icin ayni mantigi calistirir.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -854,6 +855,37 @@ def _planned_rr(entry: float, initial_sl: float, take_profit: float) -> float:
 # ──────────────────── Veri yukleme ────────────────────
 
 
+def _copy_df(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    return df.copy()
+
+
+async def _cpu(fn, /, *args, **kwargs):
+    """Pandas/CRT hesaplarini event loop disinda calistir."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, str, str]:
+    """(structure, daily, weekly)."""
+    if df_1d is None or df_1d.empty:
+        return "NEUTRAL", "NEUTRAL", "NEUTRAL"
+    structure = daily = weekly = "NEUTRAL"
+    try:
+        structure = compute_htf_bias(df_1d)
+    except Exception:
+        pass
+    try:
+        daily = compute_daily_bias(df_1d)
+    except Exception:
+        pass
+    try:
+        weekly = compute_weekly_bias(df_1d)
+    except Exception:
+        pass
+    return structure, daily, weekly
+
+
 async def _load_frames(
     bingx_symbol: str,
     store: object | None,
@@ -863,11 +895,11 @@ async def _load_frames(
     frames: dict[str, pd.DataFrame] = {}
 
     if store is not None:
-        frames["4h"] = store.get_df(bingx_symbol, "4h")
-        frames["15m"] = store.get_df(bingx_symbol, "15m")
-        frames["1d"] = store.get_df(bingx_symbol, "1d")
-        frames["1h"] = store.get_df(bingx_symbol, "1h")
-        frames["5m"] = store.get_df(bingx_symbol, "5m")
+        frames["4h"] = _copy_df(store.get_df(bingx_symbol, "4h"))
+        frames["15m"] = _copy_df(store.get_df(bingx_symbol, "15m"))
+        frames["1d"] = _copy_df(store.get_df(bingx_symbol, "1d"))
+        frames["1h"] = _copy_df(store.get_df(bingx_symbol, "1h"))
+        frames["5m"] = _copy_df(store.get_df(bingx_symbol, "5m"))
     else:
         frames["4h"] = await fetch_ohlcv(bingx_symbol, "4h", limit=BOOTSTRAP_LIMITS["4h"], client=client)
         frames["15m"] = await fetch_ohlcv(bingx_symbol, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client)
@@ -890,7 +922,7 @@ async def _load_corr_ltf(
     df: pd.DataFrame | None = None
     if store is not None:
         try:
-            df = store.get_df(corr_symbol, ltf)
+            df = _copy_df(store.get_df(corr_symbol, ltf))
         except Exception:
             df = None
     if (df is None or df.empty) and client is not None:
@@ -919,8 +951,10 @@ async def _apply_smt_bonus(
     corr_ltf = await _load_corr_ltf(corr, store, client, ltf=ltf)
     if corr_ltf is None or corr_ltf.empty:
         return False
-    if not check_smt_divergence(
-        df_ltf, corr_ltf, setup.direction, setup.purge_time, window_hours=window_hours,
+    if not await _cpu(
+        check_smt_divergence,
+        df_ltf, corr_ltf, setup.direction, setup.purge_time,
+        window_hours=window_hours,
     ):
         return False
 
@@ -971,31 +1005,16 @@ async def detect_and_create_waiting(
         _radar("no_data")
         return None
 
-    weekly_bias = "NEUTRAL"
-    structure_bias = "NEUTRAL"
-    if df_1d is not None and not df_1d.empty:
-        try:
-            structure_bias = compute_htf_bias(df_1d)
-        except Exception:
-            structure_bias = "NEUTRAL"
-        try:
-            htf_bias = compute_daily_bias(df_1d)
-        except Exception:
-            htf_bias = "NEUTRAL"
-        try:
-            weekly_bias = compute_weekly_bias(df_1d)
-        except Exception:
-            weekly_bias = "NEUTRAL"
-    else:
-        htf_bias = "NEUTRAL"
+    structure_bias, htf_bias, weekly_bias = await _cpu(_htf_biases, df_1d)
 
     filter_bias = htf_bias
 
     existing_pending = await _get_pending_signal(session, display_sym, strategy)
 
-    setup = detect_crt_setup(
-        df_htf, display_sym, market, htf_bias, df_1d=df_1d,
-        timeframe=strategy, df_ltf=df_ltf,
+    setup = await _cpu(
+        detect_crt_setup,
+        df_htf, display_sym, market, htf_bias,
+        df_1d=df_1d, timeframe=strategy, df_ltf=df_ltf,
     )
     if setup is None:
         if existing_pending is not None:
@@ -1004,7 +1023,7 @@ async def detect_and_create_waiting(
         return None
 
     _radar_base = _radar
-    preview = _preview_trade_levels(setup, df_ltf, cfg["c2_hours"])
+    preview = await _cpu(_preview_trade_levels, setup, df_ltf, cfg["c2_hours"])
 
     def _radar(state: str, **kwargs):
         kwargs.setdefault("c2_closed", bool(setup.c2_closed))
@@ -1066,7 +1085,8 @@ async def detect_and_create_waiting(
         and open_sig.entry_filled_time is not None
         and existing_pending is None
     ):
-        q_fill = _quality_score_asof(
+        q_fill = await _cpu(
+            _quality_score_asof,
             df_htf, df_ltf, df_1d, setup.symbol, market, strategy,
             _as_utc(open_sig.entry_filled_time), filter_bias,
         )
@@ -1140,7 +1160,7 @@ async def detect_and_create_waiting(
                    smt=setup.smt_pair, pd=setup.pd_array)
         return None
 
-    cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=cfg["c2_hours"])
+    cisd = await _cpu(check_cisd_confirmation, df_ltf, setup, c2_hours=cfg["c2_hours"])
     if cisd is None:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "no_levels")
@@ -1151,7 +1171,7 @@ async def detect_and_create_waiting(
         return None
 
     min_rr = _min_rr_for_market(setup.market_type)
-    cisd, planned_rr = _maybe_ifvg_entry(cisd, setup, df_ltf)
+    cisd, planned_rr = await _cpu(_maybe_ifvg_entry, cisd, setup, df_ltf)
     if planned_rr is None or planned_rr < min_rr:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "low_rr")
@@ -1241,7 +1261,8 @@ async def detect_and_create_waiting(
             cisd.stop_loss, cisd.take_profit, cisd.cisd_time,
         )
         if fill_ts is not None:
-            q_at_fill = _quality_score_asof(
+            q_at_fill = await _cpu(
+                _quality_score_asof,
                 df_htf, df_ltf, df_1d, setup.symbol, market, strategy,
                 fill_ts, filter_bias,
             )
@@ -1992,6 +2013,7 @@ async def run_scan(
                         if (strategy, disp) not in _RADAR:
                             _set_radar(disp, market_of(bingx_symbol), "no_data", strategy=strategy)
                         log.warning("scan failed for %s %s: %s", strategy, bingx_symbol, e)
+                    await asyncio.sleep(0)
 
         log.info(
             "Scan complete - %d waiting, %d activated, %d closed, %d breakeven.",

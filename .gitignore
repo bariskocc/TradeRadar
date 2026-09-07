@@ -8,9 +8,12 @@ __pycache__/
 venv/
 env/
 traderadar.db
+traderadar.db-wal
+traderadar.db-shm
 .cursor/
 *.log
 server.log
 tmp_*
 tmp_*.py
 tmp_*.json
+tools/
