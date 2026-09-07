@@ -267,6 +267,16 @@ async def _count_direction_cluster(
 # Fiyat guncellemelerinde her sembol icin gereksiz DB sorgusu yapmamak icin,
 # waiting_entry/active sinyali olan display sembolleri bellekte tutariz.
 _OPEN_SYMBOLS: set[tuple[str, str]] = set()
+_CREATE_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _create_lock(display_symbol: str, strategy: str) -> asyncio.Lock:
+    key = (display_symbol, strategy)
+    lock = _CREATE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CREATE_LOCKS[key] = lock
+    return lock
 
 
 async def refresh_open_symbols(session: AsyncSession) -> None:
@@ -992,11 +1002,34 @@ async def detect_and_create_waiting(
     df_htf = frames.get(htf_key)
     df_ltf = frames.get(ltf_key)
     df_1d = frames.get("1d")
-    df_4h = df_htf
-    df_15m = df_ltf
 
     market = market_of(bingx_symbol)
     display_sym = to_display_symbol(bingx_symbol)
+    async with _create_lock(display_sym, strategy):
+        return await _detect_and_create_waiting_locked(
+            session, bingx_symbol, frames, store, client, strategy,
+            cfg, htf_key, ltf_key, df_htf, df_ltf, df_1d, market, display_sym,
+        )
+
+
+async def _detect_and_create_waiting_locked(
+    session: AsyncSession,
+    bingx_symbol: str,
+    frames: dict[str, pd.DataFrame],
+    store: object | None,
+    client: object | None,
+    strategy: str,
+    cfg: dict,
+    htf_key: str,
+    ltf_key: str,
+    df_htf,
+    df_ltf,
+    df_1d,
+    market: str,
+    display_sym: str,
+) -> Signal | None:
+    df_4h = df_htf
+    df_15m = df_ltf
 
     def _radar(state: str, **kwargs):
         _set_radar(display_sym, market, state, strategy=strategy, **kwargs)

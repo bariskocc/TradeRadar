@@ -244,8 +244,8 @@
                                     Closed
                                 </span>
                                 {% else %}
-                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-orange-500/15 text-orange-400" title="Purge (C2) {{ '1H' if tf == '1h' else '1D' if tf == '1d' else '4H' }} candle is still open">
-                                    Open
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-400" title="Purge (C2) {{ '1H' if tf == '1h' else '1D' if tf == '1d' else '4H' }} candle is still open">
+                                    Not closed
                                 </span>
                                 {% endif %}
                             </td>
