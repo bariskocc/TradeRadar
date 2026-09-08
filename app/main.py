@@ -112,6 +112,7 @@ def _tf_filter(tf: str):
 # Radar state code -> display (label / color / sort rank)
 RADAR_STATE_META = {
     "waiting":        {"label": "Signal opened (waiting)",   "color": "green",  "rank": 0},
+    "c2_open":        {"label": "Waiting for C2 close",       "color": "blue",   "rank": 1},
     "no_cisd":        {"label": "Waiting for MSS",            "color": "blue",   "rank": 1},
     "low_rr":         {"label": "Low RR",                     "color": "yellow", "rank": 2},
     "tight_stop":     {"label": "Stop too tight (LTF range)", "color": "yellow", "rank": 3},
@@ -768,7 +769,7 @@ async def api_radar(request: Request):
         "total": len(symbols),
         "waiting": cnt.get("waiting", 0),
         "potential": (
-            cnt.get("no_cisd", 0) + cnt.get("low_rr", 0) + cnt.get("missed", 0)
+            cnt.get("no_cisd", 0) + cnt.get("c2_open", 0) + cnt.get("low_rr", 0) + cnt.get("missed", 0)
             + cnt.get("invalidated", 0)  # + cnt.get("same_color", 0)  # eski hard filter
             + cnt.get("tight_stop", 0) + cnt.get("bias_mismatch", 0)
             + cnt.get("cluster_limit", 0)
@@ -776,7 +777,7 @@ async def api_radar(request: Request):
             + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0)
         ),
         "setups": sum(cnt.get(k, 0) for k in (
-            "waiting", "no_cisd", "low_rr", "missed", "invalidated",
+            "waiting", "c2_open", "no_cisd", "low_rr", "missed", "invalidated",
             # "same_color",  # eski hard filter
             "tight_stop", "bias_mismatch", "cluster_limit", "low_quality",
             "has_open", "duplicate", "corr_open", "stale", "same_bar_sl",

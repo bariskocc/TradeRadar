@@ -25,6 +25,10 @@ MAX_RANGE_ATR_RATIO = 3.0
 PURGE_THRESHOLD_PCT = 0.0005
 REVERSAL_BODY_PCT = 0.25
 CRT_PURGE_SEARCH = 3  # C1'den sonra purge/C2 aramak icin bakilacak mum sayisi (1-3)
+# C1 aday penceresi: son HTF bar (forming) haric geriye. 4H/1D: 4 aday.
+# 1H: daha genis; 04:00 C1 + 07:00 C2 ogleden sonra da radarda kalsin.
+CRT_C1_LOOKBACK = 5
+CRT_C1_LOOKBACK_1H = 8
 DOJI_BODY_RATIO_MAX = 0.10
 # Waiting/pending iptal: purge tarafından CRT range'in bu kadarı (LTF close).
 CRT_INVALIDATION_FRAC = 0.60
@@ -68,6 +72,7 @@ class CRTSetup:
     pd_array: Optional[str] = None  # Purge (C2) mumunun dokundugu PD array etiketleri (or. 'PDH,FVG')
     c2_closed: bool = False  # Purge (C2) mumu KAPANMIS mi? (forming/kapanmamis ise False)
     color_opposite: bool = True  # CRT/purge farkli renk; ayni renk skorda baz -1 (hard filter degil)
+    target_consumed: bool = False  # C1 hedef tarafi sonradan supuruldu; sinyal yok, radar gosterir
 
 
 @dataclass
@@ -518,11 +523,14 @@ def _calc_live_setup_bias(
     ifvg_score = 0
     if df_ltf is not None and not df_ltf.empty:
         purge_ts = df_4h.index[purge_idx]
+        tf = (timeframe or "4h").lower()
+        c2_h = 24.0 if tf == "1d" else (1.0 if tf == "1h" else 4.0)
         if detect_ltf_ifvg(
             df_ltf, direction, purge_ts,
             crt_low=float(crt["low"]),
             crt_high=float(crt["high"]),
             crt_bar_time=df_4h.index[crt_idx],
+            c2_hours=c2_h,
         ) is not None:
             ifvg_score = 1
 
@@ -934,6 +942,7 @@ def detect_ltf_ifvg(
     crt_low: float | None = None,
     crt_high: float | None = None,
     crt_bar_time=None,
+    c2_hours: float | None = None,
 ) -> Optional[IFVGZone]:
     """CRT C1 icindeki, invert edilmis, henuz mitigate edilmemis LTF IFVG.
 
@@ -941,7 +950,8 @@ def detect_ltf_ifvg(
     SHORT: bull FVG invert (close zone alti) + bolge acik.
     FVG, CRT mumunun acilisindan itibaren aranir; mid C1 high-low icinde
     olmali. Birden fazla aday varsa en son (guncel) acik bolge secilir.
-    Inversion purge sonrasi; mitigasyon kapanmis LTF ekstrem ile.
+    Inversion purge sonrasi. C2 HTF mumu icindeki LTF ekstrem mitigasyon
+    sayilmaz (purge fitili IFVG'yi iptal etmez).
     """
     if df_ltf is None or df_ltf.empty or purge_time is None:
         return None
@@ -996,8 +1006,14 @@ def detect_ltf_ifvg(
                 break
         if inverted_k is None:
             continue
+        c2_end = None
+        if c2_hours is not None and c2_hours > 0 and purge_ts is not None:
+            c2_end = purge_ts + pd.Timedelta(hours=float(c2_hours))
         mitigated = False
         for k in range(inverted_k + 1, n):
+            bar_ts = work.index[k]
+            if c2_end is not None and bar_ts < c2_end:
+                continue
             if want_bear and float(work.iloc[k]["low"]) < z_lo:
                 mitigated = True
                 break
@@ -1028,10 +1044,11 @@ def detect_crt_setup(
 ) -> Optional[CRTSetup]:
     """4H verisinde CRT pattern tespit et; en buyuk gecerli C1'i sec.
 
-    Aday C1 mumlari: len-2 .. len-5. Her aday icin purge/C2, C1'den SONRAKI
-    CRT_PURGE_SEARCH (1-3) mum icinde aranir. Boylece purge hemen bir sonraki mum
-    olmasa bile (ornegin araya kucuk bir "inside bar" girse de) daha BUYUK olan
-    asil range mumu C1 olarak yakalanabilir.
+    Aday C1 mumlari: 4H/1D icin len-2 .. len-5, 1H icin len-2 .. len-8.
+    Her aday icin purge/C2, C1'den SONRAKI CRT_PURGE_SEARCH (1-3) mum icinde
+    aranir. Boylece purge hemen bir sonraki mum olmasa bile (ornegin araya
+    kucuk bir "inside bar" girse de) daha BUYUK olan asil range mumu C1
+    olarak yakalanabilir.
 
     Purge/C2: C1'in bir tarafini (SHORT'ta high, LONG'ta low) esik kadar asip ayni
     mumda C1 araligina GERI kapatan ilk mum. Bir mum tarafi asip geri kapatmadan
@@ -1068,7 +1085,8 @@ def detect_crt_setup(
     # (range, volume, live_i, setup) — en sonda en buyuk range'li aday secilir.
     candidates: list[tuple[float, float, int, CRTSetup]] = []
 
-    for live_i in (n - 2, n - 3, n - 4, n - 5):
+    c1_back = CRT_C1_LOOKBACK_1H if (timeframe or "").lower() == "1h" else CRT_C1_LOOKBACK
+    for live_i in range(n - 2, n - c1_back - 1, -1):
         if live_i < 1 or live_i + 1 >= n:
             continue
 
@@ -1133,11 +1151,11 @@ def detect_crt_setup(
         if direction is None or purge_row is None or purge_j is None:
             continue
 
-        # Hedef taraf zaten tuketilmis mi?
-        if direction == "SHORT" and float(after["low"].min()) < crt_low:
-            continue
-        if direction == "LONG" and float(after["high"].max()) > crt_high:
-            continue
+        # Hedef taraf tuketilmis olsa da aday kalir (radar); sinyal acilmaz.
+        target_consumed = (
+            (direction == "SHORT" and float(after["low"].min()) < crt_low)
+            or (direction == "LONG" and float(after["high"].max()) > crt_high)
+        )
 
         pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j)
         bias, score = _calc_live_setup_bias(
@@ -1174,13 +1192,17 @@ def detect_crt_setup(
             c2_closed=purge_j < (len(df_4h) - 1),
             color_opposite=not same_color,
             timeframe=timeframe,
+            target_consumed=target_consumed,
         )))
 
     if not candidates:
         return None
 
-    # En buyuk range; esitlikte hacimce buyuk, sonra en guncel (buyuk live_i).
-    best = max(candidates, key=lambda c: (c[0], c[1], c[2]))
+    # Once hedefi duran aday; sonra en buyuk range, hacim, en guncel.
+    best = max(
+        candidates,
+        key=lambda c: (0 if c[3].target_consumed else 1, c[0], c[1], c[2]),
+    )
     return best[3]
 
 
@@ -1447,7 +1469,7 @@ def _check_bullish_cisd(
     """15M bullish onay: swing vs bearish blog (CISD), tek aday (genis stop).
 
     - Dip = 4H C2 purge araligindaki 15M min low (C2 sonrasi yeni LL sayilmaz).
-    - CISD: C2 ekstreminden ONCEKI ardisik bearish blogun ILK acilisi.
+    - CISD: C2 ekstreminden ONCEKI dusus blogunun ILK acilisi (doji blogu bolmez).
     - Swing: o dipten ONCEKI son swing high (esit tepe platosu dahil).
     - Entry + kirilim + ref = daha genis stop veren aday.
     """
@@ -1467,16 +1489,16 @@ def _check_bullish_cisd(
         low_pos_in_cand = int(cand["low"].values.argmin())
         low_iloc = (len(work) - len(cand)) + low_pos_in_cand
 
-    # Purge/uc mumunu HARIC tutarak, ondan ONCEKI ardisik bearish (kirmizi)
-    # blogu bul. low_iloc - 1'den geriye dogru: once son kirmizi mumu bul,
-    # sonra o blogun basina kadar geriye yuru.
+    # Purge/uc mumunu HARIC tutarak, ondan ONCEKI dusus blogunu bul.
+    # Doji blogu BOLMEZ (GBPCHF: 06:00/07:00 TSI doji 04:00 ilk mumu kesiyordu).
+    # Zit govde (yesil) blogu bitirir.
     run_end = low_iloc - 1
     while run_end >= 0 and not _is_bear_body(work.iloc[run_end]):
         run_end -= 1
     if run_end < 0:
         return None
     run_start = run_end
-    while run_start - 1 >= 0 and _is_bear_body(work.iloc[run_start - 1]):
+    while run_start - 1 >= 0 and not _is_bull_body(work.iloc[run_start - 1]):
         run_start -= 1
 
     # Serinin ILK (en yuksek acilisli) mumunun acilisi = CISD seviyesi.
@@ -1533,7 +1555,7 @@ def _check_bearish_cisd(
     """15M bearish onay: swing vs bullish blog (CISD), tek aday (genis stop).
 
     - Tepe = 4H C2 purge araligindaki 15M max high (C2 sonrasi yeni HH sayilmaz).
-    - CISD: C2 ekstreminden ONCEKI ardisik bullish blogun ILK acilisi.
+    - CISD: C2 ekstreminden ONCEKI yukselis blogunun ILK acilisi (doji blogu bolmez).
     - Swing: o tepeden ONCEKI son swing low (esit dip platosu dahil).
     - Entry + kirilim + ref = daha genis stop veren aday.
     """
@@ -1553,16 +1575,16 @@ def _check_bearish_cisd(
         high_pos_in_cand = int(cand["high"].values.argmax())
         high_iloc = (len(work) - len(cand)) + high_pos_in_cand
 
-    # Purge/uc mumunu HARIC tutarak, ondan ONCEKI ardisik bullish (yesil)
-    # blogu bul. high_iloc - 1'den geriye dogru: once son yesil mumu bul,
-    # sonra o blogun basina kadar geriye yuru.
+    # Purge/uc mumunu HARIC tutarak, ondan ONCEKI yukselis blogunu bul.
+    # Doji blogu BOLMEZ (GBPCHF: 06:00/07:00 TSI doji 04:00 ilk mumu kesiyordu).
+    # Zit govde (kirmizi) blogu bitirir.
     run_end = high_iloc - 1
     while run_end >= 0 and not _is_bull_body(work.iloc[run_end]):
         run_end -= 1
     if run_end < 0:
         return None
     run_start = run_end
-    while run_start - 1 >= 0 and _is_bull_body(work.iloc[run_start - 1]):
+    while run_start - 1 >= 0 and not _is_bear_body(work.iloc[run_start - 1]):
         run_start -= 1
 
     # Serinin ILK (en dusuk acilisli) mumunun acilisi = CISD seviyesi.

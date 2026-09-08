@@ -140,6 +140,25 @@ class BingXMarketData:
                             self._rebuild_forming_1d(sym)
                     except Exception as e:
                         log.warning("1H bootstrap basarisiz %s: %s", sym, e)
+            # 4H evreninde olmayan 1D-1H pariteleri (FX/XAG/oil/index)
+            fourh_set = set(self._symbols)
+            for sym in self._d1h_symbols:
+                if sym not in fourh_set:
+                    try:
+                        df1d = await fetch_ohlcv(sym, "1d", limit=BOOTSTRAP_LIMITS["1d"], client=client)
+                        if not df1d.empty:
+                            self.store.set_df(sym, "1d", df1d)
+                    except Exception as e:
+                        log.warning("1D bootstrap basarisiz %s: %s", sym, e)
+                    try:
+                        df1h = await fetch_ohlcv(sym, "1h", limit=BOOTSTRAP_LIMITS["1h"], client=client)
+                        if not df1h.empty:
+                            self.store.set_df(sym, "1h", df1h)
+                            last_ms = int(df1h.index[-1].value // 1_000_000)
+                            self._last_ts[(sym, "1h")] = last_ms
+                            self._rebuild_forming_1d(sym)
+                    except Exception as e:
+                        log.warning("1H bootstrap basarisiz %s: %s", sym, e)
             for sym in self._h1_5m_symbols:
                 if sym in h1_5m_set:
                     try:
@@ -179,9 +198,10 @@ class BingXMarketData:
         self.store.upsert_candle(symbol, "1d", day_ms, row)
 
     async def _refresh_1d(self) -> None:
-        """Gunluk (1D) veriyi tum semboller icin yeniden cek (gunde bir kez)."""
+        """Gunluk (1D) veriyi 4H + 1D-1H evreni icin yeniden cek (gunde bir kez)."""
+        refresh_syms = list(dict.fromkeys([*self._symbols, *self._d1h_symbols]))
         async with httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0) as client:
-            for sym in self._symbols:
+            for sym in refresh_syms:
                 try:
                     df1d = await fetch_ohlcv(sym, "1d", limit=BOOTSTRAP_LIMITS["1d"], client=client)
                     if not df1d.empty:
@@ -189,7 +209,7 @@ class BingXMarketData:
                 except Exception as e:
                     log.warning("1D yenileme basarisiz %s: %s", sym, e)
         self._last_1d_day = datetime.now(timezone.utc).date()
-        log.info("1D veri yenilendi (%d sembol).", len(self._symbols))
+        log.info("1D veri yenilendi (%d sembol).", len(refresh_syms))
 
     # ──────────────── WS yasam dongusu ────────────────
 

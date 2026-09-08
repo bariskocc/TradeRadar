@@ -219,18 +219,17 @@ def is_weekend() -> bool:
 
 
 def get_active_markets() -> dict[str, list[str]]:
-    """Gun bazli aktif market ve sembol listesini dondur (BingX sembolleri).
+    """4H-15M evreni: kripto (7 gun) + XAUUSD (haftaici).
 
-    Kripto: 7 gun (haftaici + haftasonu) tum coinlerle aktif.
-    FX / metal / endeks / petrol: yalnizca haftaici (Pzt-Cum) aktif;
-    bu piyasalar hafta sonu kapali oldugundan veri akmaz.
+    Diger metal/fx/oil/index 4H'te kapali; 1D-1H `get_d1h_markets` ile acik.
     """
     active: dict[str, list[str]] = {"crypto": _CRYPTO}
     if not is_weekend():
-        active["metal"] = SYMBOLS_BY_MARKET["metal"]
-        active["oil"] = SYMBOLS_BY_MARKET["oil"]
-        active["index"] = SYMBOLS_BY_MARKET["index"]
-        active["fx"] = SYMBOLS_BY_MARKET["fx"]
+        active["metal"] = ["NCCOGOLD2USD-USDT"]  # XAUUSD
+        # active["metal"] = SYMBOLS_BY_MARKET["metal"]  # XAGUSD
+        # active["oil"] = SYMBOLS_BY_MARKET["oil"]
+        # active["index"] = SYMBOLS_BY_MARKET["index"]
+        # active["fx"] = SYMBOLS_BY_MARKET["fx"]
     return active
 
 

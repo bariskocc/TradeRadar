@@ -27,8 +27,8 @@ class Signal(Base):
     initial_stop_loss = Column(Float, nullable=True)       # Fill anindaki orijinal SL (R hesabi)
     invalidation_level = Column(Float, nullable=True)      # CRT mumunun %60'i (bilgi; BE artik buna bagli degil)
     reached_50pct = Column(Boolean, default=False)         # Legacy: BE korumasi aktif
-    partial_hit = Column(Boolean, default=False)           # TP yolunun %50'si: SL->entry (BE)
-    trail_active = Column(Boolean, default=False)          # TP yolunun %75'i sonrasi MFE trail SL
+    partial_hit = Column(Boolean, default=False)           # BE: +1R'de SL->entry
+    trail_active = Column(Boolean, default=False)          # TP%50 veya +1.5R sonrasi MFE trail
     mfe_price = Column(Float, nullable=True)               # Aktifken en iyi lehine fiyat
 
     # CISD confirmation (15M)

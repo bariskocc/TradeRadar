@@ -1,15 +1,18 @@
 """Market tarayici - BingX WebSocket event-driven, limit-order giris modeli.
 
 Sinyal yasam dongusu:
-1. 4H CRT setup + 15M kapanista MSS (swing ustu/alti CLOSE) -> waiting_entry
+1. HTF CRT + LTF MSS kapanisi -> waiting_entry
+   (C2 kapanmadan waiting/fill YOK; pending + radar `c2_open`)
 2. CISD/MSS onay MUMUNDAN SONRAKI LTF mumu KAPANDIGINDA entry retest
    (mum SL'ye gitmediyse) -> active. Forming mumda fill YOK.
 3. Entry dolmadan CRT mumunun %60'i gecilirse waiting silinir (invalidated)
 4. Entry dolmadan TP'ye ulasilirsa waiting silinir (missed)
 5. Entry dolmadan SL gecilirse waiting silinir (past_sl)
 6. Retest aninda skor < 7 ise sonradan fill/active yok (firsat kacti)
-7. Aktif: TP/SL + tek kademe koruma:
-   - TP yolunun %75'i -> trail acilir (max(1R, 1.3x LTF range) MFE arkasi)
+7. Aktif koruma:
+   - 4H: +1R -> BE; trail TP %50 veya +1.5R
+   - 1D/1H: trail TP yolunun %75'i (1s/5m gurultusu 1R'yi yer)
+   - Trail SL, MFE'yi yapan LTF mumunda kesilmez (karsi iğne)
 
 Olaylar market_data (BingX WS) tarafindan tetiklenir:
   - on_candle_closed -> setup / CISD + kapanis fill
@@ -22,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pandas as pd
 from sqlalchemy import delete, func, select
@@ -72,10 +76,13 @@ REQUIRE_HTF_BIAS_ALIGN = True
 
 # Ayni yonde asiri yigin: YALNIZCA CRYPTO. Acik (waiting/active) + son N saatte
 # olusan kripto sinyal limiti. FX/metal/oil/index bu limite dahil degil.
-MAX_SAME_DIRECTION_OPEN = 3
-MAX_SAME_DIRECTION_RECENT = 5
+# BTC/ETH majors cluster'a takilmaz; her kosulda waiting/active olabilir.
+# Altlar: ayni yonde en fazla 2 (STRATEGY_CFG). BTC/ETH muaf.
+MAX_SAME_DIRECTION_OPEN = 2
+MAX_SAME_DIRECTION_RECENT = 2
 CLUSTER_WINDOW_HOURS = 4
 CLUSTER_MARKET = "crypto"
+CLUSTER_EXEMPT_SYMBOLS = frozenset({"BTCUSDT.P", "ETHUSDT.P"})
 
 # Entry'ye gore minimum stop mesafesi (%). Simdilik tum marketlerde kapali.
 # Tekrar acmak icin ilgili satiri geri al (fx / index).
@@ -92,6 +99,21 @@ MIN_FILL_BAR_AGE_SEC_1H = 20
 STRATEGY_4H = "4h"
 STRATEGY_1D = "1d"
 STRATEGY_1H = "1h"
+# Ortak risk kapilari: C2 kapanmadan fill yok, SL tamponu, +1R BE, erken trail.
+_RISK_GATES = {
+    "require_c2_closed": True,
+    "ifvg_requires_c2_closed": True,
+    "score7_requires_cisd_pd": True,
+    "sl_buffer_crypto_mult": 2.0,
+    "sl_buffer_range_mult": 1.5,
+    "min_stop_range_mult": 1.5,
+    "be_arm_r": 1.0,
+    "trail_arm_tp_fraction": 0.50,
+    "trail_arm_r": 1.5,
+    "cluster_open": 2,
+    "cluster_recent": 2,
+    "cluster_window_hours": 4.0,
+}
 STRATEGY_CFG = {
     STRATEGY_4H: {
         "htf": "4h",
@@ -99,6 +121,7 @@ STRATEGY_CFG = {
         "c2_hours": 4.0,
         "smt_window_hours": 4.0,
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC,
+        **_RISK_GATES,
     },
     STRATEGY_1D: {
         "htf": "1d",
@@ -106,6 +129,12 @@ STRATEGY_CFG = {
         "c2_hours": 24.0,
         "smt_window_hours": 24.0,
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1D,
+        **_RISK_GATES,
+        "cluster_window_hours": 24.0,
+        # 1D: 1s range 1R'yi yer (NZDUSD +1.31R sahte trail). Eski %75.
+        "be_arm_r": None,
+        "trail_arm_tp_fraction": 0.75,
+        "trail_arm_r": None,
     },
     STRATEGY_1H: {
         "htf": "1h",
@@ -113,13 +142,16 @@ STRATEGY_CFG = {
         "c2_hours": 1.0,
         "smt_window_hours": 1.0,
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1H,
+        **_RISK_GATES,
+        "be_arm_r": None,
+        "trail_arm_tp_fraction": 0.75,
+        "trail_arm_r": None,
     },
 }
 
-# Tek kademe koruma (tum marketler):
-# TP yolunun TRAIL_ARM_TP_FRACTION'inda trail acilir; SL, MFE'nin
-# max(1R, 1.3 * ort. LTF range) gerisine cekilir (entry'den aleyhte gitmez).
-TRAIL_ARM_TP_FRACTION = 0.75
+# Trail offset (tum TF): SL, MFE'nin max(1R, 1.3x LTF range) gerisine cekilir.
+# Arm esigi STRATEGY_CFG (trail_arm_tp_fraction / trail_arm_r) ile gelir.
+TRAIL_ARM_TP_FRACTION = 0.50
 TRAIL_OFFSET_R = 1.0
 TRAIL_RANGE_MULT = 1.3
 TRAIL_RANGE_LOOKBACK = 20
@@ -128,7 +160,6 @@ MIN_STOP_RANGE_MULT = 1.0  # stop mesafesi < 1x ort. LTF range -> tight_stop
 WAITING_STATUS = "waiting_entry"
 PENDING_STATUS = "pending_cisd"
 OPEN_STATUSES = (PENDING_STATUS, WAITING_STATUS, "active")
-
 
 # ──────────────────── Radar (canli izleme durumu) ────────────────────
 # Her sembol icin son degerlendirmenin ozeti bellekte tutulur; /radar
@@ -154,6 +185,8 @@ def _set_radar(
     pd: str | None = None,
     c2_closed: bool | None = None,
     ifvg: bool | None = None,
+    purge_time=None,
+    crt_bar_time=None,
     strategy: str = STRATEGY_4H,
 ) -> None:
     now = datetime.now(timezone.utc)
@@ -187,6 +220,12 @@ def _set_radar(
         "pd": pd,
         "c2_closed": stored_c2,
         "ifvg": stored_ifvg,
+        "purge_time": purge_time if purge_time is not None else (
+            None if state in ("no_setup", "no_data") else prev.get("purge_time")
+        ),
+        "crt_bar_time": crt_bar_time if crt_bar_time is not None else (
+            None if state in ("no_setup", "no_data") else prev.get("crt_bar_time")
+        ),
         "strategy": strategy,
         "updated_at": now,
     }
@@ -238,6 +277,7 @@ async def _count_direction_cluster(
     session: AsyncSession,
     direction: str,
     timeframe: str = STRATEGY_4H,
+    window_hours: float | None = None,
 ) -> tuple[int, int]:
     """Crypto'da ayni yon icin (acik_adet, son_penceredeki_adet) dondur."""
     open_q = await session.execute(
@@ -246,17 +286,20 @@ async def _count_direction_cluster(
             Signal.market_type == CLUSTER_MARKET,
             Signal.timeframe == timeframe,
             Signal.status.in_(list(OPEN_STATUSES)),
+            Signal.symbol.notin_(tuple(CLUSTER_EXEMPT_SYMBOLS)),
         )
     )
     open_n = int(open_q.scalar() or 0)
 
-    since = datetime.now(timezone.utc) - timedelta(hours=CLUSTER_WINDOW_HOURS)
+    hours = float(window_hours) if window_hours else float(CLUSTER_WINDOW_HOURS)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
     recent_q = await session.execute(
         select(func.count()).where(
             Signal.direction == direction,
             Signal.market_type == CLUSTER_MARKET,
             Signal.timeframe == timeframe,
             Signal.created_at >= since,
+            Signal.symbol.notin_(tuple(CLUSTER_EXEMPT_SYMBOLS)),
         )
     )
     recent_n = int(recent_q.scalar() or 0)
@@ -376,6 +419,25 @@ async def _get_pending_signal(
         )
     )
     return result.scalars().first()
+
+
+async def _get_unfilled_setup_signal(
+    session: AsyncSession,
+    symbol: str,
+    timeframe: str,
+) -> Signal | None:
+    """pending_cisd veya henuz dolmamis waiting_entry (C2 bekleyen 4H dahil)."""
+    pending = await _get_pending_signal(session, symbol, timeframe)
+    if pending is not None:
+        return pending
+    open_sig = await _get_open_signal(session, symbol, timeframe)
+    if (
+        open_sig is not None
+        and open_sig.status == WAITING_STATUS
+        and open_sig.entry_filled_time is None
+    ):
+        return open_sig
+    return None
 
 
 async def _delete_pending(
@@ -704,18 +766,38 @@ def _entry_between_stops(direction: str, entry: float, sl: float, tp: float) -> 
     return tp < entry < sl
 
 
-def _maybe_ifvg_entry(cisd, setup: CRTSetup, df_ltf: pd.DataFrame):
+def _c2_hours_for_setup(setup: CRTSetup) -> float:
+    tf = (getattr(setup, "timeframe", None) or "4h").lower()
+    if tf == "1d":
+        return 24.0
+    if tf == "1h":
+        return 1.0
+    return 4.0
+
+
+def _maybe_ifvg_entry(
+    cisd,
+    setup: CRTSetup,
+    df_ltf: pd.DataFrame,
+    c2_hours: float | None = None,
+    *,
+    allow_ifvg: bool = True,
+):
     """LTF IFVG varsa ve mid SL-TP arasindaysa onu kullan; yoksa CISD/MSS.
 
     CISD/MSS adayi check_cisd_confirmation icinde zaten daha iyi RR ile secilir.
     IFVG RR eşiği burada uygulanmaz (cagiran min_rr ile eler).
     """
     planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
+    if not allow_ifvg:
+        return cisd, planned
+    hours = c2_hours if c2_hours is not None else _c2_hours_for_setup(setup)
     zone = detect_ltf_ifvg(
         df_ltf, setup.direction, setup.purge_time,
         crt_low=setup.key_level_low,
         crt_high=setup.key_level_high,
         crt_bar_time=setup.crt_bar_time,
+        c2_hours=hours,
     )
     if zone is None:
         return cisd, planned
@@ -731,10 +813,56 @@ def _maybe_ifvg_entry(cisd, setup: CRTSetup, df_ltf: pd.DataFrame):
     return cisd, ifvg_rr
 
 
+def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
+    cfg = cfg or {}
+    if cfg.get("ifvg_requires_c2_closed") and not setup.c2_closed:
+        return False
+    if cfg.get("score7_requires_cisd_pd") and int(setup.bias_score or 0) == 7:
+        return False
+    return True
+
+
+def _sl_buffer_mult(setup: CRTSetup, cfg: dict | None) -> float | None:
+    cfg = cfg or {}
+    market = (setup.market_type or "").lower()
+    if market == "crypto":
+        return cfg.get("sl_buffer_crypto_mult") or cfg.get("sl_buffer_range_mult")
+    return cfg.get("sl_buffer_range_mult")
+
+
+def _apply_sl_buffer(cisd, setup: CRTSetup, df_ltf: pd.DataFrame | None, cfg: dict | None) -> bool:
+    """SL'yi LTF range tamponu kadar genislet. Entry SL-TP disina cikarsa False."""
+    mult = _sl_buffer_mult(setup, cfg)
+    if not mult:
+        return True
+    avg = _avg_ltf_range(df_ltf)
+    if avg is None or avg <= 0:
+        return True
+    sl = float(cisd.stop_loss)
+    if setup.direction == "LONG":
+        cisd.stop_loss = round(sl - float(mult) * avg, 8)
+    else:
+        cisd.stop_loss = round(sl + float(mult) * avg, 8)
+    return _entry_between_stops(
+        setup.direction, float(cisd.entry_price), float(cisd.stop_loss), float(cisd.take_profit),
+    )
+
+
+def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
+    """4H skor 7: yalniz kapali C2 + CISD + PD array."""
+    if not (cfg or {}).get("score7_requires_cisd_pd"):
+        return True
+    if int(setup.bias_score or 0) != 7:
+        return True
+    model = getattr(cisd, "entry_model", None) or "cisd"
+    return bool(setup.c2_closed) and model == "cisd" and bool(setup.pd_array)
+
+
 def _preview_trade_levels(
     setup: CRTSetup,
     df_ltf: pd.DataFrame | None,
     c2_hours: float,
+    cfg: dict | None = None,
 ) -> dict:
     """Radar icin setup sonrasi RR / entry / IFVG. Seviye yoksa kismi dict."""
     if df_ltf is None or df_ltf.empty:
@@ -744,11 +872,17 @@ def _preview_trade_levels(
         crt_low=setup.key_level_low,
         crt_high=setup.key_level_high,
         crt_bar_time=setup.crt_bar_time,
+        c2_hours=c2_hours,
     )
-    ifvg = zone is not None
+    allow_ifvg = _ifvg_allowed(setup, cfg)
+    ifvg = zone is not None and allow_ifvg
     cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=c2_hours)
     if cisd is not None:
-        cisd, planned = _maybe_ifvg_entry(cisd, setup, df_ltf)
+        cisd, planned = _maybe_ifvg_entry(
+            cisd, setup, df_ltf, c2_hours=c2_hours, allow_ifvg=allow_ifvg,
+        )
+        _apply_sl_buffer(cisd, setup, df_ltf, cfg)
+        planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
         return {
             "rr": planned,
             "entry": cisd.entry_price,
@@ -756,16 +890,18 @@ def _preview_trade_levels(
             "tp": cisd.take_profit,
             "ifvg": ifvg or getattr(cisd, "entry_model", None) == "ifvg",
         }
-    if zone is not None and setup.purge_extreme is not None:
+    if allow_ifvg and zone is not None and setup.purge_extreme is not None:
         sl = float(setup.purge_extreme)
         tp = float(
             setup.key_level_high if setup.direction == "LONG" else setup.key_level_low
         )
         if _entry_between_stops(setup.direction, zone.mid, sl, tp):
+            tmp = SimpleNamespace(stop_loss=sl, entry_price=zone.mid, take_profit=tp)
+            _apply_sl_buffer(tmp, setup, df_ltf, cfg)
             return {
-                "rr": _calc_planned_rr(zone.mid, sl, tp),
+                "rr": _calc_planned_rr(zone.mid, tmp.stop_loss, tp),
                 "entry": zone.mid,
-                "sl": sl,
+                "sl": tmp.stop_loss,
                 "tp": tp,
                 "ifvg": True,
             }
@@ -797,9 +933,31 @@ def _tp_path_level(
     return entry - fraction * (entry - take_profit)
 
 
-def _trail_arm_level(direction: str, entry: float, take_profit: float) -> float:
-    """Trail acilis asamasi: TP yolunun TRAIL_ARM_TP_FRACTION kadarindaki seviye."""
-    return _tp_path_level(direction, entry, take_profit, TRAIL_ARM_TP_FRACTION)
+def _trail_arm_level(
+    direction: str,
+    entry: float,
+    take_profit: float,
+    fraction: float | None = None,
+) -> float:
+    """Trail acilis asamasi: TP yolunun verilen fraksiyonundaki seviye."""
+    frac = TRAIL_ARM_TP_FRACTION if fraction is None else float(fraction)
+    return _tp_path_level(direction, entry, take_profit, frac)
+
+
+def _r_price_level(direction: str, entry: float, risk: float, r_mult: float) -> float:
+    """Entry'den r_mult * risk kadar lehine fiyat."""
+    if direction == "LONG":
+        return float(entry) + float(r_mult) * float(risk)
+    return float(entry) - float(r_mult) * float(risk)
+
+
+def _bar_holds_mfe(direction: str, mfe: float | None, high: float, low: float) -> bool:
+    """Bu LTF mumu mevcut MFE ekstremine sahip mi? (trail'i ayni mum kesmesin)."""
+    if mfe is None:
+        return False
+    if direction == "LONG":
+        return float(high) >= float(mfe) - 1e-12
+    return float(low) <= float(mfe) + 1e-12
 
 
 def _update_mfe(direction: str, mfe: float | None, entry: float, high: float, low: float) -> float:
@@ -1042,7 +1200,7 @@ async def _detect_and_create_waiting_locked(
 
     filter_bias = htf_bias
 
-    existing_pending = await _get_pending_signal(session, display_sym, strategy)
+    existing_pending = await _get_unfilled_setup_signal(session, display_sym, strategy)
 
     setup = await _cpu(
         detect_crt_setup,
@@ -1056,10 +1214,12 @@ async def _detect_and_create_waiting_locked(
         return None
 
     _radar_base = _radar
-    preview = await _cpu(_preview_trade_levels, setup, df_ltf, cfg["c2_hours"])
+    preview = await _cpu(_preview_trade_levels, setup, df_ltf, cfg["c2_hours"], cfg)
 
     def _radar(state: str, **kwargs):
         kwargs.setdefault("c2_closed", bool(setup.c2_closed))
+        kwargs.setdefault("purge_time", setup.purge_time)
+        kwargs.setdefault("crt_bar_time", setup.crt_bar_time)
         for key, val in preview.items():
             kwargs.setdefault(key, val)
         _radar_base(state, **kwargs)
@@ -1091,6 +1251,21 @@ async def _detect_and_create_waiting_locked(
         setup, df_ltf, bingx_symbol, store, client,
         ltf=ltf_key, window_hours=cfg["smt_window_hours"],
     )
+
+    if getattr(setup, "target_consumed", False):
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "past_tp")
+        _radar(
+            "missed",
+            direction=setup.direction,
+            score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
+            smt=setup.smt_pair, pd=setup.pd_array,
+        )
+        log.info(
+            "SKIPPED (TARGET TAKEN): %s %s C1 hedef tarafı C2 sonrasi tuketildi.",
+            setup.symbol, setup.direction,
+        )
+        return None
 
     if int(setup.bias_score or 0) < MIN_QUALITY_SCORE:
         if existing_pending is not None:
@@ -1172,18 +1347,27 @@ async def _detect_and_create_waiting_locked(
                    smt=setup.smt_pair, pd=setup.pd_array)
         return None
 
-    if (setup.market_type or "").lower() == CLUSTER_MARKET and existing_pending is None:
-        open_n, recent_n = await _count_direction_cluster(session, setup.direction, timeframe=strategy)
-        if open_n >= MAX_SAME_DIRECTION_OPEN or recent_n >= MAX_SAME_DIRECTION_RECENT:
+    if (
+        (setup.market_type or "").lower() == CLUSTER_MARKET
+        and existing_pending is None
+        and setup.symbol not in CLUSTER_EXEMPT_SYMBOLS
+    ):
+        cluster_window = float(cfg.get("cluster_window_hours", CLUSTER_WINDOW_HOURS))
+        open_n, recent_n = await _count_direction_cluster(
+            session, setup.direction, timeframe=strategy, window_hours=cluster_window,
+        )
+        open_max = int(cfg.get("cluster_open", MAX_SAME_DIRECTION_OPEN))
+        recent_max = int(cfg.get("cluster_recent", MAX_SAME_DIRECTION_RECENT))
+        if open_n >= open_max or recent_n >= recent_max:
             _radar("cluster_limit", direction=setup.direction,
                        score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                        smt=setup.smt_pair, pd=setup.pd_array)
             log.info(
                 "SKIPPED (CLUSTER): %s %s open=%d/%d recent=%d/%d (%dh)",
                 setup.symbol, setup.direction,
-                open_n, MAX_SAME_DIRECTION_OPEN,
-                recent_n, MAX_SAME_DIRECTION_RECENT,
-                CLUSTER_WINDOW_HOURS,
+                open_n, open_max,
+                recent_n, recent_max,
+                cluster_window,
             )
             return None
 
@@ -1204,7 +1388,23 @@ async def _detect_and_create_waiting_locked(
         return None
 
     min_rr = _min_rr_for_market(setup.market_type)
-    cisd, planned_rr = await _cpu(_maybe_ifvg_entry, cisd, setup, df_ltf)
+    cisd, planned_rr = await _cpu(
+        _maybe_ifvg_entry, cisd, setup, df_ltf, cfg["c2_hours"],
+        allow_ifvg=_ifvg_allowed(setup, cfg),
+    )
+    if not _apply_sl_buffer(cisd, setup, df_ltf, cfg):
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "tight_stop")
+        _radar("tight_stop", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
+                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        log.info(
+            "SKIPPED (SL BUFFER): %s %s buffered SL entry disinda.",
+            setup.symbol, setup.direction,
+        )
+        return None
+    planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     if planned_rr is None or planned_rr < min_rr:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "low_rr")
@@ -1215,13 +1415,28 @@ async def _detect_and_create_waiting_locked(
         log.info("SKIPPED (LOW RR): %s %s RR=%s (< %.2f)", setup.symbol, setup.direction, planned_rr, min_rr)
         return None
 
+    if not _score7_strict_ok(setup, cisd, cfg):
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "score7_gate")
+        _radar("low_quality", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
+                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        log.info(
+            "SKIPPED (SCORE7): %s %s score=7 requires closed C2 + CISD + PD (c2=%s model=%s pd=%s)",
+            setup.symbol, setup.direction, setup.c2_closed,
+            getattr(cisd, "entry_model", "cisd"), setup.pd_array,
+        )
+        return None
+
     min_pct = _min_stop_pct(setup.market_type)
     stop_pct = _stop_distance_pct(cisd.entry_price, cisd.stop_loss)
     stop_dist = abs(float(cisd.entry_price) - float(cisd.stop_loss))
     avg_range = _avg_ltf_range(df_ltf)
+    range_mult = float(cfg.get("min_stop_range_mult", MIN_STOP_RANGE_MULT))
     tight_range = (
         avg_range is not None
-        and stop_dist < MIN_STOP_RANGE_MULT * avg_range
+        and stop_dist < range_mult * avg_range
     )
     tight_pct = min_pct is not None and (stop_pct is None or stop_pct < min_pct)
     if tight_range or tight_pct:
@@ -1234,7 +1449,7 @@ async def _detect_and_create_waiting_locked(
         if tight_range:
             log.info(
                 "SKIPPED (TIGHT STOP): %s %s dist=%.8f < %.2fx LTF range %.8f",
-                setup.symbol, setup.direction, stop_dist, MIN_STOP_RANGE_MULT, avg_range,
+                setup.symbol, setup.direction, stop_dist, range_mult, avg_range,
             )
         else:
             log.info(
@@ -1316,14 +1531,28 @@ async def _detect_and_create_waiting_locked(
                 )
                 return None
 
-    status = WAITING_STATUS if cisd.confirmed else PENDING_STATUS
+    can_wait = bool(cisd.confirmed) and (
+        not cfg.get("require_c2_closed") or bool(setup.c2_closed)
+    )
+    status = WAITING_STATUS if can_wait else PENDING_STATUS
     if existing_pending is not None:
+        prev_status = existing_pending.status
         _apply_signal_levels(
             existing_pending, setup, cisd, planned_rr, htf_bias,
             weekly_bias=weekly_bias, status=status,
         )
         signal = existing_pending
-        if status == WAITING_STATUS:
+        if (
+            prev_status == WAITING_STATUS
+            and status == PENDING_STATUS
+            and cfg.get("require_c2_closed")
+            and not setup.c2_closed
+        ):
+            log.info(
+                "DEMOTE WAITING->PENDING (C2 open): %s %s",
+                setup.symbol, setup.direction,
+            )
+        if prev_status != WAITING_STATUS and status == WAITING_STATUS:
             await record_event(
                 "new_setup",
                 f"MSS onay | {setup.purge_type} purge | Entry {cisd.entry_price} SL {cisd.stop_loss} TP {cisd.take_profit} (RR {planned_rr})",
@@ -1359,8 +1588,14 @@ async def _detect_and_create_waiting_locked(
         )
 
     _OPEN_SYMBOLS.add((setup.symbol, strategy))
+    if status == WAITING_STATUS:
+        radar_state = "waiting"
+    elif cisd.confirmed and cfg.get("require_c2_closed") and not setup.c2_closed:
+        radar_state = "c2_open"
+    else:
+        radar_state = "no_cisd"
     _radar(
-        "waiting" if status == WAITING_STATUS else "no_cisd",
+        radar_state,
         direction=setup.direction,
         score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
         entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
@@ -1571,6 +1806,13 @@ async def manage_symbol_on_price(
                 # Fill yalnizca kapanmis LTF mumunda.
                 if ev == "fill" and not bar_closed:
                     continue
+                mgmt_cfg = STRATEGY_CFG.get(timeframe, STRATEGY_CFG[STRATEGY_4H])
+                if (
+                    ev == "fill"
+                    and mgmt_cfg.get("require_c2_closed")
+                    and not sig.c2_closed
+                ):
+                    continue
                 if ev == "fill":
                     sig.status = "active"
                     sig.entry_filled_time = now
@@ -1614,9 +1856,14 @@ async def manage_symbol_on_price(
 
             # Trail/BE SL, forming mumun ARM ONCESI iğnesiyle kapanmasin
             # (UNI: 16:15 bar low 7.05 iken fiyat 7.40 TP'ye gitti).
+            # NZDUSD: MFE'yi yapan 1s mumu ayni anda trail SL'yi iğneledi.
             stale_trail_wick = (
                 (bool(sig.trail_active) or bool(sig.partial_hit))
                 and not bar_closed
+            )
+            skip_trail_same_bar = (
+                (bool(sig.partial_hit) or bool(sig.trail_active))
+                and _bar_holds_mfe(sig.direction, sig.mfe_price, high, low)
             )
 
             # Once mevcut SL/TP ile cikis (stop'u degistirmeden once)
@@ -1624,6 +1871,7 @@ async def manage_symbol_on_price(
                 event = "hit_tp"
             elif (
                 not stale_trail_wick
+                and not skip_trail_same_bar
                 and _hits_sl(sig.direction, high, low, float(sig.stop_loss))
             ):
                 event = _classify_sl_hit()
@@ -1632,10 +1880,42 @@ async def manage_symbol_on_price(
                 # hemen "trail exit" yazmasin; cikis eski SL ile degerlendirilir.
                 sl_this_bar = float(sig.stop_loss)
 
-                # Tek kademe: TP yolunun %75'i -> trail ac (gap'te SL entry tabani)
+                # +1R -> BE; trail = TP %50 veya +1.5R (tum TF, STRATEGY_CFG).
+                prot = STRATEGY_CFG.get(
+                    sig.timeframe or timeframe, STRATEGY_CFG[STRATEGY_4H],
+                )
+                be_r = prot.get("be_arm_r")
+                trail_frac = float(prot.get("trail_arm_tp_fraction", TRAIL_ARM_TP_FRACTION))
+                trail_r = prot.get("trail_arm_r")
+                if be_r and not sig.partial_hit:
+                    be_lvl = _r_price_level(sig.direction, entry, risk, float(be_r))
+                    if _hits_level(sig.direction, high, low, be_lvl, favorable=True):
+                        sig.partial_hit = True
+                        sig.reached_50pct = True
+                        sig.stop_loss = entry
+                        changed = True
+                        await record_event(
+                            "be_arm",
+                            f"BE acildi @+{be_r}R ({be_lvl}) SL->entry",
+                            symbol=sig.symbol, direction=sig.direction,
+                            market_type=sig.market_type, level="info", session=session,
+                        )
+                        log.info(
+                            "BE ARM: %s %s +%.2fR level=%s",
+                            sig.symbol, sig.direction, float(be_r), be_lvl,
+                        )
                 if not sig.trail_active:
-                    arm_lvl = _trail_arm_level(sig.direction, entry, tp)
-                    if _hits_level(sig.direction, high, low, arm_lvl, favorable=True):
+                    arm_lvl = _trail_arm_level(sig.direction, entry, tp, trail_frac)
+                    hit_frac = _hits_level(
+                        sig.direction, high, low, arm_lvl, favorable=True,
+                    )
+                    hit_r = False
+                    if trail_r:
+                        r_lvl = _r_price_level(sig.direction, entry, risk, float(trail_r))
+                        hit_r = _hits_level(
+                            sig.direction, high, low, r_lvl, favorable=True,
+                        )
+                    if hit_frac or hit_r:
                         if not sig.partial_hit:
                             sig.partial_hit = True
                             sig.reached_50pct = True
@@ -1644,7 +1924,9 @@ async def manage_symbol_on_price(
                         changed = True
                         await record_event(
                             "trail_arm",
-                            f"Trail acildi @{arm_lvl} (TP yolunun %{int(TRAIL_ARM_TP_FRACTION * 100)}s) | min {TRAIL_OFFSET_R}R / {TRAIL_RANGE_MULT}x LTF range",
+                            f"Trail acildi @{arm_lvl} (TP yolunun %{int(trail_frac * 100)}s"
+                            + (f" veya +{trail_r}R" if trail_r else "")
+                            + f") | min {TRAIL_OFFSET_R}R / {TRAIL_RANGE_MULT}x LTF range",
                             symbol=sig.symbol, direction=sig.direction,
                             market_type=sig.market_type, level="info", session=session,
                         )
@@ -1673,10 +1955,16 @@ async def manage_symbol_on_price(
 
                 # Ayni mumda TP veya (trail oncesi) mevcut SL.
                 # Yeni trail SL bir sonraki LTF mumunda gecerli olur.
+                # Bu cagrida arm olduysa MFE mumu karsi iğne ile kesilmesin.
+                if (sig.partial_hit or sig.trail_active) and _bar_holds_mfe(
+                    sig.direction, sig.mfe_price, high, low,
+                ):
+                    skip_trail_same_bar = True
                 if _hits_tp(sig.direction, high, low, tp):
                     event = "hit_tp"
                 elif (
                     not stale_trail_wick
+                    and not skip_trail_same_bar
                     and _hits_sl(sig.direction, high, low, sl_this_bar)
                 ):
                     event = _classify_sl_hit()
