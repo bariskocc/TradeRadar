@@ -180,7 +180,59 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 7. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
+## 7. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
+
+**Bağlam:** 2026-09-08'de SUI 4H SHORT, MFE +1.48R'ye gitti ama trail TP %50'de
+(+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
+çekilme işlemi **+0.48R**'de kesti (planned 2.71R). Arm eşiği ile trail mesafesi
+neredeyse eşitti.
+
+**Yapıldı (4H):** BE → TP %50, trail → TP %75, sabit R tetikleyicileri
+(`be_arm_r`, `trail_arm_r`) kapatıldı. Yeni anahtar `be_arm_tp_fraction`.
+SUI verisiyle doğrulandı: trail açılmaz, SL entry'de kalır, **işlem açık kalırdı.**
+
+### Kalan karar: 1D/1H'te BE
+
+Şu an **kapalı** (`be_arm_tp_fraction: None`). Kasıtlı — koddaki gerekçe:
+
+```python
+# 1D: 1s range 1R'yi yer (NZDUSD +1.31R sahte trail). Eski %75.
+```
+
+1 saatlik mumun boyu 1R'ye yakın olduğu için SL'yi entry'ye çekmek iğneye açık
+hale getiriyor. BE'yi geç tetiklemek bunu **çözmez** — armanma zamanı değişir,
+stop yine tam entry'de durur.
+
+`min_stop_range_mult: 1.0` artık 1R ≥ 1 ortalama LTF mumu garanti ediyor (ama
+*ancak* eşit), ve aynı-mum MFE koruması var. Yine de risk gerçek.
+
+**Karar:** 4H'te BE @ TP %50'nin sonucunu bir süre izle, sonra 1D/1H'e de
+açılsın mı karar ver. Ölçülecek: BE tetiklenen işlemlerin kaçı 0R'de kapandı,
+kaçı TP'ye yürüdü.
+
+### Yeni fikir: %50'de BE + işlemin yarısını kapat
+
+TP yolunun %50'sine gelince:
+1. **İşlemin yarısını kapat** → kâr realize edilir
+2. Kalan yarı devam eder, **SL = BE (entry)**
+
+Böylece en kötü senaryo "yarım pozisyondan alınan kâr + kalan yarıda 0R" olur;
+SUI gibi vakalarda hem kâr cebe girer hem de TP'ye yürüme ihtimali korunur.
+
+**Gereken altyapı (bugün yok):** sistem pozisyon büyüklüğü tutmuyor. `Signal`
+tek bir `rr_value` yazıyor; kısmi çıkış için en az şunlar gerekir:
+- `Signal`'a kısım büyüklüğü / kısmi çıkış fiyatı + zamanı kolonları
+  (+ `_MIGRATIONS`)
+- `rr_value` hesabının ağırlıklı hale gelmesi
+  (`0.5 × partial_R + 0.5 × final_R`)
+- Dashboard/analytics R toplamlarının bu ağırlığa uyması
+- Telegram mesajında kısmi çıkış bildirimi
+- `partial_hit` alanı bugün "BE aktif" anlamında kullanılıyor; adı doğru ama
+  anlamı değişecek, karışıklığa dikkat
+
+---
+
+## 8. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
 
 > **Öncelik: EN DÜŞÜK.** Acelesi yok, diğer maddelerin hepsi bitince bakılacak.
 > **Çıktı bir rapor/öneri**, doğrudan refactor değil.

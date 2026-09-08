@@ -117,9 +117,16 @@ _RISK_GATES = {
     # (= en dar stoplu) setuplari eliyordu. Tampon oncesi degerine dondu.
     "min_stop_range_mult": 1.0,
     "max_backfill_fill_bars": MAX_BACKFILL_FILL_BARS,
-    "be_arm_r": 1.0,
-    "trail_arm_tp_fraction": 0.50,
-    "trail_arm_r": 1.5,
+    # BE ve trail esikleri TP yolunun kesri olarak; sabit R katlari kapali.
+    # Sabit +1R BE / +1.5R trail, 5R'lik bir islemde yolun %20'sinde tetikleyip
+    # islemi erken bogar. TP kesri hedefe gore olceklenir; minimum RR 2.0'da
+    # TP %50 zaten +1R'ye denk gelir, yani yalnizca genis islemlerde gecikir.
+    # be_arm_tp_fraction varsayilan None: BE opt-in (1D/1H'te kapali kalmali,
+    # bkz. STRATEGY_1D yorumu / NZDUSD).
+    "be_arm_r": None,
+    "be_arm_tp_fraction": None,
+    "trail_arm_tp_fraction": 0.75,
+    "trail_arm_r": None,
     "cluster_open": 2,
     "cluster_recent": 2,
     "cluster_window_hours": 4.0,
@@ -132,6 +139,12 @@ STRATEGY_CFG = {
         "smt_window_hours": 4.0,
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC,
         **_RISK_GATES,
+        # SUI 08.09: trail TP %50'de (+1.356R) acilip 1R geride durunca yalnizca
+        # ~0.36R kilitliyordu; MFE +1.48R iken ilk geri cekilme islemi 0.48R'de
+        # kesti. Arm esigi ile trail mesafesi neredeyse esitti. BE TP %50'ye,
+        # trail TP %75'e cekildi (ikisi de _RISK_GATES'ten; burada yalnizca BE
+        # acik edilir). 1D/1H'te BE hala kapali.
+        "be_arm_tp_fraction": 0.50,
     },
     STRATEGY_1D: {
         "htf": "1d",
@@ -2009,29 +2022,43 @@ async def manage_symbol_on_price(
                 # hemen "trail exit" yazmasin; cikis eski SL ile degerlendirilir.
                 sl_this_bar = float(sig.stop_loss)
 
-                # +1R -> BE; trail = TP %50 veya +1.5R (tum TF, STRATEGY_CFG).
+                # BE ve trail esikleri STRATEGY_CFG'den. Her ikisi de TP yolunun
+                # bir kesri (be/trail_arm_tp_fraction) VEYA sabit R kati
+                # (be/trail_arm_r) ile acilabilir; ikisi de tanimliysa hangisi
+                # once gelirse. Sabit R, yuksek RR'li islemde yolun cok
+                # basinda tetikler; TP kesri hedefe gore olceklenir.
                 prot = STRATEGY_CFG.get(
                     sig.timeframe or timeframe, STRATEGY_CFG[STRATEGY_4H],
                 )
                 be_r = prot.get("be_arm_r")
+                be_frac = prot.get("be_arm_tp_fraction")
                 trail_frac = float(prot.get("trail_arm_tp_fraction", TRAIL_ARM_TP_FRACTION))
                 trail_r = prot.get("trail_arm_r")
-                if be_r and not sig.partial_hit:
-                    be_lvl = _r_price_level(sig.direction, entry, risk, float(be_r))
-                    if _hits_level(sig.direction, high, low, be_lvl, favorable=True):
+                if (be_r or be_frac) and not sig.partial_hit:
+                    be_lvl = None
+                    be_why = ""
+                    if be_frac:
+                        lvl = _tp_path_level(sig.direction, entry, tp, float(be_frac))
+                        if _hits_level(sig.direction, high, low, lvl, favorable=True):
+                            be_lvl, be_why = lvl, f"TP yolunun %{int(float(be_frac) * 100)}'i"
+                    if be_lvl is None and be_r:
+                        lvl = _r_price_level(sig.direction, entry, risk, float(be_r))
+                        if _hits_level(sig.direction, high, low, lvl, favorable=True):
+                            be_lvl, be_why = lvl, f"+{be_r}R"
+                    if be_lvl is not None:
                         sig.partial_hit = True
                         sig.reached_50pct = True
                         sig.stop_loss = entry
                         changed = True
                         await record_event(
                             "be_arm",
-                            f"BE acildi @+{be_r}R ({be_lvl}) SL->entry",
+                            f"BE acildi @{be_why} ({be_lvl}) SL->entry",
                             symbol=sig.symbol, direction=sig.direction,
                             market_type=sig.market_type, level="info", session=session,
                         )
                         log.info(
-                            "BE ARM: %s %s +%.2fR level=%s",
-                            sig.symbol, sig.direction, float(be_r), be_lvl,
+                            "BE ARM: %s %s @%s level=%s",
+                            sig.symbol, sig.direction, be_why, be_lvl,
                         )
                 if not sig.trail_active:
                     arm_lvl = _trail_arm_level(sig.direction, entry, tp, trail_frac)

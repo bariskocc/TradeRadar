@@ -96,8 +96,15 @@ Periyodik REST tarama **yoktur**. Tespit tamamen mum kapanışı olayıyla:
 | `1d` | 1D CRT + 1h CISD | BTC/ETH + FX/metal/endeks/petrol |
 | `1h` | 1H CRT + 5m CISD | XAU, EURUSD, US100, BTC |
 
-UI'da her yerde `?tf=4h|1d|1h` ile geçiş. `1d`/`1h`: BE kapalı, trail = TP
-yolunun %75'i; `4h`: +1R'de BE, trail = TP %50 veya +1.5R.
+UI'da her yerde `?tf=4h|1d|1h` ile geçiş.
+
+**Koruma eşikleri** — üçünde de trail = **TP yolunun %75'i**; sabit R
+tetikleyicileri (`be_arm_r`, `trail_arm_r`) kapalı. BE yalnızca **4H**'te açık:
+`be_arm_tp_fraction = 0.50` (TP yolunun %50'si). Sabit +1R BE / +1.5R trail,
+5R'lik bir işlemde yolun %20'sinde tetikleyip işlemi erken boğuyordu; TP kesri
+hedefe göre ölçekleniyor (min RR 2.0'da TP %50 zaten +1R'ye denk). 1D/1H'te BE
+kapalı — 1h/5m mum boyu 1R'ye yakın olduğu için entry'deki stop iğneye açık
+(bkz. NZDUSD notu, [TODO.md](TODO.md) madde 7).
 
 **1H-5M istisnası**: `require_c2_closed = False`. C2 yalnızca 1 saat olduğu için
 kapanışını beklemek CISD onayından sonra 45 dk'ya kadar ölü bekleme demek ve
