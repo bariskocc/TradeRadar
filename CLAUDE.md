@@ -54,20 +54,30 @@ LOW QUALITY / SCORE7 / PAST TP / PAST SL / CRT 60% / TARGET TAKEN /
 MISSED QUALITY), `FILLED`, `BACKFILL FILL`, `BE ARM`, `TRAIL ARM`, `TRAIL`,
 `CLOSED (...)`, `SMT+2`. Uvicorn'un kendi logları `server.err.log`'a gider.
 
-**Log raporu:**
+**Log raporu.** Toplama mantığı `app/log_report.py` → `build_report(path, hours)`;
+iki arayüzü var:
 
-```powershell
-python scripts/logstat.py              # tüm log
-python scripts/logstat.py --hours 24   # son 24 saat
-python scripts/logstat.py --file logs/traderadar.log.1   # dönen yedek
-```
+- **Web:** `/logs` → **Engine Report** sekmesi (`?view=report&hours=24`)
+- **Terminal:** `python scripts/logstat.py [--hours 24] [--file logs/traderadar.log.1]`
 
-Çıktı: setup'ların hangi kapıda elendiği (dağılım + en sık semboller), sinyal
+İçerik: setup'ların hangi kapıda elendiği (dağılım + en sık semboller), sinyal
 yaşam döngüsü sayıları, kapanan işlemler tablosu (R, win rate, çıkış türü),
 [TODO.md](TODO.md) madde 6 izleme metrikleri (BACKFILL tetiklenme, koruma
-etkisi, CRT %60 kronolojisi) ve WS bağlantı sağlığı. Logu elle `Get-Content`
-ile okuyacaksan **`-Encoding UTF8`** ver — PowerShell 5.1 dosyayı ANSI sanıp
-Türkçe karakterleri bozar; script bu sorunu yaşamaz.
+etkisi, CRT %60 kronolojisi) ve WS bağlantı sağlığı.
+
+**Önemli ayrım:** `/logs` Events sekmesi `event_logs` **DB tablosunu** gösterir
+(yaşam döngüsü olayları). `SKIPPED (...)` yani *setup neden elendi* bilgisi
+DB'de **yoktur**, yalnızca log dosyasındadır — o yüzden Engine Report ayrı bir
+kaynaktan okur.
+
+Logu elle `Get-Content` ile okuyacaksan **`-Encoding UTF8`** ver — PowerShell 5.1
+dosyayı ANSI sanıp Türkçe karakterleri bozar; rapor bu sorunu yaşamaz.
+
+**Şablon eklerken:** yeni Tailwind sınıfı kullandıysan CSS'i yeniden derle,
+yoksa stil uygulanmaz:
+```powershell
+tools\tailwindcss.exe -c tailwind.config.js -i app\static\css\input.css -o app\static\css\app.css --minify
+```
 
 ## Mimari
 
@@ -216,7 +226,8 @@ yazılıyor.
 - `/` — dashboard, kripto vs global (fx/index/metal/oil) ayrı istatistik blokları
 - `/signals`, `/signals/crypto`, `/signals/global` — filtre + tab (all/active/waiting/closed) + sayfalama
 - `/analytics` — Chart.js (CDN), equity curve + dağılımlar + haftalık + top semboller
-- `/logs` — `EventLog` tablosu
+- `/logs` — iki sekme: **Events** (`EventLog` DB tablosu) ve **Engine Report**
+  (`?view=report`, motor log dosyasından üretilen özet; `&hours=` ile pencere)
 - `/radar` + `/api/radar` — canlı radar
 - `/scanner` — manuel `/api/scan`, scheduler durumu, Telegram testi, taranan semboller
 - `/api/scan-status`, `/api/recalc-scores`, `/api/telegram-test`

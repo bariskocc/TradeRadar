@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from collections import Counter
@@ -12,6 +13,7 @@ from sqlalchemy import select, func, desc, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR
+from app.log_report import build_report
 from app.logging_config import setup_logging
 from app.database import init_db, get_db
 from app.models import Signal, EventLog
@@ -679,15 +681,31 @@ async def analytics_page(
 
 # ──────────────────── Scan Logs Page ────────────────────
 
+LOG_REPORT_WINDOWS = [(24.0, "24 saat"), (72.0, "3 gün"), (168.0, "7 gün"), (0.0, "Tümü")]
+
+
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_page(
     request: Request,
     db: AsyncSession = Depends(get_db),
     page: int = Query(default=1, ge=1),
+    view: str = Query(default="events"),
+    hours: float = Query(default=24.0, ge=0),
 ):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
+
+    if view == "report":
+        # Motor logu (dosya) — `SKIPPED (...)` gibi eleme sebepleri DB'de yok.
+        report = await asyncio.to_thread(build_report, None, hours or None)
+        return templates.TemplateResponse(request=request, name="log_report.html", context={
+            "user": user,
+            "report": report,
+            "hours": hours,
+            "windows": LOG_REPORT_WINDOWS,
+            "view": "report",
+        })
 
     count_result = await db.execute(select(func.count()).select_from(EventLog))
     total = count_result.scalar() or 0
@@ -707,6 +725,7 @@ async def logs_page(
         "page": page,
         "total_pages": total_pages,
         "total": total,
+        "view": "events",
     })
 
 

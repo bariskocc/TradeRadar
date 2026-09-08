@@ -10,9 +10,14 @@
 
     <main class="flex-1 overflow-auto">
         <div class="p-6">
-            <div class="mb-6">
+            <div class="mb-4">
                 <h1 class="text-xl font-bold text-white">Event Log</h1>
                 <p class="text-sm text-gray-500 mt-0.5">Signal lifecycle and system events (real-time)</p>
+            </div>
+
+            <div class="flex items-center gap-1 mb-6">
+                <a href="/logs" class="px-4 py-2 rounded-lg text-sm font-medium transition bg-accent-blue text-white">Events</a>
+                <a href="/logs?view=report" class="px-4 py-2 rounded-lg text-sm font-medium transition bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white">Engine Report</a>
             </div>
 
             {% set type_labels = {
