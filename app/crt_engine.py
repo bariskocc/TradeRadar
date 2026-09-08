@@ -45,6 +45,11 @@ CISD_STRONG_CLOSE_RANGE_MULT = 0.30
 CISD_MARGIN_LOOKBACK = 20
 # Purge rejection wick: fitil / CRT range esigi (kalite skoru)
 PURGE_WICK_SCORE_PCT = 0.10
+# LTF IFVG asgari bosluk boyutu: gap >= bu oran * son 20 LTF mumunun ort. range'i.
+# Amac: bir 5M mumunun kucuk bir kesridi kadar olan "bosluklari" (gurultu) eleyip
+# yalnizca gercek displacement iceren FVG'leri kabul etmek. Ayarlanabilir.
+MIN_IFVG_GAP_RANGE_FRAC = 0.15
+_IFVG_RANGE_LOOKBACK = 20
 _PD_MAJOR_LABELS = frozenset({"PDH", "PDL", "PWH", "PWL"})
 _PD_MONTHLY_LABELS = frozenset({"PMH", "PML"})
 _PD_STRUCT_LABELS = frozenset({"FVG", "OB"})
@@ -952,6 +957,9 @@ def detect_ltf_ifvg(
     olmali. Birden fazla aday varsa en son (guncel) acik bolge secilir.
     Inversion purge sonrasi. C2 HTF mumu icindeki LTF ekstrem mitigasyon
     sayilmaz (purge fitili IFVG'yi iptal etmez).
+
+    Bosluk (gap = z_hi - z_lo) son 20 LTF mumunun ort. range'inin
+    MIN_IFVG_GAP_RANGE_FRAC katindan kucukse aday elenir (gurultu filtresi).
     """
     if df_ltf is None or df_ltf.empty or purge_time is None:
         return None
@@ -970,6 +978,12 @@ def detect_ltf_ifvg(
     crt_ts = _as_utc_ts(crt_bar_time) if crt_bar_time is not None else None
     want_bear = direction == "LONG"
     n = len(work)
+
+    # Gurultu bosluklarini elemek icin asgari gap esigi (son N LTF mum range ort.).
+    _avg_range = float(
+        (work["high"] - work["low"]).tail(_IFVG_RANGE_LOOKBACK).mean()
+    )
+    min_gap = MIN_IFVG_GAP_RANGE_FRAC * _avg_range if _avg_range > 0 else 0.0
     start_i = 1
     if crt_ts is not None:
         # Sol mum CRT baslangicindan once olmasin (3'lu FVG).
@@ -992,6 +1006,8 @@ def detect_ltf_ifvg(
             kind = "bull"
         if z_hi <= z_lo:
             continue
+        if min_gap > 0 and (z_hi - z_lo) < min_gap:
+            continue  # gurultu: gercek displacement yok
         if not _ifvg_mid_inside_crt(z_lo, z_hi, crt_low, crt_high):
             continue
         invert_from = max(i + 2, int(work.index.searchsorted(purge_ts, side="right")))
@@ -1489,10 +1505,13 @@ def _check_bullish_cisd(
         low_pos_in_cand = int(cand["low"].values.argmin())
         low_iloc = (len(work) - len(cand)) + low_pos_in_cand
 
-    # Purge/uc mumunu HARIC tutarak, ondan ONCEKI dusus blogunu bul.
+    # Dusus blogunu bul. Likiditeyi supuren mum KENDISI temiz bir dusus govdesi
+    # ise (genis wick'li doji degil) CISD delivery'sinin basladigi yer odur;
+    # bloga dahil edilir (acilisi = CISD seviyesi). Aksi halde (doji / wick
+    # rejection) ondan ONCEKI dusus blogu alinir.
     # Doji blogu BOLMEZ (GBPCHF: 06:00/07:00 TSI doji 04:00 ilk mumu kesiyordu).
     # Zit govde (yesil) blogu bitirir.
-    run_end = low_iloc - 1
+    run_end = low_iloc if _is_bear_body(work.iloc[low_iloc]) else low_iloc - 1
     while run_end >= 0 and not _is_bear_body(work.iloc[run_end]):
         run_end -= 1
     if run_end < 0:
@@ -1575,10 +1594,13 @@ def _check_bearish_cisd(
         high_pos_in_cand = int(cand["high"].values.argmax())
         high_iloc = (len(work) - len(cand)) + high_pos_in_cand
 
-    # Purge/uc mumunu HARIC tutarak, ondan ONCEKI yukselis blogunu bul.
+    # Yukselis blogunu bul. Likiditeyi supuren mum KENDISI temiz bir yukselis
+    # govdesi ise (genis wick'li doji degil) CISD delivery'sinin basladigi yer
+    # odur; bloga dahil edilir (acilisi = CISD seviyesi). Aksi halde (doji /
+    # wick rejection) ondan ONCEKI yukselis blogu alinir.
     # Doji blogu BOLMEZ (GBPCHF: 06:00/07:00 TSI doji 04:00 ilk mumu kesiyordu).
     # Zit govde (kirmizi) blogu bitirir.
-    run_end = high_iloc - 1
+    run_end = high_iloc if _is_bull_body(work.iloc[high_iloc]) else high_iloc - 1
     while run_end >= 0 and not _is_bull_body(work.iloc[run_end]):
         run_end -= 1
     if run_end < 0:

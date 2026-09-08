@@ -12,12 +12,17 @@ from sqlalchemy import select, func, desc, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR
+from app.logging_config import setup_logging
 from app.database import init_db, get_db
 from app.models import Signal, EventLog
 from app.auth import verify_credentials, create_access_token, get_current_user
 from app.scanner import run_scan, SMT_QUALITY_BONUS, MAX_QUALITY_SCORE
 from app.scheduler import get_scheduler_status
 from app.market_data import market_data
+
+# Uvicorn app'i import eder etmez logu kur; boyle her giris noktasinda (run.py,
+# dogrudan `uvicorn app.main:app`) karar loglari gorunur.
+setup_logging()
 
 log = logging.getLogger(__name__)
 

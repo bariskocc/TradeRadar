@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pandas as pd
 from sqlalchemy import delete, func, select
@@ -91,6 +90,11 @@ MIN_STOP_PCT_BY_MARKET: dict[str, float] = {
     # "index": 0.25,  # US100 / US500
 }
 
+# Gecmiste kalmis gecerli bir retest'i (limit emri dolmus sayilir) sinyale
+# cevirirken kabul edilen azami gecikme: fill'den sonra en fazla bu kadar
+# KAPANMIS LTF mumu olabilir. 5m->30dk, 15m->90dk, 1h->6sa. 0 => backfill kapali.
+MAX_BACKFILL_FILL_BARS = 6
+
 # Fill: LTF mum acilisindan sonra en az bu kadar sn bekle (anlik fill azaltir).
 MIN_FILL_BAR_AGE_SEC = 60
 MIN_FILL_BAR_AGE_SEC_1D = 300
@@ -99,14 +103,20 @@ MIN_FILL_BAR_AGE_SEC_1H = 20
 STRATEGY_4H = "4h"
 STRATEGY_1D = "1d"
 STRATEGY_1H = "1h"
-# Ortak risk kapilari: C2 kapanmadan fill yok, SL tamponu, +1R BE, erken trail.
+# Ortak risk kapilari: C2 kapanmadan fill yok, +1R BE, erken trail.
+# SL tamponu KALDIRILDI: C2 kapanmadan fill olmadigi icin C2 sonrasi yeni bir
+# ekstrem beklemiyoruz; SL dogrudan purge ucudur (bkz. _check_*_cisd).
 _RISK_GATES = {
     "require_c2_closed": True,
     "ifvg_requires_c2_closed": True,
     "score7_requires_cisd_pd": True,
-    "sl_buffer_crypto_mult": 2.0,
-    "sl_buffer_range_mult": 1.5,
-    "min_stop_range_mult": 1.5,
+    # entry <-> C2 ucu mesafesi < bu oran * ort. LTF range -> tight_stop.
+    # 1.5 degeri SL tamponuyla AYNI commit'te (113d4a0) 1.0'dan yukseltilmisti;
+    # stop zaten 1.5-2x range genisletildigi icin esik pratikte olu koddu. Tampon
+    # kaldirilinca (ham purge ucu) 1.5 kalibrasyonu bozuldu ve en yuksek RR'li
+    # (= en dar stoplu) setuplari eliyordu. Tampon oncesi degerine dondu.
+    "min_stop_range_mult": 1.0,
+    "max_backfill_fill_bars": MAX_BACKFILL_FILL_BARS,
     "be_arm_r": 1.0,
     "trail_arm_tp_fraction": 0.50,
     "trail_arm_r": 1.5,
@@ -143,6 +153,18 @@ STRATEGY_CFG = {
         "smt_window_hours": 1.0,
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1H,
         **_RISK_GATES,
+        # 1H'te C2 yalnizca 1 saat; kapanisini beklemek CISD onayindan sonra
+        # 45 dk'ya kadar olu bekleme demek ve retest tipik olarak o pencerede
+        # olusuyor (US100 08.09: 17:20 CISD -> 17:25 retest -> 18:00 C2 kapanis).
+        # Ters donus kanitini zaten CISD onayi veriyor; kapanmamis C2'nin skorda
+        # -1 bedeli var. IFVG girisi ise C2 kapanmadan HALA kapali (_RISK_GATES):
+        # C2 penceresinde daima daha saglam olan CISD/MSS kullanilir.
+        # Takas: daha cok firsat, karsiliginda C2 icinde yeni dip/tepe olursa
+        # tamponsuz SL yenebilir.
+        # NOT: score7 kapisi acik kalir; _score7_strict_ok icindeki C2 sarti
+        # require_c2_closed'a bagli oldugu icin 1H'te otomatik dusuyor
+        # (CISD entry + PD array sarti aynen duruyor).
+        "require_c2_closed": False,
         "be_arm_r": None,
         "trail_arm_tp_fraction": 0.75,
         "trail_arm_r": None,
@@ -621,6 +643,29 @@ def _slice_ltf_after(
     return work[idx > start_ts]
 
 
+def _first_past_crt_mid_ts(
+    df_15m: pd.DataFrame,
+    direction: str,
+    entry: float,
+    invalidation_level: float,
+    cisd_time: datetime | None,
+    after_time: datetime | None = None,
+) -> datetime | None:
+    """CRT %60 otesine ILK kapanan LTF mumunun zamani; yoksa None. Iğne sayilmaz."""
+    closed = _slice_ltf_after(
+        df_15m, _as_utc(cisd_time) or _as_utc(after_time), closed_only=True,
+    )
+    if closed.empty:
+        return None
+    for ts, row in closed.iterrows():
+        if check_signal_invalidation(
+            float(row["close"]), direction, invalidation_level, entry,
+        ):
+            t = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+            return _as_utc(t)
+    return None
+
+
 def _price_past_crt_mid(
     df_15m: pd.DataFrame,
     direction: str,
@@ -630,17 +675,9 @@ def _price_past_crt_mid(
     after_time: datetime | None = None,
 ) -> bool:
     """Kapanmis LTF close CRT %60 otesine gecti mi? Iğne sayilmaz."""
-    closed = _slice_ltf_after(
-        df_15m, _as_utc(cisd_time) or _as_utc(after_time), closed_only=True,
-    )
-    if closed.empty:
-        return False
-    for close in closed["close"]:
-        if check_signal_invalidation(
-            float(close), direction, invalidation_level, entry,
-        ):
-            return True
-    return False
+    return _first_past_crt_mid_ts(
+        df_15m, direction, entry, invalidation_level, cisd_time, after_time,
+    ) is not None
 
 
 def _price_hit_sl_after(
@@ -730,6 +767,59 @@ def _first_post_cisd_fill_ts(
     return None
 
 
+def _fill_within_backfill_window(
+    df_ltf: pd.DataFrame | None,
+    fill_ts: datetime | None,
+    cfg: dict | None,
+) -> bool:
+    """Gecmisteki fill hala 'taze' mi? (fill'den sonra <= N kapanmis LTF mumu)
+
+    Uygulama kapaliyken / bir kapi sonradan acildiginda gecmis bir retest
+    yakalanabilir. Saatler oncesini diriltmemek icin pencere sinirlidir.
+    """
+    if fill_ts is None:
+        return False
+    max_bars = int((cfg or {}).get("max_backfill_fill_bars", MAX_BACKFILL_FILL_BARS))
+    if max_bars <= 0:
+        return False
+    work = _closed_ltf_bars(df_ltf) if df_ltf is not None else None
+    if work is None or work.empty:
+        return False
+    after = work[work.index > _asof_index(work, fill_ts)]
+    return len(after) <= max_bars
+
+
+async def _replay_after_fill(
+    session: AsyncSession,
+    display_symbol: str,
+    df_ltf: pd.DataFrame,
+    fill_ts: datetime,
+    strategy: str,
+) -> None:
+    """Backfill ile active yapilan sinyali fill mumundan bugune yurut.
+
+    Fill ile simdi arasinda TP/SL/BE/trail olmus olabilir; bunlari yakalamak
+    icin kapanmis LTF mumlari sirayla manage_symbol_on_price'tan gecirilir.
+    """
+    work = _closed_ltf_bars(df_ltf)
+    if work.empty:
+        return
+    seg = work[work.index >= _asof_index(work, fill_ts)]
+    if seg.empty:
+        return
+    avg_range = _avg_ltf_range(df_ltf)
+    for ts, row in seg.iterrows():
+        bar_ts = _as_utc(ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts)
+        await manage_symbol_on_price(
+            session, display_symbol,
+            float(row["high"]), float(row["low"]), float(row["close"]),
+            ts=bar_ts, candle_ts=bar_ts, timeframe=strategy,
+            avg_ltf_range=avg_range, bar_closed=True,
+        )
+        if not has_open_symbol(display_symbol, timeframe=strategy):
+            break
+
+
 def _quality_score_asof(
     df_htf: pd.DataFrame | None,
     df_ltf: pd.DataFrame | None,
@@ -783,10 +873,17 @@ def _maybe_ifvg_entry(
     *,
     allow_ifvg: bool = True,
 ):
-    """LTF IFVG varsa ve mid SL-TP arasindaysa onu kullan; yoksa CISD/MSS.
+    """LTF IFVG varsa ve RR'yi kotulestirmiyorsa onu kullan; yoksa CISD/MSS.
 
     CISD/MSS adayi check_cisd_confirmation icinde zaten daha iyi RR ile secilir.
-    IFVG RR eşiği burada uygulanmaz (cagiran min_rr ile eler).
+    IFVG mid'i SL-TP arasinda OLMALI ve CISD adayindan daha kotu RR VERMEMELI:
+    LONG'da mid CISD entry'sinin ustunde (SHORT'ta altinda) kalirsa stop genisler,
+    RR duser; boyle bir IFVG "daha iyi giris" degildir.
+    (US100 08.09 1H: CISD 29485.74 -> RR 2.46 iken IFVG 29519.79 -> RR 1.31.)
+    Mutlak RR esigi burada uygulanmaz (cagiran min_rr ile eler).
+
+    IFVG entry olarak kullanilmasa bile zone bilgisi (ifvg_low/high) cisd
+    uzerine yazilir; UI'daki IFVG rozeti bunu gosterir.
     """
     planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     if not allow_ifvg:
@@ -808,6 +905,8 @@ def _maybe_ifvg_entry(
     ):
         return cisd, planned
     ifvg_rr = _calc_planned_rr(zone.mid, cisd.stop_loss, cisd.take_profit)
+    if ifvg_rr is None or (planned is not None and ifvg_rr < planned):
+        return cisd, planned  # IFVG girisi RR'yi kotulestiriyor -> CISD/MSS kal
     cisd.entry_price = zone.mid
     cisd.entry_model = "ifvg"
     return cisd, ifvg_rr
@@ -822,40 +921,20 @@ def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
     return True
 
 
-def _sl_buffer_mult(setup: CRTSetup, cfg: dict | None) -> float | None:
-    cfg = cfg or {}
-    market = (setup.market_type or "").lower()
-    if market == "crypto":
-        return cfg.get("sl_buffer_crypto_mult") or cfg.get("sl_buffer_range_mult")
-    return cfg.get("sl_buffer_range_mult")
-
-
-def _apply_sl_buffer(cisd, setup: CRTSetup, df_ltf: pd.DataFrame | None, cfg: dict | None) -> bool:
-    """SL'yi LTF range tamponu kadar genislet. Entry SL-TP disina cikarsa False."""
-    mult = _sl_buffer_mult(setup, cfg)
-    if not mult:
-        return True
-    avg = _avg_ltf_range(df_ltf)
-    if avg is None or avg <= 0:
-        return True
-    sl = float(cisd.stop_loss)
-    if setup.direction == "LONG":
-        cisd.stop_loss = round(sl - float(mult) * avg, 8)
-    else:
-        cisd.stop_loss = round(sl + float(mult) * avg, 8)
-    return _entry_between_stops(
-        setup.direction, float(cisd.entry_price), float(cisd.stop_loss), float(cisd.take_profit),
-    )
-
-
 def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
-    """4H skor 7: yalniz kapali C2 + CISD + PD array."""
-    if not (cfg or {}).get("score7_requires_cisd_pd"):
+    """Skor tam 7 (sinirda): yalniz CISD entry + PD array (+ kapali C2).
+
+    C2 sarti stratejinin `require_c2_closed` ayarina baglidir; C2 kapanisini
+    zorunlu tutmayan strateji (1H-5M) icin skor7 kapisi da C2 aramaz.
+    """
+    cfg = cfg or {}
+    if not cfg.get("score7_requires_cisd_pd"):
         return True
     if int(setup.bias_score or 0) != 7:
         return True
     model = getattr(cisd, "entry_model", None) or "cisd"
-    return bool(setup.c2_closed) and model == "cisd" and bool(setup.pd_array)
+    c2_ok = bool(setup.c2_closed) or not cfg.get("require_c2_closed")
+    return c2_ok and model == "cisd" and bool(setup.pd_array)
 
 
 def _preview_trade_levels(
@@ -881,7 +960,6 @@ def _preview_trade_levels(
         cisd, planned = _maybe_ifvg_entry(
             cisd, setup, df_ltf, c2_hours=c2_hours, allow_ifvg=allow_ifvg,
         )
-        _apply_sl_buffer(cisd, setup, df_ltf, cfg)
         planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
         return {
             "rr": planned,
@@ -896,12 +974,10 @@ def _preview_trade_levels(
             setup.key_level_high if setup.direction == "LONG" else setup.key_level_low
         )
         if _entry_between_stops(setup.direction, zone.mid, sl, tp):
-            tmp = SimpleNamespace(stop_loss=sl, entry_price=zone.mid, take_profit=tp)
-            _apply_sl_buffer(tmp, setup, df_ltf, cfg)
             return {
-                "rr": _calc_planned_rr(zone.mid, tmp.stop_loss, tp),
+                "rr": _calc_planned_rr(zone.mid, sl, tp),
                 "entry": zone.mid,
-                "sl": tmp.stop_loss,
+                "sl": sl,
                 "tp": tp,
                 "ifvg": True,
             }
@@ -1392,18 +1468,6 @@ async def _detect_and_create_waiting_locked(
         _maybe_ifvg_entry, cisd, setup, df_ltf, cfg["c2_hours"],
         allow_ifvg=_ifvg_allowed(setup, cfg),
     )
-    if not _apply_sl_buffer(cisd, setup, df_ltf, cfg):
-        if existing_pending is not None:
-            await _delete_pending(session, existing_pending, "tight_stop")
-        _radar("tight_stop", direction=setup.direction,
-                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
-                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
-                   smt=setup.smt_pair, pd=setup.pd_array)
-        log.info(
-            "SKIPPED (SL BUFFER): %s %s buffered SL entry disinda.",
-            setup.symbol, setup.direction,
-        )
-        return None
     planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     if planned_rr is None or planned_rr < min_rr:
         if existing_pending is not None:
@@ -1487,10 +1551,37 @@ async def _detect_and_create_waiting_locked(
         )
         return None
 
-    if _price_past_crt_mid(
+    # Kronoloji: limit emri entry'de bekliyordu. CISD sonrasi ilk gecerli retest
+    # (fill) CRT %60 ihlalinden ONCE olduysa emir dolmus sayilir; ihlal setup'i
+    # oldurmez. Ters sirada (once ihlal, sonra donus) setup gercekten gecersizdir.
+    fill_ts = None
+    if cisd.confirmed:
+        fill_ts = _first_post_cisd_fill_ts(
+            df_ltf, setup.direction, cisd.entry_price,
+            cisd.stop_loss, cisd.take_profit, cisd.cisd_time,
+        )
+    breach_ts = _first_past_crt_mid_ts(
         df_ltf, setup.direction, cisd.entry_price,
         cisd.invalidation_level, cisd.cisd_time, after_time=setup.purge_time,
-    ):
+    )
+    # Gecmis fill'i yalnizca taze ise (pencere ici) ve C2 kosulu saglanmisken
+    # dirilt; boylece saatler once dolmus bayat bir emir sinyale donusmez.
+    backfill_ts = fill_ts if (
+        fill_ts is not None
+        and (breach_ts is None or fill_ts <= breach_ts)
+        and _fill_within_backfill_window(df_ltf, fill_ts, cfg)
+    ) else None
+    if backfill_ts is not None and cfg.get("require_c2_closed"):
+        if not setup.c2_closed:
+            backfill_ts = None
+        else:
+            c2_open = _as_utc(setup.purge_time)
+            if c2_open is not None and backfill_ts < (
+                c2_open + timedelta(hours=float(cfg["c2_hours"]))
+            ):
+                backfill_ts = None  # fill C2 kapanmadan once olmus, gecersiz
+
+    if breach_ts is not None and backfill_ts is None:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "crt_50")
         _radar("invalidated", direction=setup.direction,
@@ -1498,16 +1589,13 @@ async def _detect_and_create_waiting_locked(
                    entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info(
-            "SKIPPED (CRT 60%%): %s %s price past invalidation %s before entry.",
-            setup.symbol, setup.direction, cisd.invalidation_level,
+            "SKIPPED (CRT 60%%): %s %s price past invalidation %s before entry"
+            " (breach=%s fill=%s).",
+            setup.symbol, setup.direction, cisd.invalidation_level, breach_ts, fill_ts,
         )
         return None
 
     if cisd.confirmed:
-        fill_ts = _first_post_cisd_fill_ts(
-            df_ltf, setup.direction, cisd.entry_price,
-            cisd.stop_loss, cisd.take_profit, cisd.cisd_time,
-        )
         if fill_ts is not None:
             q_at_fill = await _cpu(
                 _quality_score_asof,
@@ -1534,7 +1622,14 @@ async def _detect_and_create_waiting_locked(
     can_wait = bool(cisd.confirmed) and (
         not cfg.get("require_c2_closed") or bool(setup.c2_closed)
     )
-    status = WAITING_STATUS if can_wait else PENDING_STATUS
+    if not can_wait:
+        backfill_ts = None
+    # Gecmis retest dogrulandiysa sinyal dogrudan active dogar (entry_filled_time
+    # o retest mumudur); aksi halde normal waiting/pending.
+    if backfill_ts is not None:
+        status = "active"
+    else:
+        status = WAITING_STATUS if can_wait else PENDING_STATUS
     if existing_pending is not None:
         prev_status = existing_pending.status
         _apply_signal_levels(
@@ -1565,30 +1660,47 @@ async def _detect_and_create_waiting_locked(
                 cisd.entry_price, cisd.stop_loss, cisd.take_profit, planned_rr,
                 getattr(cisd, "entry_model", "cisd"),
             )
+        if backfill_ts is not None:
+            signal.entry_filled_time = backfill_ts
+            await record_event(
+                "filled",
+                f"Entry {cisd.entry_price} gecmis retest ile dolduruldu ({backfill_ts})",
+                symbol=setup.symbol, direction=setup.direction,
+                market_type=setup.market_type, level="success", session=session,
+            )
         await session.commit()
     else:
         signal = _build_waiting_signal(
             setup, cisd, planned_rr, htf_bias, weekly_bias=weekly_bias, status=status,
         )
         session.add(signal)
-        if status == WAITING_STATUS:
+        if status in (WAITING_STATUS, "active"):
             await record_event(
                 "new_setup",
                 f"{setup.purge_type} purge | Entry {cisd.entry_price} SL {cisd.stop_loss} TP {cisd.take_profit} (RR {planned_rr})",
                 symbol=setup.symbol, direction=setup.direction,
                 market_type=setup.market_type, level="info", session=session,
             )
+        if backfill_ts is not None:
+            signal.entry_filled_time = backfill_ts
+            await record_event(
+                "filled",
+                f"Entry {cisd.entry_price} gecmis retest ile dolduruldu ({backfill_ts})",
+                symbol=setup.symbol, direction=setup.direction,
+                market_type=setup.market_type, level="success", session=session,
+            )
         await session.commit()
         log.info(
             "%s: %s %s %s Entry:%s SL:%s TP:%s RR:%.2f model=%s",
-            "NEW WAITING" if status == WAITING_STATUS else "NEW PENDING",
+            "NEW ACTIVE (backfill)" if status == "active"
+            else ("NEW WAITING" if status == WAITING_STATUS else "NEW PENDING"),
             setup.symbol, setup.direction, setup.purge_type,
             cisd.entry_price, cisd.stop_loss, cisd.take_profit, planned_rr,
             getattr(cisd, "entry_model", "cisd"),
         )
 
     _OPEN_SYMBOLS.add((setup.symbol, strategy))
-    if status == WAITING_STATUS:
+    if status in (WAITING_STATUS, "active"):
         radar_state = "waiting"
     elif cisd.confirmed and cfg.get("require_c2_closed") and not setup.c2_closed:
         radar_state = "c2_open"
@@ -1601,6 +1713,23 @@ async def _detect_and_create_waiting_locked(
         entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
         smt=setup.smt_pair, pd=setup.pd_array,
     )
+
+    if backfill_ts is not None:
+        log.info(
+            "BACKFILL FILL: %s %s entry %s @ %s (gecmis retest, ihlal=%s)",
+            setup.symbol, setup.direction, cisd.entry_price, backfill_ts, breach_ts,
+        )
+        if tg_configured():
+            try:
+                mid = await send_signal_active(signal)
+                if mid:
+                    signal.tg_message_id = mid
+                    await session.commit()
+            except Exception:
+                log.warning("telegram send failed for %s", signal.symbol)
+        # Fill ile simdi arasindaki TP/SL/BE/trail'i yakala.
+        await _replay_after_fill(session, setup.symbol, df_ltf, backfill_ts, strategy)
+
     return signal
 
 

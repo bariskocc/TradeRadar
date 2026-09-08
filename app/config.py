@@ -23,6 +23,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR / 'trad
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 saat
 
+# ──────────────────── Loglama ────────────────────
+# Scanner/CRT karar loglari (NEW WAITING, SKIPPED, BACKFILL FILL ...) INFO'dadir.
+LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+LOG_FILE_MAX_BYTES = int(os.getenv("LOG_FILE_MAX_BYTES", str(5 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
 # ──────────────────── BingX veri kaynagi ────────────────────
 BINGX_REST_BASE = os.getenv("BINGX_REST_BASE", "https://open-api.bingx.com")
 BINGX_WS_URL = os.getenv("BINGX_WS_URL", "wss://open-api-swap.bingx.com/swap-market")
