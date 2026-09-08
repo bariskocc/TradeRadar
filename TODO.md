@@ -180,6 +180,58 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
+## 7. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
+
+> **Öncelik: EN DÜŞÜK.** Acelesi yok, diğer maddelerin hepsi bitince bakılacak.
+> **Çıktı bir rapor/öneri**, doğrudan refactor değil.
+
+**Soru:** Sistem web sitesi olarak tasarlandı ama tek kullanıcı var (sen).
+Farklı bir yapı daha mı uygun?
+
+### Web olduğu için var olan, tek kullanıcıda karşılığı olmayan şeyler
+
+- JWT + cookie + login sayfası (`app/auth.py`, `templates/login.html`) —
+  `verify_credentials` zaten `.env`'deki tek kullanıcıyla düz string
+  karşılaştırması
+- Tailwind derleme adımı (`tools/tailwindcss.exe` → `app/static/css/app.css`)
+- Sayfalama (sinyaller 20/sayfa, loglar 50/sayfa) — veri seti çok küçük
+- `/api/*` katmanı, yalnızca kendi template'leri besliyor
+
+### Asıl mimari koku (analizin ana konusu)
+
+**Trade motoru web sunucusunun `lifespan`'i içinde yaşıyor**
+(`app/main.py` → `market_data.start()`). Yani:
+
+- Uvicorn yeniden başlarsa/çökerse **WS ölür, sinyal tespiti durur**
+- Motorun çalışma süresi, sadece izlemek için var olan UI'ın çalışma süresine
+  bağlı
+- Bir template düzenlemesi + reload, canlı motoru etkiler
+
+Oysa **değerli olan motor**, UI sadece bir görüntüleyici.
+
+### Değerlendirilecek seçenekler
+
+1. **Motoru ayrı process'e al** (en küçük değişiklik, en büyük kazanç):
+   headless daemon SQLite'a yazar; web app yalnızca okur. UI çökse de motor
+   çalışır. Windows Task Scheduler / NSSM ile servisleştirilebilir.
+2. **Telegram-öncelikli, UI opsiyonel**: Telegram zaten aktif sinyal + sonuç
+   gönderiyor. Radar da bir `/radar` komutuyla gelebilir mi? Web app yalnızca
+   geçmiş/analitik için kalır.
+3. **Olduğu gibi bırak**: tek kullanıcıda bu karmaşıklık zaten zarar vermiyor;
+   sadece auth ve derleme adımı sadeleştirilir.
+4. Masaüstü uygulaması (Tauri/Electron) — muhtemelen zahmete değmez, tamlık
+   için listede.
+
+### Analiz başlamadan cevaplanması gereken
+
+- **UI'a başka bir cihazdan / makine dışından erişiyor musun?** Uygulama
+  `0.0.0.0:8000`'e bağlanıyor, yani LAN'a açık. Cevap "hayır" ise auth ve web
+  katmanının büyük kısmı gereksiz. "Evet" ise (telefondan bakmak gibi) web
+  yapısı korunmalı — o zaman Telegram bunu zaten karşılıyor mu?
+- Motor ile UI'ın aynı makinede kalması şart mı?
+
+---
+
 ## Tamamlananlar (2026-09-08)
 
 Referans için; ayrıntı [CLAUDE.md](CLAUDE.md) "US100 1H-5M LONG incelemesi".
