@@ -69,9 +69,48 @@ Alternatif: limiti skora bağlamak (skor 9+ muaf) veya pencereyi kısaltmak.
 
 ---
 
-## 4. Eski açık başlıklar (devralınan)
+## 4. Signals + Radar sayfalarına "Entry Model" sütunu
 
-Bunlar bu oturumdan önce de açıktı; hâlâ geçerli mi teyit edilmeli.
+**İstenen:** Her sinyalde girişin hangi modelden geldiği görünsün: `IFVG`,
+`CISD`, `MSS`.
+
+**⚠️ Bu salt UI işi değil — motor şu an MSS'i ayrı kaydetmiyor.**
+`Signal.entry_model` yalnızca iki değer alıyor: `"cisd"` | `"ifvg"`.
+`check_cisd_confirmation` içinde iki aday var (`app/crt_engine.py`):
+
+- **CISD** = purge öncesi düşüş/yükseliş bloğunun ilk mumunun açılışı
+- **MSS** = purge öncesi son swing high/low
+
+`_pick_wider_stop` hangisi daha iyi RR veriyorsa onu seçiyor **ama hangisinin
+kazandığını döndürmüyor** — `CISDConfirmation.entry_model` dataclass
+varsayılanı olarak her hâlükârda `"cisd"` kalıyor. Yani bugün "cisd" yazan
+kayıtların bir kısmı aslında MSS.
+
+**Yapılacaklar:**
+
+1. `_pick_wider_stop` kazanan adayı da döndürsün (`"cisd"` / `"mss"`).
+2. `_check_bullish_cisd` / `_check_bearish_cisd` bunu
+   `CISDConfirmation.entry_model`'e yazsın. `_maybe_ifvg_entry` zaten IFVG
+   seçilince `"ifvg"` ile eziyor — sıralama korunmalı.
+3. **Signals sayfası** (`app/templates/signals.html`): yeni sütun.
+   Not: tabloda zaten bir **IFVG** sütunu var (✓ rozeti, `ifvg_low`/`ifvg_high`
+   tooltip'li). Entry Model sütunu eklenince o sütun gereksizleşebilir —
+   **karar:** ikisi birden mi kalsın, yoksa IFVG sütunu Entry Model ile
+   birleştirilsin mi?
+4. **Radar** (`app/templates/radar.html` + `/api/radar`): radar entry model'i
+   hiç taşımıyor. Zincir: `_preview_trade_levels` dönüşüne `model` eklensin →
+   `_set_radar(...)` yeni parametre → `api_radar` (`app/main.py`) JSON'a koysun
+   → template'te rozet. Radar'daki mevcut `ifvg` alanı da bool.
+
+**Migration gerekmiyor** — `entry_model` kolonu DB'de mevcut. Ama geçmiş
+kayıtlar geriye dönük düzelmez (hepsi `"cisd"` yazıyor); istenirse
+`/api/recalc-scores` benzeri bir yeniden hesaplama gerekir.
+
+---
+
+## 5. Eski açık başlıklar (devralınan)
+
+Bunlar 2026-09-08 oturumundan önce de açıktı; hâlâ geçerli mi teyit edilmeli.
 
 **a) CISD onayında `strong_close_margin` kapalı**
 `app/crt_engine.py` `_check_bullish_cisd` / `_check_bearish_cisd` içinde MSS
@@ -97,7 +136,7 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 5. İzleme (madde değil, süreç)
+## 6. İzleme (madde değil, süreç)
 
 2026-09-08'de 7 düzeltme canlıya alındı ve loglama kuruldu. Bir süre
 `logs/traderadar.log` izlenmeli:
