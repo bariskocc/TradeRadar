@@ -54,6 +54,21 @@ LOW QUALITY / SCORE7 / PAST TP / PAST SL / CRT 60% / TARGET TAKEN /
 MISSED QUALITY), `FILLED`, `BACKFILL FILL`, `BE ARM`, `TRAIL ARM`, `TRAIL`,
 `CLOSED (...)`, `SMT+2`. Uvicorn'un kendi logları `server.err.log`'a gider.
 
+**Log raporu:**
+
+```powershell
+python scripts/logstat.py              # tüm log
+python scripts/logstat.py --hours 24   # son 24 saat
+python scripts/logstat.py --file logs/traderadar.log.1   # dönen yedek
+```
+
+Çıktı: setup'ların hangi kapıda elendiği (dağılım + en sık semboller), sinyal
+yaşam döngüsü sayıları, kapanan işlemler tablosu (R, win rate, çıkış türü),
+[TODO.md](TODO.md) madde 6 izleme metrikleri (BACKFILL tetiklenme, koruma
+etkisi, CRT %60 kronolojisi) ve WS bağlantı sağlığı. Logu elle `Get-Content`
+ile okuyacaksan **`-Encoding UTF8`** ver — PowerShell 5.1 dosyayı ANSI sanıp
+Türkçe karakterleri bozar; script bu sorunu yaşamaz.
+
 ## Mimari
 
 Tek veri kaynağı: **BingX USDT-M perpetual swap**. FX/metal/endeks/petrol de

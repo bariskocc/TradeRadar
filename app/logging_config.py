@@ -20,7 +20,8 @@ from app.config import BASE_DIR, LOG_FILE_MAX_BYTES, LOG_BACKUP_COUNT, LOG_LEVEL
 TSI = timezone(timedelta(hours=3))
 
 _FMT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
-_DATEFMT = "%d.%m %H:%M:%S"
+# Yil dahil: donen yedekler aylara yayilabiliyor, yilsiz damga belirsiz kalir.
+_DATEFMT = "%d.%m.%y %H:%M:%S"
 
 # REST/WS kutuphaneleri INFO'da her istegi yazar; bootstrap'ta yuzlerce satir.
 _NOISY = ("httpx", "httpcore", "websockets", "asyncio")
