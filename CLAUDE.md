@@ -2,6 +2,8 @@
 
 TradeRadar — CRT/ICT tabanlı kişisel trade sinyal radarı ve dashboard'u.
 
+Açık işler: **[TODO.md](TODO.md)** — madde tamamlanınca o dosyadan silinir.
+
 ## Çalışma kuralları (her görevden önce)
 
 `.cursor/rules/project-workflow.mdc` bağlayıcıdır:
@@ -199,12 +201,15 @@ yazılıyor.
 
 ## Bilinen açık konular
 
-- `.cursor/rules/acik-sinyal-duzeltmeleri.mdc`: NZDUSD 1D sahte-trail ve GBPCHF
-  MSS/CISD notları (doji artık blok bölmüyor; aynı-mum MFE koruması eklendi).
+Devralınan kapalı kod parçaları — ayrıntı ve karar notları [TODO.md](TODO.md)
+madde 4'te:
+
 - `crt_engine.py` içinde strong-close margin CISD onayında **kapalı** (FX'te
   onayı geciktirip CRT %60 ile çatışıyordu).
 - `color_opposite` / "same color" eski hard filter yorum satırında; artık skorda
   baz +1/+2 farkı olarak var.
+- `.cursor/rules/acik-sinyal-duzeltmeleri.mdc`: NZDUSD 1D sahte-trail ve GBPCHF
+  MSS/CISD notları (ikisi de kodda düzeltilmiş görünüyor).
 
 ### US100 1H-5M LONG incelemesi (2026-09-08)
 
@@ -235,5 +240,4 @@ Bu dört düzeltmeyle US100 CISD entry 29485.74 / SL 29416.80 / RR **2.46** ve
    doğuyor, `max_backfill_fill_bars` (6) penceresiyle sınırlı. Bkz. yaşam
    döngüsü bölümü.
 
-**Açık kalan:**
-- IFVG girişi hiç dolmazsa CISD/MSS'e fallback (durum tutmayı gerektirir).
+**Açık kalan:** bkz. [TODO.md](TODO.md).
