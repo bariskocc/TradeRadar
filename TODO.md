@@ -93,10 +93,13 @@ kayıtların bir kısmı aslında MSS.
    `CISDConfirmation.entry_model`'e yazsın. `_maybe_ifvg_entry` zaten IFVG
    seçilince `"ifvg"` ile eziyor — sıralama korunmalı.
 3. **Signals sayfası** (`app/templates/signals.html`): yeni sütun.
-   Not: tabloda zaten bir **IFVG** sütunu var (✓ rozeti, `ifvg_low`/`ifvg_high`
-   tooltip'li). Entry Model sütunu eklenince o sütun gereksizleşebilir —
-   **karar:** ikisi birden mi kalsın, yoksa IFVG sütunu Entry Model ile
-   birleştirilsin mi?
+   **Karar verildi: IFVG sütunu KALIYOR.** İki sütun iki farklı soruyu
+   cevaplıyor:
+   - **IFVG** = setup'ta IFVG *var mı?* (varlık)
+   - **Entry Model** = giriş *hangi modelden geldi?* (IFVG / CISD / MSS)
+
+   #1 düzeltmesinden sonra bunlar gerçekten ayrışıyor: IFVG var ama RR'yi
+   kötüleştirdiği için kullanılmamış olabilir → `IFVG ✓` + `Entry Model: CISD`.
 4. **Radar** (`app/templates/radar.html` + `/api/radar`): radar entry model'i
    hiç taşımıyor. Zincir: `_preview_trade_levels` dönüşüne `model` eklensin →
    `_set_radar(...)` yeni parametre → `api_radar` (`app/main.py`) JSON'a koysun
@@ -105,6 +108,33 @@ kayıtların bir kısmı aslında MSS.
 **Migration gerekmiyor** — `entry_model` kolonu DB'de mevcut. Ama geçmiş
 kayıtlar geriye dönük düzelmez (hepsi `"cisd"` yazıyor); istenirse
 `/api/recalc-scores` benzeri bir yeniden hesaplama gerekir.
+
+### ⚠️ Bonus hata: mevcut IFVG sütunu "var mı"yı doğru göstermiyor
+
+Kullanıcı bu sütunu "setup'ta IFVG var mı" diye okuyor, ama her iki kaynak da
+**"IFVG var VE kullanılabilir"** anlamına geliyor:
+
+- `_maybe_ifvg_entry` (signals kaynağı, `app/scanner.py`):
+  ```python
+  if not allow_ifvg:
+      return cisd, planned      # detect_ltf_ifvg HİÇ çağrılmıyor
+  ...
+  cisd.ifvg_low = zone.low      # ancak buraya gelirse yazılıyor
+  ```
+- `_preview_trade_levels` (radar kaynağı): zone tespit ediliyor ama
+  `ifvg = zone is not None and allow_ifvg` ile AND'leniyor.
+
+`_ifvg_allowed` C2 kapanmamışken (çok yaygın — `c2_open` / `no_cisd` durumları)
+veya skor tam 7 iken `False` döner. Yani **C2 formasyondayken IFVG sütunu, IFVG
+fiilen var olsa bile hep "-" gösteriyor.**
+
+**Düzeltme:** varlık tespitini `allow_ifvg`'den ayır — zone'u her hâlükârda
+tespit et, `allow_ifvg`'yi yalnızca *entry olarak kullanma* kararında kullan.
+`_maybe_ifvg_entry`'de erken `return`'ü zone tespitinden sonraya al.
+
+**Maliyet notu:** bu, IFVG'nin izinli olmadığı her setup'ta bir ek
+`detect_ltf_ifvg` çağrısı demek. Sıcak yolda; `_cpu()` ile thread'e atılıyor,
+muhtemelen sorun değil ama ölçmeye değer.
 
 ---
 
