@@ -89,10 +89,10 @@ def main() -> int:
 
     mon = r["monitoring"]
     if mon:
-        head("IZLEME METRIKLERI (TODO madde 6)")
+        head("IZLEME METRIKLERI (TODO: Izleme)")
         bf = mon["backfills"]
         print(f"  BACKFILL FILL tetiklenme : {len(bf)}"
-              + ("   -> hic tetiklemediyse TODO madde 1'e gerek yok" if not bf else ""))
+              + ("   -> hic tetiklemediyse TODO 'IFVG fallback' gereksiz" if not bf else ""))
         for b in bf:
             when = f"{b['ts']:%d.%m %H:%M}" if b["ts"] else "-"
             print(f"      {when}  {b['symbol']} {b['direction']}")

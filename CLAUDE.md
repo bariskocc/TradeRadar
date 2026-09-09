@@ -62,7 +62,7 @@ iki arayüzü var:
 
 İçerik: setup'ların hangi kapıda elendiği (dağılım + en sık semboller), sinyal
 yaşam döngüsü sayıları, kapanan işlemler tablosu (R, win rate, çıkış türü),
-[TODO.md](TODO.md) madde 6 izleme metrikleri (BACKFILL tetiklenme, koruma
+[TODO.md](TODO.md) "İzleme" maddesinin metrikleri (BACKFILL tetiklenme, koruma
 etkisi, CRT %60 kronolojisi) ve WS bağlantı sağlığı.
 
 **Önemli ayrım:** `/logs` Events sekmesi `event_logs` **DB tablosunu** gösterir
@@ -129,7 +129,7 @@ tetikleyicileri (`be_arm_r`, `trail_arm_r`) kapalı. BE yalnızca **4H**'te aç�
 5R'lik bir işlemde yolun %20'sinde tetikleyip işlemi erken boğuyordu; TP kesri
 hedefe göre ölçekleniyor (min RR 2.0'da TP %50 zaten +1R'ye denk). 1D/1H'te BE
 kapalı — 1h/5m mum boyu 1R'ye yakın olduğu için entry'deki stop iğneye açık
-(bkz. NZDUSD notu, [TODO.md](TODO.md) madde 7).
+(bkz. NZDUSD notu, [TODO.md](TODO.md) "1D/1H'te BE" maddesi).
 
 **1H-5M istisnası**: `require_c2_closed = False`. C2 yalnızca 1 saat olduğu için
 kapanışını beklemek CISD onayından sonra 45 dk'ya kadar ölü bekleme demek ve
@@ -204,7 +204,12 @@ yazılıyor.
    PD major (+1) + PD aylık (+1) + HTF FVG/OB (+1) + purge wick (+1) + LTF IFVG
    (+1). Tavan 9. **SMT divergence** korele pariteyle bulunursa +2 → max 11 =
    "Premium". **Skor < 7 açılmaz** (`MIN_QUALITY_SCORE`).
-7. Kripto aynı yön küme limiti: açık + son N saatte 2 (BTC/ETH muaf).
+7. Kripto aynı yön küme limiti: açık + son N saatte 2. **Muafiyet:** BTC/ETH
+   (`CLUSTER_EXEMPT_SYMBOLS`) ve **skor ≥ `CLUSTER_EXEMPT_MIN_SCORE` (9)**.
+   SMT'siz skor tavanı 9 olduğu için 9 eşiği "mükemmel baz skor veya SMT'li"
+   demek; 10 olsaydı yalnızca SMT'liler geçerdi. Muaf setup limiti **deler ama
+   sayıma dâhildir** — kotayı doldurur, böylece sıradan setuplar için koruma
+   çalışmaya devam eder.
 8. Min RR: tüm marketler 2.0 (`_min_rr_for_market`).
 9. Aşırı dar stop: `stop_dist < min_stop_range_mult (1.0) × ort. LTF range` →
    `tight_stop`. Ölçülen şey **entry ↔ C2 ucu mesafesi** (SL'nin yeri değil —
@@ -235,7 +240,7 @@ yazılıyor.
 ## Bilinen açık konular
 
 Devralınan kapalı kod parçaları — ayrıntı ve karar notları [TODO.md](TODO.md)
-madde 4'te:
+"Eski açık başlıklar" maddesinde:
 
 - `crt_engine.py` içinde strong-close margin CISD onayında **kapalı** (FX'te
   onayı geciktirip CRT %60 ile çatışıyordu).

@@ -47,29 +47,7 @@ tolerans anlamlı olur mu?
 
 ---
 
-## 3. Kripto cluster limiti fazla kısıtlayıcı mı? (ticaret kararı)
-
-**Gözlem (2026-09-08):** ETH/LINK/SUI SHORT açılınca 4 saatlik pencerede kota
-doldu ve **4 setup daha bloklandı** — hepsi `open=1/2 recent=2/2` ile:
-
-| Sembol | Skor | RR |
-|---|---|---|
-| ADA | 9 | 4.47 |
-| BNB | 9 | 2.03 |
-| TAO | 9 | 1.42 |
-| XRP | 8 | — |
-
-**Mevcut ayar** (`_RISK_GATES` / `STRATEGY_CFG`, `app/scanner.py`):
-`cluster_open: 2`, `cluster_recent: 2`, `cluster_window_hours: 4` (1D'de 24).
-Yalnızca kripto; BTC/ETH muaf (`CLUSTER_EXEMPT_SYMBOLS`).
-
-**Karar gereken:** Piyasa geneli tek yöne giderken (ki CRT'de sık olur) bu limit
-en kaliteli setup'ları da kesiyor. Korelasyon riski gerçek — ama 2 çok mu az?
-Alternatif: limiti skora bağlamak (skor 9+ muaf) veya pencereyi kısaltmak.
-
----
-
-## 4. Signals + Radar sayfalarına "Entry Model" sütunu
+## 3. Signals + Radar sayfalarına "Entry Model" sütunu
 
 **İstenen:** Her sinyalde girişin hangi modelden geldiği görünsün: `IFVG`,
 `CISD`, `MSS`.
@@ -138,7 +116,7 @@ muhtemelen sorun değil ama ölçmeye değer.
 
 ---
 
-## 5. Eski açık başlıklar (devralınan)
+## 4. Eski açık başlıklar (devralınan)
 
 Bunlar 2026-09-08 oturumundan önce de açıktı; hâlâ geçerli mi teyit edilmeli.
 
@@ -166,7 +144,7 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 6. İzleme (madde değil, süreç)
+## 5. İzleme (madde değil, süreç)
 
 2026-09-08'de 7 düzeltme canlıya alındı ve loglama kuruldu. Bir süre
 `logs/traderadar.log` izlenmeli:
@@ -180,7 +158,7 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 7. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
+## 6. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
 
 **Bağlam:** 2026-09-08'de SUI 4H SHORT, MFE +1.48R'ye gitti ama trail TP %50'de
 (+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
@@ -232,7 +210,7 @@ tek bir `rr_value` yazıyor; kısmi çıkış için en az şunlar gerekir:
 
 ---
 
-## 8. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
+## 7. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
 
 > **Öncelik: EN DÜŞÜK.** Acelesi yok, diğer maddelerin hepsi bitince bakılacak.
 > **Çıktı bir rapor/öneri**, doğrudan refactor değil.

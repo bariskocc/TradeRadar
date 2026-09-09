@@ -4,7 +4,7 @@ Hem `/logs?view=report` sayfasi hem `scripts/logstat.py` bu modulu kullanir;
 toplama mantigi tek yerde durur. Dosyayi yalnizca OKUR — DB'ye/sunucuya
 dokunmaz, sunucu kapaliyken de calisir.
 
-TODO madde 6'daki izleme sorulari icin: setup'lar hangi kapida eleniyor,
+TODO 'Izleme' maddesindeki sorular icin: setup'lar hangi kapida eleniyor,
 BACKFILL hic tetikliyor mu, koruma (BE/trail) islemleri erken mi boguyor.
 """
 
@@ -188,7 +188,7 @@ def build_report(path: str | Path | None = None, hours: float | None = None) -> 
     else:
         report["close_stats"] = {}
 
-    # ── Izleme metrikleri (TODO madde 6) ────────────────────────────
+    # ── Izleme metrikleri (TODO: Izleme) ────────────────────────────
     by_how = Counter(c["how"] for c in closes)
     trail_exits = [c["rr"] for c in closes if c["how"] == "hit_trail"]
     crt_rows = [m for _, _, _, m in rows if m.startswith("SKIPPED (CRT 60%)")]

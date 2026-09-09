@@ -82,6 +82,14 @@ MAX_SAME_DIRECTION_RECENT = 2
 CLUSTER_WINDOW_HOURS = 4
 CLUSTER_MARKET = "crypto"
 CLUSTER_EXEMPT_SYMBOLS = frozenset({"BTCUSDT.P", "ETHUSDT.P"})
+# Skoru bu degerin ALTINDA olmayan setup kume limitine takilmaz.
+# SMT'siz skor tavani 9, SMT bonusu +2. Yani 9 => "mukemmel baz skor VEYA
+# SMT'li" (08.09 4H evreninde 40 setupta 8); 10 olsaydi yalnizca SMT'liler
+# gecerdi (40'ta 1) ve kume limitine takilan ADA/BNB/TAO/XRP -- hepsi tam 9 --
+# yine bloklu kalirdi.
+# Muaf setup limiti DELER ama sayima DAHILDIR: kotayi doldurur, boylece
+# siradan setuplar icin koruma calismaya devam eder.
+CLUSTER_EXEMPT_MIN_SCORE = 9
 
 # Entry'ye gore minimum stop mesafesi (%). Simdilik tum marketlerde kapali.
 # Tekrar acmak icin ilgili satiri geri al (fx / index).
@@ -1440,6 +1448,7 @@ async def _detect_and_create_waiting_locked(
         (setup.market_type or "").lower() == CLUSTER_MARKET
         and existing_pending is None
         and setup.symbol not in CLUSTER_EXEMPT_SYMBOLS
+        and int(setup.bias_score or 0) < CLUSTER_EXEMPT_MIN_SCORE
     ):
         cluster_window = float(cfg.get("cluster_window_hours", CLUSTER_WINDOW_HOURS))
         open_n, recent_n = await _count_direction_cluster(
