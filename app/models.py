@@ -48,6 +48,11 @@ class Signal(Base):
 
     # Result tracking
     result = Column(String, nullable=True)                 # win / loss / breakeven
+    # Cikisin SEBEBI: tp / sl / be / trail / week_close.
+    # `result` R'nin isaretine gore yazilmaya devam eder (istatistikler bozulmasin);
+    # bu kolon "nasil cikildi" sorusunu ayri tutar. week_close = Cuma 17:00 NY'de
+    # kripto-disi pozisyonun duzlestirilmesi.
+    exit_reason = Column(String, nullable=True)
     planned_rr = Column(Float, nullable=True)              # Potansiyel R:R (olusturulunca; degismez)
     rr_value = Column(Float, nullable=True)                # Gerceklesen R (kapanista); acikken plan ile ayni olabilir
     duration_hours = Column(Float, nullable=True)

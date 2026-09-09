@@ -30,7 +30,7 @@ import pandas as pd
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import BOOTSTRAP_LIMITS
+from app.config import BOOTSTRAP_LIMITS, SESSION_1H_BARS
 from app.crt_engine import (
     CRTSetup,
     check_cisd_confirmation,
@@ -48,15 +48,18 @@ from app.event_log import record_event
 from app.exchange import (
     correlated_symbol,
     fetch_ohlcv,
+    fetch_ohlcv_deep,
     from_display_symbol,
     get_active_markets,
     get_d1h_markets,
     get_h1_markets,
     get_h1_symbols_flat,
+    is_session_symbol,
     market_of,
     to_display_symbol,
 )
 from app.models import Signal
+from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_result
 
@@ -235,6 +238,7 @@ def _set_radar(
     pd: str | None = None,
     c2_closed: bool | None = None,
     ifvg: bool | None = None,
+    model: str | None = None,
     purge_time=None,
     crt_bar_time=None,
     strategy: str = STRATEGY_4H,
@@ -270,6 +274,12 @@ def _set_radar(
         "pd": pd,
         "c2_closed": stored_c2,
         "ifvg": stored_ifvg,
+        # Entry modeli: cisd | mss | ifvg. IFVG "var mi" (ifvg) ile "girisi
+        # hangi model verdi" (model) ayri sorular - IFVG-RR korumasindan sonra
+        # gercekten ayrisiyorlar (IFVG var ama RR'yi kotulestirdigi icin CISD).
+        "model": model if model is not None else (
+            None if state in ("no_setup", "no_data") else prev.get("model")
+        ),
         "purge_time": purge_time if purge_time is not None else (
             None if state in ("no_setup", "no_data") else prev.get("purge_time")
         ),
@@ -914,9 +924,11 @@ def _maybe_ifvg_entry(
     uzerine yazilir; UI'daki IFVG rozeti bunu gosterir.
     """
     planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
-    if not allow_ifvg:
-        return cisd, planned
     hours = c2_hours if c2_hours is not None else _c2_hours_for_setup(setup)
+    # Zone VARLIGI her halukarda tespit edilir; `allow_ifvg` yalnizca "entry
+    # olarak kullan" kararini etkiler. Eskiden erken return yuzunden
+    # detect_ltf_ifvg hic cagrilmiyordu ve UI'daki IFVG sutunu "var mi" yerine
+    # "var VE kullanilabilir" gosteriyordu (C2 formasyondayken hep "-").
     zone = detect_ltf_ifvg(
         df_ltf, setup.direction, setup.purge_time,
         crt_low=setup.key_level_low,
@@ -924,10 +936,11 @@ def _maybe_ifvg_entry(
         crt_bar_time=setup.crt_bar_time,
         c2_hours=hours,
     )
-    if zone is None:
+    if zone is not None:
+        cisd.ifvg_low = zone.low
+        cisd.ifvg_high = zone.high
+    if not allow_ifvg or zone is None:
         return cisd, planned
-    cisd.ifvg_low = zone.low
-    cisd.ifvg_high = zone.high
     ifvg_entry = zone.entry_for(setup.direction)
     if not _entry_between_stops(
         setup.direction, ifvg_entry, float(cisd.stop_loss), float(cisd.take_profit),
@@ -951,10 +964,15 @@ def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
 
 
 def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
-    """Skor tam 7 (sinirda): yalniz CISD entry + PD array (+ kapali C2).
+    """Skor tam 7 (sinirda): yalniz yapisal entry + PD array (+ kapali C2).
 
     C2 sarti stratejinin `require_c2_closed` ayarina baglidir; C2 kapanisini
     zorunlu tutmayan strateji (1H-5M) icin skor7 kapisi da C2 aramaz.
+
+    "Yapisal entry" = IFVG DISINDAKI adaylar. `entry_model` artik "cisd" ve
+    "mss"i ayirt ediyor (Entry Model sutunu icin); ikisi de yapisal seviye
+    oldugundan bu kapi acisindan esdegerdir - eskiden ikisi de "cisd" yaziyordu,
+    kontrol `== "cisd"` kalsaydi MSS girisleri sessizce elenirdi.
     """
     cfg = cfg or {}
     if not cfg.get("score7_requires_cisd_pd"):
@@ -963,7 +981,7 @@ def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
         return True
     model = getattr(cisd, "entry_model", None) or "cisd"
     c2_ok = bool(setup.c2_closed) or not cfg.get("require_c2_closed")
-    return c2_ok and model == "cisd" and bool(setup.pd_array)
+    return c2_ok and model != "ifvg" and bool(setup.pd_array)
 
 
 def _preview_trade_levels(
@@ -983,7 +1001,10 @@ def _preview_trade_levels(
         c2_hours=c2_hours,
     )
     allow_ifvg = _ifvg_allowed(setup, cfg)
-    ifvg = zone is not None and allow_ifvg
+    # `ifvg` = bolge VAR MI (varlik). Kullanilip kullanilmadigi ayri bir soru;
+    # onu `model` cevaplar. Eskiden allow_ifvg ile AND'lendigi icin C2
+    # formasyondayken IFVG fiilen var olsa bile "-" gorunuyordu.
+    ifvg = zone is not None
     cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=c2_hours)
     if cisd is not None:
         cisd, planned = _maybe_ifvg_entry(
@@ -995,7 +1016,8 @@ def _preview_trade_levels(
             "entry": cisd.entry_price,
             "sl": cisd.stop_loss,
             "tp": cisd.take_profit,
-            "ifvg": ifvg or getattr(cisd, "entry_model", None) == "ifvg",
+            "ifvg": ifvg,
+            "model": getattr(cisd, "entry_model", None) or "cisd",
         }
     if allow_ifvg and zone is not None and setup.purge_extreme is not None:
         sl = float(setup.purge_extreme)
@@ -1010,9 +1032,10 @@ def _preview_trade_levels(
                 "sl": sl,
                 "tp": tp,
                 "ifvg": True,
+                "model": "ifvg",
             }
         return {"ifvg": True}
-    return {"ifvg": False}
+    return {"ifvg": ifvg}
 
 
 def _hits_tp(direction: str, high: float, low: float, take_profit: float) -> bool:
@@ -1184,6 +1207,19 @@ async def _load_frames(
         frames["1d"] = _copy_df(store.get_df(bingx_symbol, "1d"))
         frames["1h"] = _copy_df(store.get_df(bingx_symbol, "1h"))
         frames["5m"] = _copy_df(store.get_df(bingx_symbol, "5m"))
+    elif is_session_symbol(bingx_symbol):
+        # Store yoksa da HTF'yi BingX'ten ham cekmeyiz: 4H/1D NY-hizali
+        # sentezlenir, LTF'den olu seans barlari elenir (bkz. app/session.py).
+        df1h = await fetch_ohlcv_deep(bingx_symbol, "1h", bars=SESSION_1H_BARS, client=client)
+        frames["1h"] = fx_session.drop_dead_session(df1h)
+        frames["4h"] = fx_session.resample_from_1h(df1h, "4h")
+        frames["1d"] = fx_session.resample_from_1h(df1h, "1d")
+        frames["15m"] = fx_session.drop_dead_session(
+            await fetch_ohlcv(bingx_symbol, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client)
+        )
+        frames["5m"] = fx_session.drop_dead_session(
+            await fetch_ohlcv(bingx_symbol, "5m", limit=BOOTSTRAP_LIMITS["5m"], client=client)
+        )
     else:
         frames["4h"] = await fetch_ohlcv(bingx_symbol, "4h", limit=BOOTSTRAP_LIMITS["4h"], client=client)
         frames["15m"] = await fetch_ohlcv(bingx_symbol, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client)
@@ -2183,7 +2219,7 @@ async def manage_symbol_on_price(
                     sig.status = "expired"
                     sig.result = "win"
                     sig.rr_value = round(_planned_rr(entry, initial_sl, tp), 2)
-                    setattr(sig, "_exit_kind", "tp")
+                    sig.exit_reason = "tp"
                     result["closed"].append({"symbol": sig.symbol, "result": "win"})
                     await record_event(
                         "closed_win", f"TP {sig.take_profit} vuruldu (+{sig.rr_value}R)",
@@ -2196,7 +2232,7 @@ async def manage_symbol_on_price(
                     sig.rr_value = round(
                         _rr_at_exit(sig.direction, entry, float(sig.stop_loss), risk), 2
                     )
-                    setattr(sig, "_exit_kind", "trail")
+                    sig.exit_reason = "trail"
                     result["closed"].append({"symbol": sig.symbol, "result": "win"})
                     await record_event(
                         "closed_win",
@@ -2208,7 +2244,7 @@ async def manage_symbol_on_price(
                     sig.status = "breakeven"
                     sig.result = "breakeven"
                     sig.rr_value = 0.0
-                    setattr(sig, "_exit_kind", "be")
+                    sig.exit_reason = "be"
                     result["breakeven"].append(sig.symbol)
                     await record_event(
                         "breakeven", f"Breakeven / trail floor (entry {sig.entry_price})",
@@ -2219,7 +2255,7 @@ async def manage_symbol_on_price(
                     sig.status = "expired"
                     sig.result = "loss"
                     sig.rr_value = -1.0
-                    setattr(sig, "_exit_kind", "sl")
+                    sig.exit_reason = "sl"
                     result["closed"].append({"symbol": sig.symbol, "result": "loss"})
                     await record_event(
                         "closed_loss", f"SL {sig.stop_loss} vuruldu (-1R)",
@@ -2280,6 +2316,144 @@ async def manage_symbol_on_price(
     return result
 
 
+# ──────────────────── Hafta kapanisi (kripto-disi) ────────────────────
+
+
+def _last_close_from_store(store: object | None, bingx_symbol: str, timeframe: str) -> float | None:
+    """Haftanin son canli kapanis fiyati. Olu seans barlari store'a yazilmiyor."""
+    if store is None:
+        return None
+    cfg = STRATEGY_CFG.get(timeframe, STRATEGY_CFG[STRATEGY_4H])
+    for tf in (cfg["ltf"], "1h", cfg["htf"]):
+        try:
+            df = store.get_df(bingx_symbol, tf)
+        except Exception:
+            continue
+        if df is not None and not df.empty:
+            return float(df.iloc[-1]["close"])
+    return None
+
+
+async def close_session_positions(
+    session: AsyncSession,
+    store: object | None = None,
+) -> dict:
+    """Cuma 17:00 NY: kripto-disi acik islemleri duzlestir.
+
+    Gercek FX piyasasi hafta sonu kapali; pozisyonu tasimak Pazar acilisindaki
+    gap riskini almak demektir (gap SL'nin otesinden acarsa gerceklesen kayip
+    -1R'den buyuk olur ve motor bunu olcemez). Bu yuzden:
+
+    - **Acik islemler** haftanin son fiyatiyla kapatilir; `exit_reason`
+      `week_close`, `result` R'nin isaretine gore yazilir.
+    - **Dolmamis setuplar** iptal edilir - aksi halde Pazartesi gap'i entry'nin
+      cok otesinde "dolmus" sayilabilirdi. CRT Pazartesi hala gecerliyse setup
+      zaten yeniden dogar.
+
+    Kripto etkilenmez (7/24 islem gorur).
+    """
+    result: dict = {"closed": [], "cancelled": []}
+    rows = await session.execute(
+        select(Signal).where(Signal.status.in_(list(OPEN_STATUSES)))
+    )
+    signals = rows.scalars().all()
+    if not signals:
+        return result
+
+    now = datetime.now(timezone.utc)
+    finished: list[Signal] = []
+    changed = False
+
+    for sig in signals:
+        try:
+            bingx_symbol, _ = from_display_symbol(sig.symbol)
+        except Exception:
+            continue
+        if not is_session_symbol(bingx_symbol):
+            continue
+
+        tf = sig.timeframe or STRATEGY_4H
+
+        if sig.status != "active":
+            _set_radar(
+                sig.symbol, sig.market_type, "week_close",
+                direction=sig.direction, score=sig.bias_score,
+                bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
+                entry=sig.entry_price, sl=sig.stop_loss, tp=sig.take_profit,
+                smt=sig.smt_pair, pd=sig.pd_array, c2_closed=sig.c2_closed,
+                strategy=tf,
+            )
+            await record_event(
+                "cancelled", "Hafta kapanisi: dolmamis setup iptal edildi",
+                symbol=sig.symbol, direction=sig.direction,
+                market_type=sig.market_type, level="info", session=session,
+            )
+            await session.delete(sig)
+            changed = True
+            result["cancelled"].append(sig.symbol)
+            log.info("WEEK CLOSE (CANCEL): %s %s %s waiting entry removed.",
+                     sig.symbol, sig.direction, tf)
+            continue
+
+        exit_price = _last_close_from_store(store, bingx_symbol, tf)
+        if exit_price is None:
+            log.warning("WEEK CLOSE: %s icin cikis fiyati yok, pozisyon acik birakildi.",
+                        sig.symbol)
+            continue
+
+        entry = float(sig.entry_price or 0.0)
+        initial_sl = float(
+            sig.initial_stop_loss if sig.initial_stop_loss is not None else (sig.stop_loss or 0.0)
+        )
+        risk = _risk_from_stops(entry, initial_sl)
+        if not risk:
+            log.warning("WEEK CLOSE: %s risk hesaplanamadi, atlandi.", sig.symbol)
+            continue
+
+        rr = round(_rr_at_exit(sig.direction, entry, exit_price, risk), 2)
+        # `result` R'nin isaretine gore yazilir ki dashboard/analytics bozulmasin;
+        # "nasil cikildi" bilgisi exit_reason'da durur.
+        if rr > 0:
+            sig.status, sig.result = "expired", "win"
+        elif rr < 0:
+            sig.status, sig.result = "expired", "loss"
+        else:
+            sig.status, sig.result = "breakeven", "breakeven"
+        sig.rr_value = rr
+        sig.exit_reason = "week_close"
+
+        ref_time = _as_utc(sig.entry_filled_time or sig.cisd_time)
+        if ref_time:
+            sig.duration_hours = round((now - ref_time).total_seconds() / 3600, 1)
+
+        finished.append(sig)
+        changed = True
+        result["closed"].append({"symbol": sig.symbol, "result": sig.result})
+        await record_event(
+            "closed_win" if rr > 0 else ("closed_loss" if rr < 0 else "breakeven"),
+            f"Hafta kapanisi: {exit_price} ile duzlestirildi ({rr:+}R)",
+            symbol=sig.symbol, direction=sig.direction,
+            market_type=sig.market_type,
+            level="success" if rr > 0 else ("error" if rr < 0 else "info"),
+            session=session,
+        )
+        log.info("WEEK CLOSE: %s %s %s exit=%s entry=%s R=%+0.2f",
+                 sig.symbol, sig.direction, tf, exit_price, entry, rr)
+
+    if changed:
+        await session.commit()
+        if tg_configured():
+            for sig in finished:
+                try:
+                    await send_signal_result(sig)
+                except Exception:
+                    log.warning("telegram result send failed for %s", sig.symbol)
+        await refresh_open_symbols(session)
+        log.info("WEEK CLOSE tamamlandi: %d kapatildi, %d iptal edildi.",
+                 len(result["closed"]), len(result["cancelled"]))
+    return result
+
+
 # ──────────────────── Acik sinyal REST mutabakati ────────────────────
 
 
@@ -2327,7 +2501,13 @@ async def reconcile_open_signals(
                             df = None
                     rest_df = await fetch_ohlcv(bingx_symbol, ltf, limit=50, client=client)
                     if rest_df is not None and not rest_df.empty:
-                        df = rest_df
+                        # REST ham seriyi dondurur: seans sembollerinde olu
+                        # seans barlari geri sizmasin (hafta sonu wick'i acik
+                        # islemi yanlis kapatir).
+                        if is_session_symbol(bingx_symbol):
+                            rest_df = fx_session.drop_dead_session(rest_df)
+                        if not rest_df.empty:
+                            df = rest_df
                     if df is None or df.empty:
                         continue
 
