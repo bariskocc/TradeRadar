@@ -1731,12 +1731,13 @@ async def _detect_and_create_waiting_locked(
             )
         await session.commit()
         log.info(
-            "%s: %s %s %s Entry:%s SL:%s TP:%s RR:%.2f model=%s",
+            "%s: %s %s %s Entry:%s SL:%s TP:%s RR:%.2f model=%s score=%s reclaim=%s",
             "NEW ACTIVE (backfill)" if status == "active"
             else ("NEW WAITING" if status == WAITING_STATUS else "NEW PENDING"),
             setup.symbol, setup.direction, setup.purge_type,
             cisd.entry_price, cisd.stop_loss, cisd.take_profit, planned_rr,
-            getattr(cisd, "entry_model", "cisd"),
+            getattr(cisd, "entry_model", "cisd"), setup.bias_score,
+            f"{setup.c2_reclaim:.0f}%" if setup.c2_reclaim is not None else "-",
         )
 
     _OPEN_SYMBOLS.add((setup.symbol, strategy))

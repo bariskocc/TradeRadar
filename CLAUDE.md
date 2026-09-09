@@ -239,7 +239,7 @@ bayat ama ict ile hemfikir olan ETH/US100/USDCAD gibi doğru okumaları da
 6. Kalite skoru (`_calc_live_setup_bias`): baz (doğru C2 rengi +2 / doji +1) +
    1D hiza veya reversal-at-PD (+2 / karşı −2) + 1W uyum (+1) + C2 kapalı (+1) +
    PD major (+1) + PD aylık (+1) + HTF FVG/OB (+1) + purge wick (+1) + LTF IFVG
-   (+1). Tavan 9. **SMT divergence** korele pariteyle bulunursa +2 → max 11 =
+   (+1) + **zayıf C2 geri dönüşü (−2)**. Tavan 9. **SMT divergence** korele pariteyle bulunursa +2 → max 11 =
    "Premium". **Skor < 7 açılmaz** (`MIN_QUALITY_SCORE`).
 7. Kripto aynı yön küme limiti: açık + son N saatte 2. **Muafiyet:** BTC/ETH
    (`CLUSTER_EXEMPT_SYMBOLS`) ve **skor ≥ `CLUSTER_EXEMPT_MIN_SCORE` (9)**.

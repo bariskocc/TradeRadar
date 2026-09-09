@@ -49,6 +49,13 @@ CISD_STRONG_CLOSE_RANGE_MULT = 0.30
 CISD_MARGIN_LOOKBACK = 20
 # Purge rejection wick: fitil / CRT range esigi (kalite skoru)
 PURGE_WICK_SCORE_PCT = 0.10
+# C2'nin C1 araligina geri donusu: (C2 close) supurulen kenardan C1 range'inin
+# yuzde kaci kadar iceri girdi. Supurup aralik dibinden kapatan bir C2, derin
+# geri donen bir C2'den zayiftir; kod eskiden yalnizca "iceri kapandi mi"
+# (yani %0 bile yeterli) bakiyordu. Esigin altinda skordan C2_RECLAIM_PENALTY
+# dusulur -- HARD FILTRE DEGIL (ARB 09.09 %15 ile +3.16R yapti).
+C2_RECLAIM_WEAK_PCT = 25.0
+C2_RECLAIM_PENALTY = 2
 # LTF IFVG asgari bosluk boyutu: gap >= bu oran * son 20 LTF mumunun ort. range'i.
 # Amac: bir 5M mumunun kucuk bir kesridi kadar olan "bosluklari" (gurultu) eleyip
 # yalnizca gercek displacement iceren FVG'leri kabul etmek. Ayarlanabilir.
@@ -82,6 +89,7 @@ class CRTSetup:
     c2_closed: bool = False  # Purge (C2) mumu KAPANMIS mi? (forming/kapanmamis ise False)
     color_opposite: bool = True  # CRT/purge farkli renk; ayni renk skorda baz -1 (hard filter degil)
     target_consumed: bool = False  # C1 hedef tarafi sonradan supuruldu; sinyal yok, radar gosterir
+    c2_reclaim: Optional[float] = None  # C2 kapanisi C1 araliginin %kacina dondu
 
 
 @dataclass
@@ -432,6 +440,25 @@ def _pd_array_score(pd_labels: Optional[list[str]]) -> int:
     return score
 
 
+def c2_reclaim_pct(
+    crt_row: pd.Series, purge_row: pd.Series, direction: str,
+) -> Optional[float]:
+    """C2 kapanisi, C1 araliginin supurulen kenardan yuzde kacina dondu.
+
+    LONG (LOW purge): (C2.close - C1.low) / C1.range
+    SHORT (HIGH purge): (C1.high - C2.close) / C1.range
+    %100'u asabilir (C2 C1'in tamamen karsi tarafina kapatmissa).
+    """
+    hi = float(crt_row["high"])
+    lo = float(crt_row["low"])
+    rng = hi - lo
+    if rng <= 0:
+        return None
+    close = float(purge_row["close"])
+    inside = (close - lo) if direction == "LONG" else (hi - close)
+    return inside / rng * 100.0
+
+
 def _purge_wick_score(
     crt_range: float,
     purge_row: pd.Series,
@@ -556,6 +583,15 @@ def _calc_live_setup_bias(
 
     wick_score = _purge_wick_score(crt_range, rev, direction)
 
+    # Zayif geri donus cezasi: C2 supurup C1 araliginin dibinden kapattiysa
+    # ters donus zayif sayilir. Ceza, tavan uygulanmadan ONCE raw'dan duser.
+    reclaim = c2_reclaim_pct(crt, rev, direction)
+    reclaim_score = (
+        -C2_RECLAIM_PENALTY
+        if reclaim is not None and reclaim < C2_RECLAIM_WEAK_PCT
+        else 0
+    )
+
     ifvg_score = 0
     if df_ltf is not None and not df_ltf.empty:
         purge_ts = df_4h.index[purge_idx]
@@ -573,6 +609,7 @@ def _calc_live_setup_bias(
     raw = (
         base_score + htf_score + weekly_score
         + c2_closed_score + pd_score + wick_score + ifvg_score
+        + reclaim_score
     )
     # SMT'siz tavan 9; +SMT 2 ile max 11 (premium).
     score = max(0, min(9, raw))
@@ -1240,6 +1277,7 @@ def detect_crt_setup(
             color_opposite=not same_color,
             timeframe=timeframe,
             target_consumed=target_consumed,
+            c2_reclaim=c2_reclaim_pct(live_crt, purge_row, direction),
         )))
 
     if not candidates:

@@ -174,7 +174,49 @@ gevşek kalıp işlemler +2R'den 0R'ye (BE) dönüyorsa eşik geri çekilmeli.
 
 ---
 
-## 5. 1D/1H'te BE açılsın mı?
+## 5. C2 geri dönüş cezası (−2) — INJ'yi engellemiyor, dikkat
+
+**✅ Yapıldı (2026-09-09):** `C2_RECLAIM_WEAK_PCT = 25.0`, `C2_RECLAIM_PENALTY = 2`.
+C2 kapanışı C1 aralığının süpürülen kenardan **%25'inden azına** döndüyse
+skordan −2. Hard filtre **değil**.
+
+**Metrik:** `c2_reclaim_pct()` — LONG'da `(C2.close − C1.low) / C1.range`,
+SHORT'ta `(C1.high − C2.close) / C1.range`. %100'ü aşabilir (C2 C1'in tamamen
+karşı tarafına kapatmışsa). Eskiden kod yalnızca `c2_close >= crt_low` bakıyordu,
+yani **%0 geri dönüş bile yeterliydi**.
+
+### ⚠️ Motive eden vakayı çözmüyor
+
+INJ 4H LONG (−1R, %24.4 geri dönüş) bu cezayla **hâlâ açılır**: skor 10 → 8,
+eşik 7. SMT bonusu (+2) cezayı yutuyor.
+
+Daha da önemlisi: **en iyi işlemimiz ARB (+3.16R) %15 ile daha da zayıf.**
+Skorları birebir aynı (ikisi de 10 → 8). Yani bu metrik, bugünkü kanıtla
+kazananla kaybedeni **ayırt etmiyor** — hiçbir ceza büyüklüğü ikisini ayıramaz.
+
+### Ölçülen etki (51 setup, canlı evren, SMT dâhil)
+
+| | |
+|---|---|
+| Zayıf geri dönüş (<%25) | 10/51 |
+| Skor ≥7 (cezasız) | 29 |
+| Skor ≥7 (cezalı) | **27** |
+| Kaybedilen setup | **2** (AUDUSD 1d, CADJPY 1d — ikisi de SMT'siz, sınırdaydı) |
+
+Yani ceza pratikte hafif: yalnızca **sınırda ve SMT'siz** setup'ları düşürüyor.
+SMT'li olanlar absorbe ediyor.
+
+**Tetikleyici — birkaç düzine işlem sonra bak:**
+- Zayıf geri dönüşlü (<%25) işlemlerin win rate'i / ortalama R'si, güçlü
+  olanlardan belirgin düşükse → cezayı artır ya da hard filtreye çevir
+- Fark yoksa → metriği tamamen kaldır (skor gürültüsü)
+
+**Ölçüm:** `NEW WAITING` / `NEW PENDING` log satırları artık
+`score=8 reclaim=15%` taşıyor; kapanan işlemlerle eşleştirilebilir.
+
+---
+
+## 6. 1D/1H'te BE açılsın mı?
 
 **Bağlam:** SUI 4H SHORT (08.09), MFE +1.48R'ye gitti ama trail TP %50'de
 (+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
@@ -207,7 +249,7 @@ yine tam entry'de durur.
 
 ---
 
-## 6. Not
+## 7. Not
 
 Kısmi kâr alma (%50'de yarı kapat + BE) fikri bir **yapılacak iş**, izleme
 konusu değil — [TODO.md](TODO.md) içinde.
