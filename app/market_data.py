@@ -25,21 +25,28 @@ from app.config import (
     BINGX_WS_URL,
     BOOTSTRAP_LIMITS,
     MAINTENANCE_INTERVAL_SEC,
+    SESSION_1H_BARS,
 )
 from app.database import async_session
 from app.event_log import record_event
 from app.exchange import (
     fetch_ohlcv,
+    fetch_ohlcv_deep,
     get_active_symbols_flat,
     get_d1h_symbols_flat,
     get_h1_5m_symbols,
+    is_session_symbol,
     to_display_symbol,
 )
 from app import scanner
+from app import session as fx_session
 
 log = logging.getLogger(__name__)
 
-_MAX_ROWS = 500  # frame basina saklanacak azami mum
+# Frame basina saklanacak azami mum. Seans sembollerinin 4H/1D serileri 1H'ten
+# sentezlendigi icin 1H derin tutulur (60 islem gunu ~ 2016 takvim saati).
+_MAX_ROWS_DEFAULT = 500
+_MAX_ROWS = {"1h": 2400}
 _WS_CORE_TFS = ["15m", "4h"]
 _WS_D1H_TFS = ["1h"]
 _WS_H1_TFS = ["5m"]
@@ -58,8 +65,12 @@ class MarketDataStore:
     def __init__(self) -> None:
         self._frames: dict[tuple[str, str], pd.DataFrame] = {}
 
+    @staticmethod
+    def _cap(timeframe: str) -> int:
+        return _MAX_ROWS.get(timeframe, _MAX_ROWS_DEFAULT)
+
     def set_df(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
-        self._frames[(symbol, timeframe)] = df.tail(_MAX_ROWS).copy()
+        self._frames[(symbol, timeframe)] = df.tail(self._cap(timeframe)).copy()
 
     def get_df(self, symbol: str, timeframe: str) -> pd.DataFrame:
         df = self._frames.get((symbol, timeframe))
@@ -82,8 +93,9 @@ class MarketDataStore:
             df = pd.DataFrame([row], index=[idx])
         else:
             df.loc[idx] = row
-            if len(df) > _MAX_ROWS:
-                df = df.tail(_MAX_ROWS)
+            cap = self._cap(timeframe)
+            if len(df) > cap:
+                df = df.tail(cap)
         df.sort_index(inplace=True)
         self._frames[key] = df
 
@@ -102,6 +114,9 @@ class BingXMarketData:
         self._connected = False
         self._last_message_at: datetime | None = None
         self._last_1d_day = None
+        # Cuma kapanisi (kripto-disi pozisyonlari duzlestirme): haftada bir kez.
+        self._week_close_pending = False
+        self._week_close_marker: str | None = None
 
     # ──────────────── Bootstrap ────────────────
 
@@ -117,6 +132,11 @@ class BingXMarketData:
         )
         async with httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0) as client:
             for sym in self._symbols:
+                if is_session_symbol(sym):
+                    # FX/metal/endeks/petrol: 4H ve 1D BingX'ten cekilmez,
+                    # 1H'ten NY-hizali sentezlenir (bkz. app/session.py).
+                    await self._bootstrap_session_symbol(sym, client)
+                    continue
                 for tf in _WS_CORE_TFS:
                     df = await fetch_ohlcv(sym, tf, limit=BOOTSTRAP_LIMITS[tf], client=client)
                     if not df.empty:
@@ -144,6 +164,9 @@ class BingXMarketData:
             fourh_set = set(self._symbols)
             for sym in self._d1h_symbols:
                 if sym not in fourh_set:
+                    if is_session_symbol(sym):
+                        await self._bootstrap_session_symbol(sym, client, with_ltf=False)
+                        continue
                     try:
                         df1d = await fetch_ohlcv(sym, "1d", limit=BOOTSTRAP_LIMITS["1d"], client=client)
                         if not df1d.empty:
@@ -164,16 +187,86 @@ class BingXMarketData:
                     try:
                         df5m = await fetch_ohlcv(sym, "5m", limit=BOOTSTRAP_LIMITS["5m"], client=client)
                         if not df5m.empty:
-                            self.store.set_df(sym, "5m", df5m)
                             last_ms = int(df5m.index[-1].value // 1_000_000)
+                            if is_session_symbol(sym):
+                                df5m = fx_session.drop_dead_session(df5m)
+                            self.store.set_df(sym, "5m", df5m)
                             self._last_ts[(sym, "5m")] = last_ms
                     except Exception as e:
                         log.warning("5M bootstrap basarisiz %s: %s", sym, e)
         self._last_1d_day = datetime.now(timezone.utc).date()
         log.info("Bootstrap tamamlandi.")
 
+    async def _bootstrap_session_symbol(self, sym: str, client, with_ltf: bool = True) -> None:
+        """FX/metal/endeks/petrol bootstrap'i.
+
+        4H ve 1D BingX'ten CEKILMEZ: BingX'in mumlari UTC gece yarisina hizali,
+        gercek FX mumu ise 17:00 NY'ye. Ikisi de derin 1H serisinden NY-hizali
+        sentezlenir ve olu seans barlari elenir.
+        """
+        if with_ltf:
+            try:
+                df15 = await fetch_ohlcv(sym, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client)
+                if not df15.empty:
+                    # _last_ts WS surekliligini takip eder: filtreden ONCEKI son bar.
+                    self._last_ts[(sym, "15m")] = int(df15.index[-1].value // 1_000_000)
+                    self.store.set_df(sym, "15m", fx_session.drop_dead_session(df15))
+            except Exception as e:
+                log.warning("15M bootstrap basarisiz %s: %s", sym, e)
+        try:
+            df1h = await fetch_ohlcv_deep(sym, "1h", bars=SESSION_1H_BARS, client=client)
+            if df1h.empty:
+                log.warning("1H derin bootstrap bos dondu: %s", sym)
+                return
+            self._last_ts[(sym, "1h")] = int(df1h.index[-1].value // 1_000_000)
+            self.store.set_df(sym, "1h", df1h)
+            self._rebuild_session_htf(sym, full=True)
+        except Exception as e:
+            log.warning("Seans bootstrap basarisiz %s: %s", sym, e)
+
+    def _rebuild_session_htf(self, symbol: str, full: bool = False) -> None:
+        """Seans sembolunun 4H/1D serilerini 1H'ten NY-hizali uret.
+
+        `full=True` (bootstrap) tum seriyi bastan kurar. Aksi halde yalnizca
+        icinde bulunulan forming kova yeniden hesaplanir: bu metot 1H akisinda
+        her mesajda cagriliyor, tum seriyi resample etmek pahali olurdu.
+        """
+        df1h = self.store.get_df(symbol, "1h")
+        if df1h is None or df1h.empty:
+            return
+
+        if full:
+            for tf in ("4h", "1d"):
+                out = fx_session.resample_from_1h(df1h, tf)
+                if not out.empty:
+                    self.store.set_df(symbol, tf, out)
+            return
+
+        last_ts = df1h.index[-1]
+        if fx_session.is_dead_session(last_ts):
+            return  # piyasa kapali: HTF mumu ilerlemez
+        for tf in ("4h", "1d"):
+            start = fx_session.bucket_start(last_ts, tf)
+            bars = fx_session.drop_dead_session(df1h[df1h.index >= start])
+            if bars.empty:
+                continue
+            row = {
+                "open": float(bars.iloc[0]["open"]),
+                "high": float(bars["high"].max()),
+                "low": float(bars["low"].min()),
+                "close": float(bars.iloc[-1]["close"]),
+                "volume": float(bars["volume"].sum()),
+            }
+            self.store.upsert_candle(symbol, tf, int(start.value // 1_000_000), row)
+
     def _rebuild_forming_1d(self, symbol: str) -> None:
-        """Ayni UTC gununun 1H mumlarindan forming 1D bari guncelle."""
+        """Ayni UTC gununun 1H mumlarindan forming 1D bari guncelle.
+
+        Seans sembollerinde bunun yerine NY-hizali 4H+1D sentezi calisir.
+        """
+        if is_session_symbol(symbol):
+            self._rebuild_session_htf(symbol)
+            return
         df1h = self.store.get_df(symbol, "1h")
         if df1h is None or df1h.empty:
             return
@@ -198,18 +291,34 @@ class BingXMarketData:
         self.store.upsert_candle(symbol, "1d", day_ms, row)
 
     async def _refresh_1d(self) -> None:
-        """Gunluk (1D) veriyi 4H + 1D-1H evreni icin yeniden cek (gunde bir kez)."""
-        refresh_syms = list(dict.fromkeys([*self._symbols, *self._d1h_symbols]))
+        """Gunluk (1D) veriyi yeniden cek (gunde bir kez).
+
+        Seans sembolleri haric: onlarin 1D serisi 1H akisindan sentezleniyor,
+        yani kendi kendini uzatiyor. Onlar icin REST yalnizca WS kacagini
+        onarmak uzere 1H serisini tazeler.
+        """
+        all_syms = list(dict.fromkeys([*self._symbols, *self._d1h_symbols]))
+        rest_syms = [s for s in all_syms if not is_session_symbol(s)]
+        sess_syms = [s for s in all_syms if is_session_symbol(s)]
         async with httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0) as client:
-            for sym in refresh_syms:
+            for sym in rest_syms:
                 try:
                     df1d = await fetch_ohlcv(sym, "1d", limit=BOOTSTRAP_LIMITS["1d"], client=client)
                     if not df1d.empty:
                         self.store.set_df(sym, "1d", df1d)
                 except Exception as e:
                     log.warning("1D yenileme basarisiz %s: %s", sym, e)
+            for sym in sess_syms:
+                try:
+                    df1h = await fetch_ohlcv_deep(sym, "1h", bars=SESSION_1H_BARS, client=client)
+                    if not df1h.empty:
+                        self.store.set_df(sym, "1h", df1h)
+                        self._rebuild_session_htf(sym, full=True)
+                except Exception as e:
+                    log.warning("Seans 1H yenileme basarisiz %s: %s", sym, e)
         self._last_1d_day = datetime.now(timezone.utc).date()
-        log.info("1D veri yenilendi (%d sembol).", len(refresh_syms))
+        log.info("1D veri yenilendi (%d REST + %d seans sentezi).",
+                 len(rest_syms), len(sess_syms))
 
     # ──────────────── WS yasam dongusu ────────────────
 
@@ -283,16 +392,22 @@ class BingXMarketData:
                 await asyncio.sleep(5)
         self._connected = False
 
+    def _core_tfs_for(self, symbol: str) -> list[str]:
+        """Seans sembollerinde 4H aboneligi yok - seri 1H'ten sentezleniyor."""
+        if is_session_symbol(symbol):
+            return [tf for tf in _WS_CORE_TFS if tf != "4h"]
+        return _WS_CORE_TFS
+
     def _subscription_count(self) -> int:
         return (
-            len(self._symbols) * len(_WS_CORE_TFS)
+            sum(len(self._core_tfs_for(s)) for s in self._symbols)
             + len(self._d1h_symbols) * len(_WS_D1H_TFS)
             + len(self._h1_5m_symbols) * len(_WS_H1_TFS)
         )
 
     async def _subscribe_all(self, ws) -> None:
         for sym in self._symbols:
-            for tf in _WS_CORE_TFS:
+            for tf in self._core_tfs_for(sym):
                 msg = {"id": str(uuid.uuid4()), "reqType": "sub", "dataType": f"{sym}@{_TF_SUFFIX[tf]}"}
                 await ws.send(json.dumps(msg))
                 await asyncio.sleep(0.01)
@@ -349,16 +464,37 @@ class BingXMarketData:
         }
         ts_ms = int(item["T"])
 
-        self.store.upsert_candle(symbol, tf, ts_ms, candle)
-        if tf == "1h":
-            self._rebuild_forming_1d(symbol)
+        session_sym = is_session_symbol(symbol)
+        cur_dt = pd.to_datetime(ts_ms, unit="ms", utc=True)
+        # Olu seansta BingX fiyat uretmeye devam eder ama piyasa kapalidir:
+        # ne seriye yazilir ne de TP/SL takibine beslenir.
+        bar_dead = session_sym and fx_session.is_dead_session(cur_dt)
+
+        if not bar_dead:
+            self.store.upsert_candle(symbol, tf, ts_ms, candle)
+            if tf == "1h":
+                self._rebuild_forming_1d(symbol)
 
         key = (symbol, tf)
         prev_ts = self._last_ts.get(key)
         if prev_ts is not None and ts_ms > prev_ts:
             # Onceki mum kapandi.
-            await self._closed_queue.put((symbol, tf))
-            if tf == "1h":
+            prev_dt = pd.to_datetime(prev_ts, unit="ms", utc=True)
+            prev_dead = session_sym and fx_session.is_dead_session(prev_dt)
+            if not prev_dead:
+                await self._closed_queue.put((symbol, tf))
+            if tf == "1h" and session_sym:
+                if not prev_dead:
+                    # Sentezlenmis HTF: kapanan 1H bari bir kovayi bitirdi mi?
+                    for htf in ("4h", "1d"):
+                        if fx_session.bucket_start(prev_dt, htf) != fx_session.bucket_start(cur_dt, htf):
+                            await self._closed_queue.put((symbol, htf))
+                    if fx_session.is_week_close_bar(prev_dt):
+                        marker = prev_dt.strftime("%G-W%V")
+                        if self._week_close_marker != marker:
+                            self._week_close_marker = marker
+                            self._week_close_pending = True
+            elif tf == "1h":
                 prev_day = datetime.fromtimestamp(prev_ts / 1000, tz=timezone.utc).date()
                 new_day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
                 if new_day > prev_day:
@@ -367,7 +503,7 @@ class BingXMarketData:
             self._last_ts[key] = ts_ms
 
         # Intrabar fill/TP-SL: 15m -> 4H, 1h -> 1D, 5m -> 1H.
-        if tf in ("15m", "1h", "5m"):
+        if tf in ("15m", "1h", "5m") and not bar_dead:
             self._pending_price[(symbol, tf)] = {**candle, "ts_ms": ts_ms, "ltf": tf}
 
     async def _processor_loop(self) -> None:
@@ -378,6 +514,17 @@ class BingXMarketData:
                     symbol, tf = self._closed_queue.get_nowait()
                     await scanner.on_candle_closed(symbol, tf, self.store)
                     await asyncio.sleep(0)
+
+                # Cuma 17:00 NY: kripto-disi acik islemleri kapat, bekleyenleri
+                # iptal et. Pozisyon hafta sonuna sarkmasin (Pazar acilisindaki
+                # gap SL'yi asabilir).
+                if self._week_close_pending:
+                    self._week_close_pending = False
+                    try:
+                        async with async_session() as db:
+                            await scanner.close_session_positions(db, self.store)
+                    except Exception:
+                        log.exception("Cuma kapanisi basarisiz")
 
                 # Sonra forming fiyat guncellemeleri (coalesced).
                 if self._pending_price:
@@ -444,6 +591,23 @@ class BingXMarketData:
 
     # ──────────────── Durum ────────────────
 
+    def _subscription_breakdown(self) -> dict:
+        """Abonelikler tek WS baglantisinda paylasilir; stratejiye bolunemez.
+
+        `1h` akisi ayni anda uc ise yariyor: 1D-1H'in LTF'si, 1H-5M'in HTF'si ve
+        seans sembollerinin 4H/1D sentezi. Tek bir stratejiye yazmak cift sayim
+        olurdu; bu yuzden kirilim akis bazinda verilir.
+        """
+        crypto_4h = [s for s in self._symbols if not is_session_symbol(s)]
+        session_4h = [s for s in self._symbols if is_session_symbol(s)]
+        return {
+            "15m": len(self._symbols),
+            "4h": len(crypto_4h),
+            "1h": len(self._d1h_symbols),
+            "5m": len(self._h1_5m_symbols),
+            "session_symbols": len(session_4h),
+        }
+
     def status(self) -> dict:
         return {
             "running": self._running,
@@ -452,6 +616,7 @@ class BingXMarketData:
             "d1h_symbol_count": len(self._d1h_symbols),
             "h1_symbol_count": len(self._h1_5m_symbols),
             "subscription_count": self._subscription_count(),
+            "subscription_breakdown": self._subscription_breakdown(),
             "last_message_at": (
                 self._last_message_at.astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S UTC+3")
                 if self._last_message_at else None

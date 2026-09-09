@@ -219,17 +219,19 @@ def is_weekend() -> bool:
 
 
 def get_active_markets() -> dict[str, list[str]]:
-    """4H-15M evreni: kripto (7 gun) + XAUUSD (haftaici).
+    """4H-15M evreni: kripto (7 gun) + tum global marketler (haftaici).
 
-    Diger metal/fx/oil/index 4H'te kapali; 1D-1H `get_d1h_markets` ile acik.
+    Global pariteler once 4H'te kapaliydi: BingX'in 4H mumlari UTC gece
+    yarisina hizali, gercek FX mumu ise 17:00 NY'ye. Artik bu semboller icin
+    4H serisi 1H'ten NY-hizali sentezleniyor (`app/session.py`), o yuzden
+    hepsi acik.
     """
     active: dict[str, list[str]] = {"crypto": _CRYPTO}
     if not is_weekend():
-        active["metal"] = ["NCCOGOLD2USD-USDT"]  # XAUUSD
-        # active["metal"] = SYMBOLS_BY_MARKET["metal"]  # XAGUSD
-        # active["oil"] = SYMBOLS_BY_MARKET["oil"]
-        # active["index"] = SYMBOLS_BY_MARKET["index"]
-        # active["fx"] = SYMBOLS_BY_MARKET["fx"]
+        active["metal"] = SYMBOLS_BY_MARKET["metal"]
+        active["oil"] = SYMBOLS_BY_MARKET["oil"]
+        active["index"] = SYMBOLS_BY_MARKET["index"]
+        active["fx"] = SYMBOLS_BY_MARKET["fx"]
     return active
 
 
@@ -270,6 +272,24 @@ for _m in ("metal", "oil", "index", "fx"):
 
 def is_d1h_symbol(bingx_symbol: str) -> bool:
     return bingx_symbol in _D1H_ALL
+
+
+# Kripto-disi (FX/metal/endeks/petrol) semboller: gercek piyasa seansina tabi,
+# BingX'in 7/24 sentetik kontratindan farkli. HTF mumlari 1H'ten NY-hizali
+# sentezlenir ve olu seans (Cuma 17:00 -> Pazar 17:00 NY) barlari elenir.
+_SESSION_SYMBOLS: set[str] = set()
+for _m in ("metal", "oil", "index", "fx"):
+    _SESSION_SYMBOLS.update(SYMBOLS_BY_MARKET[_m])
+
+
+def is_session_symbol(bingx_symbol: str) -> bool:
+    """Sembol FX seans takvimine tabi mi? (kripto degil)"""
+    return bingx_symbol in _SESSION_SYMBOLS
+
+
+def session_symbols() -> list[str]:
+    """Seans takvimine tabi tum semboller (gun/evren farketmeksizin)."""
+    return sorted(_SESSION_SYMBOLS)
 
 
 # 1H-5M CRT: XAU, EURUSD, Nasdaq (US100), BTC.
@@ -413,6 +433,60 @@ async def fetch_ohlcv(
     if limit > 0 and not df.empty:
         df = df.tail(limit)
     return df
+
+
+_TF_MS = {
+    "5m": 5 * 60 * 1000,
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000,
+}
+
+
+async def fetch_ohlcv_deep(
+    symbol: str,
+    timeframe: str = "1h",
+    bars: int = 2100,
+    client: httpx.AsyncClient | None = None,
+) -> pd.DataFrame:
+    """Sayfalayarak derin gecmis cek; tek istek 1000 mumla sinirli.
+
+    Seans sembollerinin 1D serisi 1H'ten sentezlendigi icin gerekli: olu seans
+    elendikten sonra 1000 saatlik tek istek yalnizca ~30 islem gunu veriyor,
+    oysa `BOOTSTRAP_LIMITS["1d"]` 60 gun istiyor.
+    """
+    step_ms = _TF_MS.get(timeframe)
+    if step_ms is None:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0)
+    try:
+        end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        cursor = end_ms - int(bars) * step_ms
+        frames: list[pd.DataFrame] = []
+        # Sonsuz donguye karsi tavan: her sayfa en az 1 mum ilerlemek zorunda.
+        for _ in range(int(bars // 1000) + 3):
+            page = await fetch_ohlcv(symbol, timeframe, limit=1000,
+                                     since_ms=cursor, client=client)
+            if page.empty:
+                break
+            frames.append(page)
+            last_ms = int(page.index[-1].value // 1_000_000)
+            if last_ms <= cursor or last_ms >= end_ms - step_ms:
+                break
+            cursor = last_ms + step_ms
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    if not frames:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    df = pd.concat(frames)
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    return df.tail(int(bars))
 
 
 def get_all_symbols_flat() -> list[str]:

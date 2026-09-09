@@ -42,6 +42,14 @@ BOOTSTRAP_LIMITS = {
     "5m": 300,
 }
 
+# Seans sembolleri (FX/metal/endeks/petrol) icin 4H ve 1D serileri BingX'ten
+# degil, 1H'ten NY-hizali sentezlenir (bkz. app/session.py). Olu seans (haftanin
+# 48 saati) elendigi icin takvim saatinin ~5/7'si canli kalir:
+#   60 islem gunu = 1440 canli saat ~= 2016 takvim saati
+# BingX tek istekte en fazla 1000 mum dondurdugunden sayfalanarak cekilir.
+SESSION_1H_BARS = int(os.getenv("SESSION_1H_BARS", "2100"))
+SESSION_1H_PAGE = 1000
+
 # Bakim dongusu araligi (saniye): aktif sembol seti degisim kontrolu + gunluk
 # 1D yenileme burada yapilir. Periyodik REST TARAMA YOKTUR; tespit tamamen WS
 # olaylariyla (15m/4h kapanis) calisir. 0 => bakim dongusu kapali.
