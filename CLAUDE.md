@@ -124,13 +124,24 @@ Periyodik REST tarama **yoktur**. Tespit tamamen mum kapanışı olayıyla:
 
 UI'da her yerde `?tf=4h|1d|1h` ile geçiş.
 
-**Koruma eşikleri** — üçünde de trail = **TP yolunun %75'i**; sabit R
+**Koruma eşikleri** — üçünde de trail = **TP yolunun %90'ı**; sabit R
 tetikleyicileri (`be_arm_r`, `trail_arm_r`) kapalı. BE yalnızca **4H**'te açık:
 `be_arm_tp_fraction = 0.50` (TP yolunun %50'si). Sabit +1R BE / +1.5R trail,
 5R'lik bir işlemde yolun %20'sinde tetikleyip işlemi erken boğuyordu; TP kesri
 hedefe göre ölçekleniyor (min RR 2.0'da TP %50 zaten +1R'ye denk). 1D/1H'te BE
 kapalı — 1h/5m mum boyu 1R'ye yakın olduğu için entry'deki stop iğneye açık
 (bkz. NZDUSD notu, [IZLEME.md](IZLEME.md) "1D/1H'te BE").
+
+Trail arm eşiği **%75 → %90** (09.09): trail mesafesi `max(1R, 1.3 × ort. LTF
+range)` tipik olarak 1–1.5R; %75'te hedefe kalan yol (3R'lik işlemde 0.75R)
+bundan **daha dar** kalıyor ve trail, TP'ye varma yarışını yapısal olarak
+kaybediyordu. %90 ile trail yalnızca hedefe çok yaklaşıp dönen işlemi korur.
+
+**Çekilmiş stop geriye dönük uygulanmaz** — `protection_armed_time` kolonu
+BE/trail'in devreye girdiği anı tutar; o andan **önceki** mumlar orijinal SL ile
+değerlendirilir. `reconcile_open_signals` geçmişi `entry_filled_time`'dan
+itibaren yeniden oynattığı için, fill mumunun kendi low'u (LONG'da tanım gereği
+entry'nin altında) BE stopunu tetikleyip kazanan işlemi 0R yazıyordu.
 
 **1H-5M istisnası**: `require_c2_closed = False`. C2 yalnızca 1 saat olduğu için
 kapanışını beklemek CISD onayından sonra 45 dk'ya kadar ölü bekleme demek ve

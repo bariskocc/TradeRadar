@@ -138,15 +138,51 @@ satırı, ve aynı anda açık sinyallerin yön dağılımı.
 
 ---
 
-## 4. 1D/1H'te BE açılsın mı?
+## 4. Trail arm eşiği %90 — kazananları kesiyor muydu?
+
+**✅ Yapıldı (2026-09-09):** `trail_arm_tp_fraction` **0.75 → 0.90** (üç
+stratejide de; 1D/1H'teki gereksiz override'lar kaldırıldı).
+
+**Neden:** trail mesafesi `max(1R, 1.3 × ort. LTF range)` tipik olarak **1–1.5R**.
+%75 arm'da hedefe kalan yol 3R'lik bir işlemde yalnızca **0.75R** — yani stop,
+kalan mesafeden daha geniş. Fiyatın TP'ye varması için, trail mesafesinden daha
+küçük bir geri çekilme yapması gerekiyor; bu yarış yapısal olarak kaybediliyor.
+
+**ARB 4H LONG (09.09) — ölçülen:**
+
+| Varyant | Sonuç |
+|---|---|
+| arm %75 (eski) | TRAIL **+1.13R** @ 08:30 |
+| arm %75, offset 0.5R | TRAIL +2.12R |
+| **arm %85 / %90** ✅ | **TP +3.16R** @ 09:00 |
+| trail yok (sadece BE) | TP +3.16R |
+
+ARB'nin MFE'si TP yolunun **%82.6**'sına çıktı — %75 arm'ı tetikledi, %85+'ı
+tetiklemedi. Fiyat trail çıkışından 30 dk sonra TP'yi vurup **+5.63R**'ye gitti.
+Offset'i genişletmek işe yaramadı (+0.91R): geri çekilme yine yetti ve daha az
+kilitledi.
+
+SUI (08.09) her varyantta BE — fiyat sonradan entry'ye döndü, trail ayarı
+sonucu değiştirmiyor.
+
+**Tetikleyici:** raporda `trail` çıkışlarının ortalama R'si düşükse (<1R) veya
+`TP` çıkış sayısına göre `trail` çıkışları çok fazlaysa. Ters yönde: %90 fazla
+gevşek kalıp işlemler +2R'den 0R'ye (BE) dönüyorsa eşik geri çekilmeli.
+
+**Ölçüm:** Engine Report → "Çıkış türü" (TP / trail / BE / SL) ve
+"Trail çıkış ort. R".
+
+---
+
+## 5. 1D/1H'te BE açılsın mı?
 
 **Bağlam:** SUI 4H SHORT (08.09), MFE +1.48R'ye gitti ama trail TP %50'de
 (+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
 çekilme işlemi **+0.48R**'de kesti (planned 2.71R).
 
-**✅ Yapıldı (4H):** BE → TP %50 (`be_arm_tp_fraction`), trail → TP %75, sabit R
+**✅ Yapıldı (4H):** BE → TP %50 (`be_arm_tp_fraction`), sabit R
 tetikleyicileri (`be_arm_r`, `trail_arm_r`) kapatıldı. SUI verisiyle
-doğrulandı: bu ayarla trail açılmaz, SL entry'de kalır, **işlem açık kalırdı**.
+doğrulandı: bu ayarla trail açılmaz, SL entry'de kalır. (Trail eşiği sonradan %90'a çekildi — bkz. bir üstteki madde.)
 
 ### Kalan karar
 
@@ -171,7 +207,7 @@ yine tam entry'de durur.
 
 ---
 
-## Not
+## 6. Not
 
 Kısmi kâr alma (%50'de yarı kapat + BE) fikri bir **yapılacak iş**, izleme
 konusu değil — [TODO.md](TODO.md) içinde.

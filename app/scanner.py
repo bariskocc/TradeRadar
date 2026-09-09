@@ -134,7 +134,15 @@ _RISK_GATES = {
     # bkz. STRATEGY_1D yorumu / NZDUSD).
     "be_arm_r": None,
     "be_arm_tp_fraction": None,
-    "trail_arm_tp_fraction": 0.75,
+    # Trail arm esigi TP yolunun %90'i (uc stratejide de ayni).
+    # %75'te trail, hedefe kalan mesafeden (yolun %25'i) DAHA GENIS bir offset
+    # ile calisiyor ve TP'ye varma yarisini yapisal olarak kaybediyordu:
+    # offset = max(1R, 1.3 x ort. LTF range) tipik olarak 1-1.5R, kalan yol ise
+    # 3R'lik bir islemde yalnizca 0.75R. ARB 09.09 4H LONG: MFE TP yolunun
+    # %82.6'sina cikti, %75 arm ile trail +1.13R'de kesti; fiyat 30 dk sonra
+    # TP'yi vurup +5.6R'ye gitti. %85/%90 arm ile sonuc TP +3.16R.
+    # %90: trail yalnizca hedefe cok yaklasip donen islemi korur, yoldakini kesmez.
+    "trail_arm_tp_fraction": 0.90,
     "trail_arm_r": None,
     "cluster_open": 2,
     "cluster_recent": 2,
@@ -165,7 +173,6 @@ STRATEGY_CFG = {
         "cluster_window_hours": 24.0,
         # 1D: 1s range 1R'yi yer (NZDUSD +1.31R sahte trail). Eski %75.
         "be_arm_r": None,
-        "trail_arm_tp_fraction": 0.75,
         "trail_arm_r": None,
     },
     STRATEGY_1H: {
@@ -188,7 +195,6 @@ STRATEGY_CFG = {
         # (CISD entry + PD array sarti aynen duruyor).
         "require_c2_closed": False,
         "be_arm_r": None,
-        "trail_arm_tp_fraction": 0.75,
         "trail_arm_r": None,
     },
 }
@@ -2225,7 +2231,22 @@ async def manage_symbol_on_price(
                     sig.duration_hours = round((now - ref_time).total_seconds() / 3600, 1)
                 changed = True
                 finished.append(sig)
-                log.info("CLOSED (%s): %s %s RR %.2f", event.upper(), sig.symbol, sig.direction, sig.rr_value or 0.0)
+                # Cikisin HANGI mumda ve hangi seviyede oldugu + o ana kadarki
+                # MFE. Bunlar olmadan "neden BE yazdi?" sorusu logdan
+                # cevaplanamiyor, mum verisi cekmek gerekiyordu (ARB 09.09).
+                mfe_r = (
+                    _rr_at_exit(sig.direction, entry, float(sig.mfe_price), risk)
+                    if sig.mfe_price is not None else None
+                )
+                log.info(
+                    "CLOSED (%s): %s %s RR %.2f | bar=%s H=%s L=%s | sl=%s tp=%s "
+                    "mfe=%s(%s) armed=%s",
+                    event.upper(), sig.symbol, sig.direction, sig.rr_value or 0.0,
+                    bar_ts, high, low, sig.stop_loss, sig.take_profit,
+                    sig.mfe_price,
+                    f"{mfe_r:+.2f}R" if mfe_r is not None else "-",
+                    sig.protection_armed_time,
+                )
 
         except Exception as e:
             log.warning("manage failed for %s: %s", display_symbol, e)
