@@ -105,7 +105,7 @@ class CISDConfirmation:
     cisd_price: float  # MSS / market kirilim seviyesi
     cisd_time: Optional[datetime] = None  # MSS onay mumunun acilis zamani
     mss_ref_time: Optional[datetime] = None  # Kirilan swing mumunun acilis zamani
-    entry_model: str = "cisd"  # cisd | ifvg
+    entry_model: str = "cisd"  # cisd | mss | ifvg  (ifvg'yi scanner ezer)
     ifvg_low: Optional[float] = None
     ifvg_high: Optional[float] = None
 
@@ -1388,7 +1388,7 @@ def _pick_wider_stop(
     sl: float,
     tp: float,
     direction: str,
-) -> Optional[tuple[float, datetime]]:
+) -> Optional[tuple[float, datetime, str]]:
     """Swing vs CISD blogu: gecerli ve daha iyi RR (daha dar stop) olan adayi don.
 
     Yuksek RR = entry SL'ye yakin. Iki aday da gecerliyse |entry-SL| daha
@@ -1396,6 +1396,11 @@ def _pick_wider_stop(
     LONG: entry SL ile TP arasinda, SL < entry < TP.
     SHORT: TP < entry < SL.
     Esit mesafede swing tercih edilir.
+
+    Donen ucuncu deger KAZANAN modeldir ("mss" | "cisd") - UI'daki Entry Model
+    sutunu icin. Eskiden bu bilgi kayboluyordu ve `CISDConfirmation.entry_model`
+    dataclass varsayilani olarak her halukarda "cisd" kaliyordu; yani MSS ile
+    girilen islemler de "cisd" yaziliyordu.
     """
     def _ok(level: float) -> bool:
         if direction == "LONG":
@@ -1407,12 +1412,12 @@ def _pick_wider_stop(
     if not swing_ok and not cisd_ok:
         return None
     if swing_ok and not cisd_ok:
-        return float(swing_level), swing_time
+        return float(swing_level), swing_time, "mss"
     if cisd_ok and not swing_ok:
-        return float(cisd_level), cisd_time
+        return float(cisd_level), cisd_time, "cisd"
     if abs(float(cisd_level) - float(sl)) < abs(float(swing_level) - float(sl)):
-        return float(cisd_level), cisd_time
-    return float(swing_level), swing_time
+        return float(cisd_level), cisd_time, "cisd"
+    return float(swing_level), swing_time, "mss"
 
 
 def _price_eq(a: float, b: float) -> bool:
@@ -1616,7 +1621,7 @@ def _check_bullish_cisd(
     )
     if picked is None:
         return None
-    break_level, mss_ref_time = picked
+    break_level, mss_ref_time, entry_model = picked
     entry = round(break_level, 8)
 
     confirm_time: Optional[datetime] = None
@@ -1640,6 +1645,7 @@ def _check_bullish_cisd(
         cisd_price=round(break_level, 8),
         cisd_time=confirm_time,
         mss_ref_time=mss_ref_time,
+        entry_model=entry_model,
     )
 
 
@@ -1705,7 +1711,7 @@ def _check_bearish_cisd(
     )
     if picked is None:
         return None
-    break_level, mss_ref_time = picked
+    break_level, mss_ref_time, entry_model = picked
     entry = round(break_level, 8)
 
     confirm_time: Optional[datetime] = None
@@ -1729,6 +1735,7 @@ def _check_bearish_cisd(
         cisd_price=round(break_level, 8),
         cisd_time=confirm_time,
         mss_ref_time=mss_ref_time,
+        entry_model=entry_model,
     )
 
 

@@ -128,6 +128,7 @@ RADAR_STATE_META = {
     "invalidated":    {"label": "CRT 60% crossed",            "color": "yellow", "rank": 4},
     "past_sl":        {"label": "SL before fill",             "color": "yellow", "rank": 4},
     "stale":          {"label": "Waiting expired (stale)",    "color": "yellow", "rank": 4},
+    "week_close":     {"label": "Cancelled (week close)",      "color": "yellow", "rank": 4},
     "same_bar_sl":    {"label": "SL before fill",             "color": "yellow", "rank": 4},
     # "same_color":   {"label": "CRT/purge same color",      "color": "red",    "rank": 4},
     "bias_mismatch":  {"label": "1D bias opposite",           "color": "orange", "rank": 5},
@@ -783,6 +784,7 @@ async def api_radar(request: Request):
             "pd": e.get("pd"),
             "c2_closed": e.get("c2_closed"),
             "ifvg": e.get("ifvg"),
+            "model": e.get("model"),
             # "same_color": bool(e.get("same_color")),  # eski bilgi alani; UI'da gosterilmiyor
             "updated_at": _fmt_date_tsi(e["updated_at"]) if e.get("updated_at") else None,
         })
@@ -817,6 +819,7 @@ async def api_radar(request: Request):
             "last_message_at": ws.get("last_message_at"),
             "symbol_count": ws.get("symbol_count"),
             "subscription_count": ws.get("subscription_count"),
+            "subscription_breakdown": ws.get("subscription_breakdown"),
         },
         "last_update": _fmt_date_tsi(snap["last_update"]) if snap["last_update"] else None,
         "summary": summary,

@@ -18,6 +18,15 @@ log = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
+# Giris modeli etiketleri. Eski "IFVG 50%" yanlisti: giris artik bolgenin
+# ortasindan degil, girise en yakin kenarindan yapiliyor. MSS de artik CISD'den
+# ayri raporlaniyor.
+_ENTRY_MODEL_LABELS = {
+    "ifvg": "IFVG",
+    "cisd": "CISD",
+    "mss": "MSS",
+}
+
 
 def _strategy_label(sig: "Signal") -> str:
     tf = getattr(sig, "timeframe", None) or "4h"
@@ -81,7 +90,7 @@ def _format_active_signal(sig: Signal) -> str:
         f"{direction_emoji} <b>{sig.symbol} - {sig.direction} {strat} Signal ACTIVE</b>\n"
         f"\n"
         f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>"
-        f"{'  ·  IFVG 50%' if getattr(sig, 'entry_model', None) == 'ifvg' else '  ·  CISD'}\n"
+        f"  ·  {_ENTRY_MODEL_LABELS.get(getattr(sig, 'entry_model', None) or 'cisd', 'CISD')}\n"
         f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
         f"\U00002705 <b>Take Profit:</b> <code>{sig.take_profit}</code>\n"
         f"\U0001f4ca <b>Plan R:R:</b> 1:{rr_ratio}\n"

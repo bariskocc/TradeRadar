@@ -148,7 +148,8 @@
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SMT</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PD</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">C2</th>
-                            <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">IFVG</th>
+                            <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Setup'ta LTF IFVG var mi? (girisin oradan yapildigi anlamina gelmez)">IFVG</th>
+                            <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Giris hangi modelden geldi: IFVG / CISD / MSS">ENTRY MODEL</th>
                             <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ENTRY</th>
                             <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SL</th>
                             <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TP</th>
@@ -256,6 +257,17 @@
                                 <span class="text-gray-600 text-xs">-</span>
                                 {% endif %}
                             </td>
+                            {# Entry Model: IFVG sutunu "bolge var mi", bu "giris hangi modelden". #}
+                            <td class="px-2 py-2 text-center whitespace-nowrap">
+                                {% set em = signal.entry_model or 'cisd' %}
+                                {% if em == 'ifvg' %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="Giris: IFVG'nin girise en yakin kenari">IFVG</span>
+                                {% elif em == 'mss' %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400" title="Giris: purge oncesi son swing (MSS)">MSS</span>
+                                {% else %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-blue/15 text-accent-blue" title="Giris: CISD blogunun ilk mumunun acilisi">CISD</span>
+                                {% endif %}
+                            </td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-white whitespace-nowrap">
                                 {{ signal.entry_price|fmt_price }}
                             </td>
@@ -337,7 +349,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="20" class="px-2 py-12 text-center text-gray-500">
+                            <td colspan="21" class="px-2 py-12 text-center text-gray-500">
                                 {% if tab == 'active' %}
                                 No active signals.
                                 {% elif tab == 'waiting' %}
