@@ -11,6 +11,12 @@ Son güncelleme: 2026-09-09
 **Ana ölçüm aracı:** `/logs` → **Engine Report** sekmesi
 (terminal karşılığı `python scripts/logstat.py --hours 24`)
 
+**Geçmiş kayıt kuralı:** Kapanmış işlemler, kapandıkları anda **yürürlükte olan
+kuralları** yansıtır; parametre değişince geriye dönük yazılmaz. Aksi halde
+"bu ayar ne kadar iyi çalıştı" sorusu bir daha cevaplanamaz. Yalnızca **kayıt
+gerçeğe aykırıysa** düzeltilir (ör. ARB 09.09: fiyat entry'ye hiç dönmemişken
+breakeven yazılmıştı — düzeltildi). Ayar değişiklikleri bu dosyada tarihli.
+
 ---
 
 ## 1. Genel: 2026-09-08/09 düzeltmelerinin etkisi
