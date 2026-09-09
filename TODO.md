@@ -1,9 +1,11 @@
 # Yapılacaklar
 
-Tamamlanan madde bu dosyadan **silinir**. Her madde, yeniden araştırma
-gerektirmeyecek kadar bağlam içerir.
+Tamamlanan madde bu dosyadan **silinir** — kararı verilmiş ama ileride tekrar
+bakılacak konular "açık gözden geçirme" olarak kalır (tetikleyicisiyle birlikte).
+Her madde, yeniden araştırma gerektirmeyecek kadar bağlam içerir. Çapraz
+referanslar numara değil **isim** kullanır; numaralar madde silindikçe kayıyor.
 
-Son güncelleme: 2026-09-08
+Son güncelleme: 2026-09-09
 
 ---
 
@@ -153,12 +155,53 @@ Doğrulanıp bu dosya silinebilir.
 - `SKIPPED (...)` dağılımının zaman içinde değişimi
 - 1H-5M'de C2 kapanmadan fill'in gerçek etkisi (daha çok fırsat mı, daha çok
   −1R mi?)
-- `BACKFILL FILL` hiç tetikliyor mu (tetiklemiyorsa madde 1'e gerek yok)
+- `BACKFILL FILL` hiç tetikliyor mu (tetiklemiyorsa "IFVG fallback" gereksiz)
 - Tamponsuz SL'in stop-out oranı
+- Kripto küme limiti — bkz. bir sonraki madde
 
 ---
 
-## 6. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
+## 6. Kripto küme limiti — gerekirse yeniden ayarla (açık gözden geçirme)
+
+**Karar verildi, madde kapanmadı.** Sinyal akışı fazlalaşırsa güncel veriyle
+tekrar bakılacak; o yüzden bağlam burada duruyor.
+
+**Mevcut ayar** (`app/scanner.py`):
+
+| Parametre | Değer | Yer |
+|---|---|---|
+| `cluster_open` | 2 | `_RISK_GATES` |
+| `cluster_recent` | 2 | `_RISK_GATES` |
+| `cluster_window_hours` | 4 (1D'de 24) | `_RISK_GATES` / `STRATEGY_1D` |
+| `CLUSTER_EXEMPT_SYMBOLS` | BTC, ETH | modül sabiti |
+| `CLUSTER_EXEMPT_MIN_SCORE` | **9** | modül sabiti |
+
+Yalnızca **kripto**; FX/metal/oil/index bu limite hiç dahil değil.
+
+**2026-09-09'da yapılan:** Skoru ≥9 olan setup'lar limiti delebiliyor. Sebep:
+ETH/LINK/SUI SHORT açılınca kota doldu ve ADA (RR 4.47), BNB, TAO, XRP —
+**hepsi tam 9** — bloklandı. Eşik 10 olsaydı 40 setup'ta yalnızca 1'i geçerdi
+(SMT'siz skor tavanı 9, SMT +2 ekliyor).
+
+Muaf setup limiti **deler ama sayıma dâhildir** (BTC/ETH gibi sayımdan
+çıkmaz) — yoksa SMT'li bir piyasa hareketinde sınırsız korele pozisyon açılırdı.
+
+**Tetikleyici — şu olursa buraya dön:**
+- Aynı yönde eşzamanlı açık kripto sinyal sayısı rahatsız edici olursa
+- Aynı 4 saatlik pencerede çok sayıda korele sinyal gelirse
+- `logstat` raporunda `CLUSTER` elemesi neredeyse sıfırlanırsa (= limit artık
+  hiçbir şey yapmıyor demektir)
+
+**Kısabileceğimiz kollar:** `CLUSTER_EXEMPT_MIN_SCORE`'u 10'a çekmek · muaf
+setup'a ayrı bir tavan koymak · `cluster_window_hours`'ı kısaltmak ·
+`cluster_open`/`cluster_recent`'ı ayrıştırmak.
+
+**Ölçüm:** `/logs` → Engine Report → "Setup neden sinyale dönüşmedi" içinde
+`CLUSTER` satırı, ve aynı anda açık sinyallerin yön dağılımı.
+
+---
+
+## 7. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
 
 **Bağlam:** 2026-09-08'de SUI 4H SHORT, MFE +1.48R'ye gitti ama trail TP %50'de
 (+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
@@ -210,7 +253,7 @@ tek bir `rr_value` yazıyor; kısmi çıkış için en az şunlar gerekir:
 
 ---
 
-## 7. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
+## 8. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
 
 > **Öncelik: EN DÜŞÜK.** Acelesi yok, diğer maddelerin hepsi bitince bakılacak.
 > **Çıktı bir rapor/öneri**, doğrudan refactor değil.
