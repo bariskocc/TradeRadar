@@ -92,7 +92,7 @@ def main() -> int:
         head("IZLEME METRIKLERI (IZLEME.md)")
         bf = mon["backfills"]
         print(f"  BACKFILL FILL tetiklenme : {len(bf)}"
-              + ("   -> hic tetiklemediyse 'IFVG fallback' gereksiz" if not bf else ""))
+              + ("   -> normal akista beklenen; yalniz restart/downtime sonrasi" if not bf else ""))
         for b in bf:
             when = f"{b['ts']:%d.%m %H:%M}" if b["ts"] else "-"
             print(f"      {when}  {b['symbol']} {b['direction']}")

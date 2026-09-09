@@ -158,7 +158,7 @@
                             <dd class="{% if mon.backfills %}text-accent-blue{% else %}text-gray-500{% endif %} font-medium">{{ mon.backfills|length }}</dd>
                         </div>
                         {% if not mon.backfills %}
-                        <p class="text-[10px] text-gray-600 -mt-1">Hiç tetiklemediyse TODO “IFVG fallback” maddesi gereksiz olabilir.</p>
+                        <p class="text-[10px] text-gray-600 -mt-1">Sıfır olması normal — yalnızca restart/downtime sonrası tetiklenir.</p>
                         {% endif %}
                         <div class="flex justify-between gap-3">
                             <dt class="text-gray-400">Çıkış türü</dt>
