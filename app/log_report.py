@@ -41,6 +41,13 @@ BE_RE = re.compile(r"^BE ARM:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
 TRAIL_ARM_RE = re.compile(r"^TRAIL ARM:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
 SMT_RE = re.compile(r"^SMT\+\d+:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
 CRT60_RE = re.compile(r"breach=(?P<breach>\S+ \S+) fill=(?P<fill>\S+?)\)?\.?$")
+# "SKIPPED (BIAS): XAUUSD SHORT filter=B daily=B structure=B ict=B weekly=B"
+BIAS_RE = re.compile(
+    r"^SKIPPED \(BIAS\):\s*(?P<sym>\S+) (?P<dir>LONG|SHORT) "
+    r"filter=(?P<filter>\w+) daily=(?P<daily>\w+)"
+    r"(?: structure=(?P<structure>\w+))?(?: ict=(?P<ict>\w+))?"
+    r"(?: weekly=(?P<weekly>\w+))?"
+)
 
 
 def _parse_ts(raw: str, year_hint: int) -> datetime | None:
@@ -95,7 +102,7 @@ def build_report(path: str | Path | None = None, hours: float | None = None) -> 
     }
     if not rows:
         report.update(skipped=[], skipped_total=0, lifecycle={}, closes=[],
-                      close_stats={}, monitoring={}, health={})
+                      close_stats={}, monitoring={}, bias={}, health={})
         return report
 
     # ── Setup neden sinyale donusmedi ───────────────────────────────
@@ -209,6 +216,36 @@ def build_report(path: str | Path | None = None, hours: float | None = None) -> 
         },
         "trail_avg_r": round(sum(trail_exits) / len(trail_exits), 2) if trail_exits else None,
         "crt60": {"total": len(crt_rows), "fill_first": fill_first, "no_fill": no_fill},
+    }
+
+    # ── 1D bias takibi ──────────────────────────────────────────────
+    # daily = structure VE ict; ayrisirlarsa NEUTRAL olur ve setup +2 kalite
+    # puanini kaybeder. Bayat structure (haftalar once kirilmis) taze ict'yi
+    # vetolayabiliyor -- bu bolum onu gorunur kilar.
+    bias_blocks: list[dict] = []
+    for _, _, _, msg in rows:
+        if m := BIAS_RE.match(msg):
+            bias_blocks.append({
+                "symbol": m["sym"], "direction": m["dir"],
+                "daily": m["daily"], "structure": m["structure"],
+                "ict": m["ict"], "weekly": m["weekly"],
+            })
+    bias_syms = Counter(b["symbol"] for b in bias_blocks)
+    # structure/ict ayrisan kayitlar (yeni format; eski satirlarda ict yok)
+    with_parts = [b for b in bias_blocks if b["structure"] and b["ict"]]
+    disagree = [b for b in with_parts if b["structure"] != b["ict"]]
+    wk_vs_daily = [
+        b for b in bias_blocks
+        if b["weekly"] and b["daily"] not in (None, "NEUTRAL")
+        and b["weekly"] not in (None, "NEUTRAL") and b["weekly"] != b["daily"]
+    ]
+    report["bias"] = {
+        "blocks": len(bias_blocks),
+        "top_symbols": [{"symbol": s, "count": n} for s, n in bias_syms.most_common(6)],
+        "with_parts": len(with_parts),
+        "disagree": len(disagree),
+        "weekly_contradicts_daily": len(wk_vs_daily),
+        "samples": bias_blocks[-6:],
     }
 
     # ── Baglanti / saglik ───────────────────────────────────────────

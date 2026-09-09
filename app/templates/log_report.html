@@ -187,6 +187,65 @@
                 </div>
             </div>
 
+            <!-- 1D bias takibi -->
+            {% set b = report.bias %}
+            {% if b and b.blocks %}
+            <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-4">
+                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">
+                    1D Bias takibi
+                </p>
+                <p class="text-[10px] text-gray-600 mb-4">
+                    <code>daily</code> = <code>structure</code> VE <code>ict</code> aynı yöndeyse o yön,
+                    değilse NEUTRAL. Ayrışınca setup <strong>+2 kalite puanı</strong> kaybeder.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <p class="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Bias ile elenen</p>
+                        <p class="text-xl font-bold text-yellow-400">{{ b.blocks }}</p>
+                    </div>
+                    <div>
+                        <p class="text-[10px] text-gray-500 uppercase tracking-wider mb-1">structure ↔ ict ayrışması</p>
+                        {% if b.with_parts %}
+                        <p class="text-xl font-bold {% if b.disagree * 2 > b.with_parts %}text-amber-400{% else %}text-white{% endif %}">
+                            {{ b.disagree }}<span class="text-sm text-gray-500">/{{ b.with_parts }}</span>
+                        </p>
+                        {% else %}
+                        <p class="text-sm text-gray-600">eski log satırları — bileşen yok</p>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <p class="text-[10px] text-gray-500 uppercase tracking-wider mb-1">weekly ≠ daily</p>
+                        <p class="text-xl font-bold text-white">{{ b.weekly_contradicts_daily }}</p>
+                        <p class="text-[10px] text-gray-600">weekly filtre değil, yalnızca skor</p>
+                    </div>
+                </div>
+
+                {% if b.top_symbols %}
+                <p class="text-[10px] text-gray-500 uppercase tracking-wider mt-4 mb-2">En çok bloklanan</p>
+                <div class="flex flex-wrap gap-1.5">
+                    {% for t in b.top_symbols %}
+                    <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-dark-700 text-gray-300">
+                        {{ fmt_ui_symbol(t.symbol, 'crypto') }} <span class="text-gray-500">×{{ t.count }}</span>
+                    </span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                {% if b.samples %}
+                <p class="text-[10px] text-gray-500 uppercase tracking-wider mt-4 mb-2">Son örnekler</p>
+                <div class="space-y-1 font-mono text-[11px]">
+                    {% for s in b.samples %}
+                    <p class="text-gray-400">
+                        <span class="text-white">{{ fmt_ui_symbol(s.symbol, 'crypto') }}</span>
+                        <span class="{% if s.direction == 'LONG' %}text-green-400{% else %}text-red-400{% endif %}">{{ s.direction }}</span>
+                        · daily={{ s.daily }}{% if s.structure %} · structure={{ s.structure }} · ict={{ s.ict }}{% endif %}{% if s.weekly %} · weekly={{ s.weekly }}{% endif %}
+                    </p>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+
             <!-- Kapanan işlemler -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden mb-4">
                 <div class="px-5 py-3 border-b border-dark-600 flex items-center justify-between">

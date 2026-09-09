@@ -31,7 +31,83 @@ olduğunu görmeden yapmaya değmeyebilir.
 
 ---
 
-## 2. `TARGET TAKEN` filtresi fazla katı mı? (ticaret kararı)
+## 2. 1D BIAS hesabı — yapısal bileşen bayatlıyor (öncelikli)
+
+**Bu filtre elemelerin ~%30'unu tek başına yapıyor** — en sık tetikleyen kapı.
+Ve yanlış çalıştığında hem sinyali bloklar hem kalite puanını düşürür.
+
+### Nasıl çalışıyor
+
+`compute_daily_bias` = **`compute_htf_bias` (structure) VE `compute_ict_bias`**
+aynı yönde ise o yön, değilse **NEUTRAL**.
+
+- **structure** — son kapanışın kırdığı teyitli swing high/low yönü. **Kalıcı
+  durum**: ters bir kırılım olana kadar eski yönü taşır. Bayatlama sınırı YOK.
+- **ict** — yalnızca **son 2 mum**: close > önceki high → BULLISH, close <
+  önceki low → BEARISH, failed high/low → ters yön, inside/outside → NEUTRAL.
+  Çok reaktif, her gün dönebilir.
+
+Yani **yavaş + hızlı** iki sinyalin AND'i alınıyor.
+
+### Ölçüm (2026-09-09, 1D-1H evreni, 26 sembol)
+
+| | |
+|---|---|
+| Yönlü `daily` bias | 18/26 |
+| **NEUTRAL** | **8/26 (%31)** |
+| Yapısal kırılım yaşı | ortanca **5 gün**, max **17 gün** |
+| ≥10 gün bayat | 6/26 (%23) |
+
+### XAUUSD vakası (kullanıcının tespiti — doğrulandı)
+
+```
+07.09  O4426.65 H4433.66 L4385.14 C4427.16
+08.09  O4427.16 H4447.39 L4350.14 C4353.73   close < önceki LOW
+```
+- **ict = BEARISH** ✅ (Sept 8 kapanışı Sept 7 low'unun altında — kullanıcının
+  gözlemi motorda doğru okunuyor)
+- **structure = BULLISH** — ama kırılım **25.08**, yani **14 gün önce**. Altın
+  o tarihten beri 4287–4700 aralığında; yeni kırılım olmadığı için eski boğa
+  yönü duruyor.
+- **daily = NEUTRAL**
+
+### İki ayrı zarar
+
+1. **NEUTRAL, sinyali bloklamaz** (`_bias_aligned` NEUTRAL'de `True` döner) ama
+   `_calc_live_setup_bias` içinde `htf_score` **+2 yerine 0** olur. 9 tavanlı,
+   7 eşikli bir skorda bu belirleyici.
+2. **Daha kötüsü:** bayat structure + tek günlük ict sapması *yanlış yönde*
+   `daily` üretebiliyor ve o zaman **hard blok** olur. 08.09 logu:
+   ```
+   SKIPPED (BIAS): XAUUSD SHORT filter=BULLISH daily=BULLISH weekly=BEARISH structure=BULLISH
+   ```
+   O gün ict, 07.09'un "failed low" dalından BULLISH gelmişti; structure zaten
+   bayat BULLISH'ti → geçerli bir short vetolandı. **weekly BEARISH'ti ama
+   weekly filtre olarak kullanılmıyor.**
+
+### Değerlendirilecek seçenekler (karar senin)
+
+| | Fikir | Not |
+|---|---|---|
+| a | **structure'a bayatlama sınırı**: kırılım N günden eskiyse NEUTRAL say | En küçük değişiklik; sadece bayat vetoyu kaldırır |
+| b | **AND yerine ağırlık**: ict ve structure ayrışırsa NEUTRAL yerine daha taze olanı tercih et | Daha çok yönlü bias, daha çok sinyal |
+| c | **weekly'yi karara kat** — bugün yalnızca bilgi. XAU'da weekly doğruydu | 3 bileşenin çoğunluğu? |
+| d | **1D PD array / FVG'yi bias'a kat** — kullanıcının bahsettiği IFVG + bearish FVG iğnesi bugün bias'ta hiç kullanılmıyor (yalnızca setup skorunda) | En büyük iş |
+| e | Bias'ı hard filtre olmaktan çıkar, yalnızca skora bırak | Radikal; `REQUIRE_HTF_BIAS_ALIGN = False` |
+
+### Takip (kuruldu)
+
+`SKIPPED (BIAS)` log satırına **`ict=`** eklendi; artık NEUTRAL'in sebebi
+görülebiliyor. Rapor sayfasında **"1D Bias takibi"** bölümü var:
+`/logs` → Engine Report → bias ile eleme sayısı, `structure ↔ ict` ayrışma
+oranı, `weekly ≠ daily` sayısı ve son örnekler.
+
+**İzlenecek:** ayrışma oranı kalıcı olarak yüksekse (>%40) AND kuralı fazla
+katı demektir.
+
+---
+
+## 3. `TARGET TAKEN` filtresi fazla katı mı? (ticaret kararı)
 
 **Gözlem (2026-09-08 taraması):** 62 setup'ın **10'unda** tetikledi — en sık
 üçüncü filtre.
@@ -49,7 +125,7 @@ tolerans anlamlı olur mu?
 
 ---
 
-## 3. Signals + Radar sayfalarına "Entry Model" sütunu
+## 4. Signals + Radar sayfalarına "Entry Model" sütunu
 
 **İstenen:** Her sinyalde girişin hangi modelden geldiği görünsün: `IFVG`,
 `CISD`, `MSS`.
@@ -118,7 +194,7 @@ muhtemelen sorun değil ama ölçmeye değer.
 
 ---
 
-## 4. Eski açık başlıklar (devralınan)
+## 5. Eski açık başlıklar (devralınan)
 
 Bunlar 2026-09-08 oturumundan önce de açıktı; hâlâ geçerli mi teyit edilmeli.
 
@@ -146,7 +222,7 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 5. İzleme (madde değil, süreç)
+## 6. İzleme (madde değil, süreç)
 
 2026-09-08'de 7 düzeltme canlıya alındı ve loglama kuruldu. Bir süre
 `logs/traderadar.log` izlenmeli:
@@ -161,7 +237,7 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 6. Kripto küme limiti — gerekirse yeniden ayarla (açık gözden geçirme)
+## 7. Kripto küme limiti — gerekirse yeniden ayarla (açık gözden geçirme)
 
 **Karar verildi, madde kapanmadı.** Sinyal akışı fazlalaşırsa güncel veriyle
 tekrar bakılacak; o yüzden bağlam burada duruyor.
@@ -201,7 +277,7 @@ setup'a ayrı bir tavan koymak · `cluster_window_hours`'ı kısaltmak ·
 
 ---
 
-## 7. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
+## 8. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
 
 **Bağlam:** 2026-09-08'de SUI 4H SHORT, MFE +1.48R'ye gitti ama trail TP %50'de
 (+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
@@ -253,7 +329,7 @@ tek bir `rr_value` yazıyor; kısmi çıkış için en az şunlar gerekir:
 
 ---
 
-## 8. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
+## 9. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
 
 > **Öncelik: EN DÜŞÜK.** Acelesi yok, diğer maddelerin hepsi bitince bakılacak.
 > **Çıktı bir rapor/öneri**, doğrudan refactor değil.

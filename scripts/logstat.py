@@ -108,6 +108,25 @@ def main() -> int:
             print(f"  CRT %60 elemeleri        : {c60['total']}  "
                   f"(fill once={c60['fill_first']}, hic fill yok={c60['no_fill']})")
 
+    b = r.get("bias") or {}
+    if b.get("blocks"):
+        head(f"1D BIAS TAKIBI  ({b['blocks']} eleme)")
+        tops = "  ".join(f"{t['symbol']}={t['count']}" for t in b["top_symbols"])
+        print(f"  En cok bloklanan  : {tops}")
+        if b["with_parts"]:
+            pct = b["disagree"] / b["with_parts"] * 100
+            print(f"  structure vs ict  : {b['disagree']}/{b['with_parts']} ayrisiyor"
+                  f" ({pct:.0f}%)   -> ayrisinca daily NEUTRAL, setup +2 puan kaybeder")
+        if b["weekly_contradicts_daily"]:
+            print(f"  weekly != daily   : {b['weekly_contradicts_daily']}"
+                  "   (weekly filtre DEGIL, yalnizca skor/bilgi)")
+        if b["samples"]:
+            print("  Son ornekler:")
+            for s in b["samples"]:
+                parts = f"structure={s['structure']} ict={s['ict']}" if s["structure"] else ""
+                print(f"      {s['symbol']:<13} {s['direction']:<5} "
+                      f"daily={s['daily']:<8} {parts}")
+
     h = r["health"]
     if h:
         head("BAGLANTI / SAGLIK")

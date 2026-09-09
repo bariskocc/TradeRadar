@@ -38,6 +38,7 @@ from app.crt_engine import (
     check_smt_divergence,
     compute_daily_bias,
     compute_htf_bias,
+    compute_ict_bias,
     compute_weekly_bias,
     detect_crt_setup,
     detect_ltf_ifvg,
@@ -1131,13 +1132,22 @@ async def _cpu(fn, /, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, str, str]:
-    """(structure, daily, weekly)."""
+def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, str, str, str]:
+    """(structure, ict, daily, weekly).
+
+    `daily` = structure VE ict ayni yonde ise o yon, aksi halde NEUTRAL. Iki
+    bilesen de ayri dondurulur cunku NEUTRAL'in sebebini gormeden bias
+    takip edilemiyor (yavas structure vs tek-bar ict ayrismasi).
+    """
     if df_1d is None or df_1d.empty:
-        return "NEUTRAL", "NEUTRAL", "NEUTRAL"
-    structure = daily = weekly = "NEUTRAL"
+        return "NEUTRAL", "NEUTRAL", "NEUTRAL", "NEUTRAL"
+    structure = ict = daily = weekly = "NEUTRAL"
     try:
         structure = compute_htf_bias(df_1d)
+    except Exception:
+        pass
+    try:
+        ict = compute_ict_bias(df_1d)
     except Exception:
         pass
     try:
@@ -1148,7 +1158,7 @@ def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, str, str]:
         weekly = compute_weekly_bias(df_1d)
     except Exception:
         pass
-    return structure, daily, weekly
+    return structure, ict, daily, weekly
 
 
 async def _load_frames(
@@ -1293,7 +1303,7 @@ async def _detect_and_create_waiting_locked(
         _radar("no_data")
         return None
 
-    structure_bias, htf_bias, weekly_bias = await _cpu(_htf_biases, df_1d)
+    structure_bias, ict_bias, htf_bias, weekly_bias = await _cpu(_htf_biases, df_1d)
 
     filter_bias = htf_bias
 
@@ -1339,8 +1349,9 @@ async def _detect_and_create_waiting_locked(
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info(
-            "SKIPPED (BIAS): %s %s filter=%s daily=%s weekly=%s structure=%s",
-            setup.symbol, setup.direction, filter_bias, htf_bias, weekly_bias, structure_bias,
+            "SKIPPED (BIAS): %s %s filter=%s daily=%s structure=%s ict=%s weekly=%s",
+            setup.symbol, setup.direction, filter_bias, htf_bias,
+            structure_bias, ict_bias, weekly_bias,
         )
         return None
 
