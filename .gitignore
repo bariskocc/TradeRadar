@@ -17,3 +17,9 @@ tmp_*
 tmp_*.py
 tmp_*.json
 tools/
+
+# Ozel calisma notlari: strateji esikleri, skor agirliklari ve islem kayitlari
+# icerirler; repo public oldugu icin versiyonlanmazlar.
+CLAUDE.md
+TODO.md
+IZLEME.md
