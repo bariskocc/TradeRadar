@@ -2011,8 +2011,25 @@ async def manage_symbol_on_price(
 
             event: str | None = None
 
+            # Cekilmis (BE/trail) stop, DEVREYE GIRDIGI ANDAN ONCEKI mumlara
+            # uygulanamaz. reconcile fill aninden itibaren gecmisi tekrar
+            # oynatiyor ve stop o sirada zaten entry'ye cekilmis oluyor; fill
+            # mumunun kendi low'u ise LONG'da dogal olarak entry'nin ALTINDA
+            # (limit emri oradan doldu). ARB 09.09.2026: fill 06:45 mumu
+            # low=0.16419 < entry=0.1646 -> "breakeven", oysa fiyat 09:00'da
+            # TP'yi (0.17019) vurup +5.6R'ye gitmisti.
+            # Eski kayitlarda kolon bos; o zaman fill ani taban alinir.
+            armed_at = _as_utc(getattr(sig, "protection_armed_time", None)) or _as_utc(
+                sig.entry_filled_time
+            )
+            protection_applies = (
+                bar_ts is None or armed_at is None or bar_ts > armed_at
+            )
+            # Bu mumda gecerli stop: koruma henuz devrede degilse orijinal SL.
+            effective_sl = float(sig.stop_loss) if protection_applies else initial_sl
+
             def _classify_sl_hit() -> str:
-                if sig.partial_hit or sig.trail_active:
+                if protection_applies and (sig.partial_hit or sig.trail_active):
                     rr_exit = _rr_at_exit(sig.direction, entry, float(sig.stop_loss), risk)
                     return "hit_be" if rr_exit <= 0.05 else "hit_trail"
                 return "hit_sl"
@@ -2021,11 +2038,13 @@ async def manage_symbol_on_price(
             # (UNI: 16:15 bar low 7.05 iken fiyat 7.40 TP'ye gitti).
             # NZDUSD: MFE'yi yapan 1s mumu ayni anda trail SL'yi iğneledi.
             stale_trail_wick = (
-                (bool(sig.trail_active) or bool(sig.partial_hit))
+                protection_applies
+                and (bool(sig.trail_active) or bool(sig.partial_hit))
                 and not bar_closed
             )
             skip_trail_same_bar = (
-                (bool(sig.partial_hit) or bool(sig.trail_active))
+                protection_applies
+                and (bool(sig.partial_hit) or bool(sig.trail_active))
                 and _bar_holds_mfe(sig.direction, sig.mfe_price, high, low)
             )
 
@@ -2035,13 +2054,13 @@ async def manage_symbol_on_price(
             elif (
                 not stale_trail_wick
                 and not skip_trail_same_bar
-                and _hits_sl(sig.direction, high, low, float(sig.stop_loss))
+                and _hits_sl(sig.direction, high, low, effective_sl)
             ):
                 event = _classify_sl_hit()
             else:
                 # Bu mumda sikisan trail SL, ayni mumun karsi fitiliyle
                 # hemen "trail exit" yazmasin; cikis eski SL ile degerlendirilir.
-                sl_this_bar = float(sig.stop_loss)
+                sl_this_bar = effective_sl
 
                 # BE ve trail esikleri STRATEGY_CFG'den. Her ikisi de TP yolunun
                 # bir kesri (be/trail_arm_tp_fraction) VEYA sabit R kati
@@ -2070,6 +2089,8 @@ async def manage_symbol_on_price(
                         sig.partial_hit = True
                         sig.reached_50pct = True
                         sig.stop_loss = entry
+                        # Bu andan ONCEKI mumlar cekilmis stopa tabi degil.
+                        sig.protection_armed_time = bar_ts or now
                         changed = True
                         await record_event(
                             "be_arm",
@@ -2098,6 +2119,8 @@ async def manage_symbol_on_price(
                             sig.reached_50pct = True
                             sig.stop_loss = entry
                         sig.trail_active = True
+                        if sig.protection_armed_time is None:
+                            sig.protection_armed_time = bar_ts or now
                         changed = True
                         await record_event(
                             "trail_arm",

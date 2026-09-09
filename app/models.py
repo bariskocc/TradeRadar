@@ -27,9 +27,14 @@ class Signal(Base):
     initial_stop_loss = Column(Float, nullable=True)       # Fill anindaki orijinal SL (R hesabi)
     invalidation_level = Column(Float, nullable=True)      # CRT mumunun %60'i (bilgi; BE artik buna bagli degil)
     reached_50pct = Column(Boolean, default=False)         # Legacy: BE korumasi aktif
-    partial_hit = Column(Boolean, default=False)           # BE: +1R'de SL->entry
-    trail_active = Column(Boolean, default=False)          # TP%50 veya +1.5R sonrasi MFE trail
+    partial_hit = Column(Boolean, default=False)           # BE: SL->entry cekildi
+    trail_active = Column(Boolean, default=False)          # MFE trail acildi
     mfe_price = Column(Float, nullable=True)               # Aktifken en iyi lehine fiyat
+    # BE/trail korumasinin devreye girdigi an. Cekilmis stop, bu andan ONCEKI
+    # mumlara uygulanmaz; aksi halde reconcile gecmisi tekrar oynatirken fill
+    # mumunun kendi low'u (LONG'da dogal olarak entry'nin altinda) BE stopunu
+    # tetikliyor ve kazanan islem "breakeven" yaziliyordu.
+    protection_armed_time = Column(DateTime, nullable=True)
 
     # CISD confirmation (15M)
     cisd_confirmed = Column(Boolean, default=False)
