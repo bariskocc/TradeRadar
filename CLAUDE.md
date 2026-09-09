@@ -199,6 +199,31 @@ sonradan açıldığında** devreye girer; normal akışta `waiting_entry` zaten
 yazılıyor.
 5. Hard filter: **1D bias hizası** (`REQUIRE_HTF_BIAS_ALIGN`) — LONG için
    BULLISH/NEUTRAL, SHORT için BEARISH/NEUTRAL. 1W yalnızca bilgi/skor.
+
+**1D bias nasıl hesaplanır** (`compute_daily_bias`) — iki bileşen:
+
+- **structure** (`htf_bias_with_age`) — son kapanışın kırdığı teyitli swing
+  high/low yönü. **Kalıcı durum**: ters kırılım olana kadar eski yönü taşır,
+  bu yüzden yaşı da döner.
+- **ict** (`compute_ict_bias`) — yalnızca son 2 günlük mum (close > önceki
+  high / < önceki low, ya da failed high/low). Çok reaktif.
+
+Karar kuralı:
+- Yapısal kırılım **taze** (≤ `STRUCTURE_STALE_DAYS` = 7 kapalı gün) →
+  structure **VE** ict aynı yön olmalı, aksi halde NEUTRAL.
+- Yapısal kırılım **bayat** (veya hiç yok) → structure yön belirtmez, karar
+  **ict'ye** bırakılır.
+
+Bayatlık kuralı 2026-09-09'da eklendi: koşulsuz AND, haftalar öncesinin yönünün
+taze okumayı vetolamasına izin veriyordu (XAUUSD: structure 25.08'den beri
+BULLISH, ict BEARISH → daily NEUTRAL). Ölçülen etki: yönlü bias **18/26 → 20/26**.
+Yalnızca bayatlık eşiği koyup AND'i korumak 15/26'ya *düşürüyordu* — structure'ı
+bayat ama ict ile hemfikir olan ETH/US100/USDCAD gibi doğru okumaları da
+öldürdüğü için tercih edilmedi.
+
+**NEUTRAL bloklamaz** (`_bias_aligned` iki yöne de izin verir) ama
+`_calc_live_setup_bias` içinde `htf_score` **+2 yerine 0** olur — 9 tavanlı,
+7 eşikli skorda belirleyici. Takip: `/logs` → Engine Report → "1D Bias takibi".
 6. Kalite skoru (`_calc_live_setup_bias`): baz (doğru C2 rengi +2 / doji +1) +
    1D hiza veya reversal-at-PD (+2 / karşı −2) + 1W uyum (+1) + C2 kapalı (+1) +
    PD major (+1) + PD aylık (+1) + HTF FVG/OB (+1) + purge wick (+1) + LTF IFVG

@@ -37,8 +37,8 @@ from app.crt_engine import (
     check_signal_invalidation,
     check_smt_divergence,
     compute_daily_bias,
-    compute_htf_bias,
     compute_ict_bias,
+    htf_bias_with_age,
     compute_weekly_bias,
     detect_crt_setup,
     detect_ltf_ifvg,
@@ -1132,18 +1132,19 @@ async def _cpu(fn, /, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, str, str, str]:
-    """(structure, ict, daily, weekly).
+def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, int | None, str, str, str]:
+    """(structure, structure_age, ict, daily, weekly).
 
-    `daily` = structure VE ict ayni yonde ise o yon, aksi halde NEUTRAL. Iki
-    bilesen de ayri dondurulur cunku NEUTRAL'in sebebini gormeden bias
-    takip edilemiyor (yavas structure vs tek-bar ict ayrismasi).
+    Bilesenler ayri dondurulur cunku NEUTRAL'in sebebini gormeden bias takip
+    edilemiyor; `structure_age` (son yapisal kirilimdan bu yana gecen kapali
+    gun) bayat yapiyi gorunur kilar (bkz. STRUCTURE_STALE_DAYS).
     """
     if df_1d is None or df_1d.empty:
-        return "NEUTRAL", "NEUTRAL", "NEUTRAL", "NEUTRAL"
+        return "NEUTRAL", None, "NEUTRAL", "NEUTRAL", "NEUTRAL"
     structure = ict = daily = weekly = "NEUTRAL"
+    age: int | None = None
     try:
-        structure = compute_htf_bias(df_1d)
+        structure, age = htf_bias_with_age(df_1d)
     except Exception:
         pass
     try:
@@ -1158,7 +1159,7 @@ def _htf_biases(df_1d: pd.DataFrame | None) -> tuple[str, str, str, str]:
         weekly = compute_weekly_bias(df_1d)
     except Exception:
         pass
-    return structure, ict, daily, weekly
+    return structure, age, ict, daily, weekly
 
 
 async def _load_frames(
@@ -1303,7 +1304,7 @@ async def _detect_and_create_waiting_locked(
         _radar("no_data")
         return None
 
-    structure_bias, ict_bias, htf_bias, weekly_bias = await _cpu(_htf_biases, df_1d)
+    structure_bias, structure_age, ict_bias, htf_bias, weekly_bias = await _cpu(_htf_biases, df_1d)
 
     filter_bias = htf_bias
 
@@ -1349,9 +1350,9 @@ async def _detect_and_create_waiting_locked(
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info(
-            "SKIPPED (BIAS): %s %s filter=%s daily=%s structure=%s ict=%s weekly=%s",
+            "SKIPPED (BIAS): %s %s filter=%s daily=%s structure=%s(%s) ict=%s weekly=%s",
             setup.symbol, setup.direction, filter_bias, htf_bias,
-            structure_bias, ict_bias, weekly_bias,
+            structure_bias, structure_age, ict_bias, weekly_bias,
         )
         return None
 

@@ -31,7 +31,50 @@ olduğunu görmeden yapmaya değmeyebilir.
 
 ---
 
-## 2. 1D BIAS hesabı — yapısal bileşen bayatlıyor (öncelikli)
+## 2. 1D BIAS — bayatlık düzeltildi, izlemede (açık gözden geçirme)
+
+**✅ Yapıldı (2026-09-09):** `STRUCTURE_STALE_DAYS = 7`. Yapısal kırılım 7
+kapalı günden eskiyse structure yön belirtmiyor ve karar ict'ye bırakılıyor
+(seçenek **a′**). XAUUSD artık **BEARISH**; evrende yönlü bias **18/26 → 20/26**.
+
+**Neden düz (a) değil:** yalnızca bayatlık eşiği koyup AND'i korumak
+15/26'ya *düşürüyordu* — `NEUTRAL AND BEARISH` yine NEUTRAL verdiği için XAU
+düzelmiyor, üstüne structure'ı bayat ama ict ile hemfikir olan ETH/US100/USDCAD
+gibi doğru okumalar da ölüyordu.
+
+### ⚠️ Kalan sorun: ict tek-mumluk
+
+Bayatlık düzeltmesi **dünkü vetoyu engellemezdi.** 07.09'da structure BULLISH
+(bayat) **ve ict de BULLISH**'ti — çünkü 07.09 mumu önceki low'u süpürüp içeri
+kapattı, bu kitaba göre "failed low" yani boğa sinyali. İkisi de aynı yönde
+olduğu için hiçbir varyant farklı sonuç vermezdi:
+
+```
+SKIPPED (BIAS): XAUUSD SHORT filter=BULLISH daily=BULLISH weekly=BEARISH structure=BULLISH
+```
+
+O gün motor "yanlış" değildi; piyasa tek günlük boğa sinyali verdi, ertesi gün
+sert döndü. Ama **weekly BEARISH'ti ve doğruydu** — weekly karara girmiyor.
+
+**Hâlâ değerlendirilebilir:**
+
+| | Fikir | Ölçülen etki |
+|---|---|---|
+| c | **weekly'yi karara kat** (structure/ict/weekly çoğunluğu) | 25/26 yönlü — çok iddialı; NEUTRAL izin verdiği için *daha çok* bloklama demek |
+| d | **1D PD array / FVG'yi bias'a kat** — kullanıcının bahsettiği IFVG + bearish FVG iğnesi bugün bias'ta hiç kullanılmıyor | En büyük iş |
+| e | Bias'ı hard filtre olmaktan çıkar, yalnızca skora bırak | Radikal; `REQUIRE_HTF_BIAS_ALIGN = False` |
+
+**Tetikleyici — şu olursa buraya dön:** rapordaki `structure ↔ ict` ayrışma
+oranı kalıcı olarak >%40 olursa, ya da bias elemesi yine en sık kapı olur ve
+gözle bakınca yön yanlış görünürse.
+
+**Ölçüm:** `/logs` → Engine Report → "1D Bias takibi". Log satırı artık yapısal
+yaşı da taşıyor: `structure=BULLISH(14)`.
+
+---
+
+<details>
+<summary>Arka plan: sorun nasıl teşhis edildi (2026-09-09)</summary>
 
 **Bu filtre elemelerin ~%30'unu tek başına yapıyor** — en sık tetikleyen kapı.
 Ve yanlış çalıştığında hem sinyali bloklar hem kalite puanını düşürür.
@@ -85,25 +128,16 @@ Yani **yavaş + hızlı** iki sinyalin AND'i alınıyor.
    bayat BULLISH'ti → geçerli bir short vetolandı. **weekly BEARISH'ti ama
    weekly filtre olarak kullanılmıyor.**
 
-### Değerlendirilecek seçenekler (karar senin)
+### Kural varyantları — gerçek veride ölçüldü (26 sembol)
 
-| | Fikir | Not |
-|---|---|---|
-| a | **structure'a bayatlama sınırı**: kırılım N günden eskiyse NEUTRAL say | En küçük değişiklik; sadece bayat vetoyu kaldırır |
-| b | **AND yerine ağırlık**: ict ve structure ayrışırsa NEUTRAL yerine daha taze olanı tercih et | Daha çok yönlü bias, daha çok sinyal |
-| c | **weekly'yi karara kat** — bugün yalnızca bilgi. XAU'da weekly doğruydu | 3 bileşenin çoğunluğu? |
-| d | **1D PD array / FVG'yi bias'a kat** — kullanıcının bahsettiği IFVG + bearish FVG iğnesi bugün bias'ta hiç kullanılmıyor (yalnızca setup skorunda) | En büyük iş |
-| e | Bias'ı hard filtre olmaktan çıkar, yalnızca skora bırak | Radikal; `REQUIRE_HTF_BIAS_ALIGN = False` |
+| Kural | XAUUSD | Yönlü | NEUTRAL |
+|---|---|---|---|
+| Eski (koşulsuz AND) | NEUTRAL | 18/26 | 8 |
+| (a) bayat → NEUTRAL, yine AND | NEUTRAL ❌ | **15/26** ⬇ | 11 |
+| **(a′) bayat → ict'ye düş** ✅ **seçildi** | **BEARISH** | **20/26** | 6 |
+| (c) structure/ict/weekly çoğunluğu | BEARISH | 25/26 | 1 |
 
-### Takip (kuruldu)
-
-`SKIPPED (BIAS)` log satırına **`ict=`** eklendi; artık NEUTRAL'in sebebi
-görülebiliyor. Rapor sayfasında **"1D Bias takibi"** bölümü var:
-`/logs` → Engine Report → bias ile eleme sayısı, `structure ↔ ict` ayrışma
-oranı, `weekly ≠ daily` sayısı ve son örnekler.
-
-**İzlenecek:** ayrışma oranı kalıcı olarak yüksekse (>%40) AND kuralı fazla
-katı demektir.
+</details>
 
 ---
 

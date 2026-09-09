@@ -38,6 +38,10 @@ CRT_INVALIDATION_FRAC = 0.60
 SWING_PIVOT_BARS = 1
 # 1D yapisal bias icin biraz daha katı pivot (5-mum: 2 sol + pivot + 2 sag)
 DAILY_SWING_PIVOT_BARS = 2
+# Yapisal bias kalici bir durumdur; kirilim bu kadar KAPALI gunden eskiyse
+# "bayat" sayilir ve gunluk bias karari taze okumaya (ICT) birakilir.
+# 7: olculen kirilim yasi ortancasi 5 gun (26 sembol, 09.09.2026).
+STRUCTURE_STALE_DAYS = 7
 # MSS kapanis margin: max(seviye*pct, ort.15M range*mult).
 # XAU (~4090): %0.06 ≈ 2.45$, range%30 ≈ 2$ → tipik 2-3$ bandi.
 CISD_STRONG_CLOSE_PCT = 0.0006
@@ -162,49 +166,71 @@ def compute_ict_bias(df_daily: pd.DataFrame, *, drop_forming_day: bool = True) -
 
 
 def compute_daily_bias(df_daily: pd.DataFrame) -> str:
-    """1D trade bias — sikı: Swing structure VE ICT ayni yon olmali.
+    """1D trade bias — Swing structure + ICT, yapisal bayatlik gozetilerek.
 
-    - Ikisi BULLISH -> BULLISH
-    - Ikisi BEARISH -> BEARISH
-    - Aksi (biri karsi / NEUTRAL / veri yok) -> NEUTRAL
+    - Yapisal kirilim TAZE ise (<= STRUCTURE_STALE_DAYS): structure VE ict ayni
+      yon olmali, aksi halde NEUTRAL.
+    - Yapisal kirilim BAYAT ise (veya hic yoksa): structure yon belirtmez,
+      karar taze okumaya (ict) birakilir.
+
+    Neden: yapisal bias kalici bir durumdur ve aylarca aralikta kalan bir
+    enstrumanda haftalar oncesinin yonunu tasir. Eski hali (kosulsuz AND)
+    boyle bir bayat yonun taze okumayi vetolamasina izin veriyordu — XAUUSD
+    09.09.2026: structure 25.08'den beri BULLISH (14 gun), ict BEARISH
+    (08.09 kapanisi 07.09 low'unun altinda) -> daily NEUTRAL kaliyordu.
+
+    Olculen etki (26 sembol, 09.09.2026): yonlu bias 18/26 -> 20/26.
+    Yalnizca bayatlik esigi koyup AND'i korumak (yani ict'ye dusmemek) 15/26'ya
+    DUSURUYORDU; structure'i bayat ama ict ile hemfikir olan ETH/US100/USDCAD
+    gibi dogru okumalari da oldurdugu icin tercih edilmedi.
 
     UI, Telegram, hard filter ve skor 1D kalemi bu degeri kullanir.
     """
     if df_daily is None or df_daily.empty:
         return "NEUTRAL"
     try:
-        structure = compute_htf_bias(df_daily)
+        structure, age = htf_bias_with_age(df_daily)
     except Exception:
-        structure = "NEUTRAL"
+        structure, age = "NEUTRAL", None
     try:
         ict = compute_ict_bias(df_daily)
     except Exception:
         ict = "NEUTRAL"
-    if structure == "BULLISH" and ict == "BULLISH":
-        return "BULLISH"
-    if structure == "BEARISH" and ict == "BEARISH":
-        return "BEARISH"
-    return "NEUTRAL"
+    if structure == "NEUTRAL" or age is None or age > STRUCTURE_STALE_DAYS:
+        return ict
+    return structure if structure == ict else "NEUTRAL"
 
 
 def compute_htf_bias(df_daily: pd.DataFrame, *, drop_forming_day: bool = True) -> str:
     """1D yapisal bias — son kapanisla kirilan swing high/low yonu.
 
+    Yasi da gerekiyorsa `htf_bias_with_age` kullan.
+    """
+    return htf_bias_with_age(df_daily, drop_forming_day=drop_forming_day)[0]
+
+
+def htf_bias_with_age(
+    df_daily: pd.DataFrame, *, drop_forming_day: bool = True,
+) -> tuple[str, Optional[int]]:
+    """(yapisal bias, son kirilimdan bu yana gecen KAPALI gun sayisi).
+
     Momentum/EMA YOK. Forming gun dusulur (drop_forming_day=True).
       - close > son teyitli swing high -> BULLISH (son kirilim)
       - close < son teyitli swing low  -> BEARISH
       - kirilim yoksa onceki bias korunur (inside bar NEUTRAL'e dusmez)
-      - hic kirilim yoksa / veri yetmezse -> NEUTRAL
+      - hic kirilim yoksa / veri yetmezse -> (NEUTRAL, None)
 
-    Trade filtresi / UI icin bkz. compute_daily_bias (structure + ICT).
+    Bias KALICI bir durumdur: ters kirilim olana kadar eski yonu tasir. Yas bu
+    yuzden onemli — aylarca aralikta kalan bir enstrumanda yon bayatlar.
+    `compute_daily_bias` bayat yapiyi vetodan dusurmek icin bu yasi kullanir.
     """
     if df_daily is None or df_daily.empty:
-        return "NEUTRAL"
+        return "NEUTRAL", None
     closed = _drop_forming_daily(df_daily) if drop_forming_day else df_daily.sort_index()
     span = DAILY_SWING_PIVOT_BARS
     # pivot teyidi icin sagda `span` mum gerekir
     if closed is None or len(closed) < span * 2 + 3:
-        return "NEUTRAL"
+        return "NEUTRAL", None
 
     n = len(closed)
     highs: list[tuple[int, float]] = []
@@ -216,6 +242,7 @@ def compute_htf_bias(df_daily: pd.DataFrame, *, drop_forming_day: bool = True) -
             lows.append((i, float(closed.iloc[i]["low"])))
 
     bias = "NEUTRAL"
+    broke_at: Optional[int] = None
     for i in range(span * 2, n):
         close = float(closed.iloc[i]["close"])
         # Pivot j, j+span barindan itibaren teyitlidir
@@ -236,12 +263,16 @@ def compute_htf_bias(df_daily: pd.DataFrame, *, drop_forming_day: bool = True) -
         if broke_h and broke_l:
             # Nadir: ayni barda iki seviye; daha yeni pivotun kirilimi kazanir
             bias = "BULLISH" if sh_i >= sl_i else "BEARISH"
+            broke_at = i
         elif broke_h:
             bias = "BULLISH"
+            broke_at = i
         elif broke_l:
             bias = "BEARISH"
+            broke_at = i
         # else: bias degismez (inside / aralik ici kapanis)
-    return bias
+    age = None if broke_at is None else (n - 1 - broke_at)
+    return bias, age
 
 
 def daily_to_weekly_ohlcv(df_1d: pd.DataFrame) -> pd.DataFrame:
