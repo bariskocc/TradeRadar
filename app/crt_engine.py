@@ -982,6 +982,15 @@ class IFVGZone:
     inverted_time: datetime
     kind: str  # "bull" | "bear"
 
+    def entry_for(self, direction: str) -> float:
+        """Girise EN YAKIN kenar: LONG'da ust, SHORT'ta alt.
+
+        Retest'te fiyatin bolgeye ilk dokundugu nokta budur; mid'e gore fill
+        olasiligi yuksek, karsiliginda entry SL'ye biraz uzak (RR bir miktar
+        dusuk). mid alani hala zone bilgisi olarak duruyor.
+        """
+        return self.high if direction == "LONG" else self.low
+
 
 def _drop_forming_bar(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     if df is None or df.empty:

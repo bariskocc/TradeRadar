@@ -928,14 +928,15 @@ def _maybe_ifvg_entry(
         return cisd, planned
     cisd.ifvg_low = zone.low
     cisd.ifvg_high = zone.high
+    ifvg_entry = zone.entry_for(setup.direction)
     if not _entry_between_stops(
-        setup.direction, zone.mid, float(cisd.stop_loss), float(cisd.take_profit),
+        setup.direction, ifvg_entry, float(cisd.stop_loss), float(cisd.take_profit),
     ):
         return cisd, planned
-    ifvg_rr = _calc_planned_rr(zone.mid, cisd.stop_loss, cisd.take_profit)
+    ifvg_rr = _calc_planned_rr(ifvg_entry, cisd.stop_loss, cisd.take_profit)
     if ifvg_rr is None or (planned is not None and ifvg_rr < planned):
         return cisd, planned  # IFVG girisi RR'yi kotulestiriyor -> CISD/MSS kal
-    cisd.entry_price = zone.mid
+    cisd.entry_price = ifvg_entry
     cisd.entry_model = "ifvg"
     return cisd, ifvg_rr
 
@@ -1001,10 +1002,11 @@ def _preview_trade_levels(
         tp = float(
             setup.key_level_high if setup.direction == "LONG" else setup.key_level_low
         )
-        if _entry_between_stops(setup.direction, zone.mid, sl, tp):
+        z_entry = zone.entry_for(setup.direction)
+        if _entry_between_stops(setup.direction, z_entry, sl, tp):
             return {
-                "rr": _calc_planned_rr(zone.mid, sl, tp),
-                "entry": zone.mid,
+                "rr": _calc_planned_rr(z_entry, sl, tp),
+                "entry": z_entry,
                 "sl": sl,
                 "tp": tp,
                 "ifvg": True,

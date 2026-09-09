@@ -166,7 +166,11 @@ Takas: daha çok fırsat ↔ C2 içinde yeni dip/tepe olursa tamponsuz SL yenebi
 `_pick_wider_stop`; sistem "limit emri" gibi davranır):
 
 - **LTF IFVG varsa** (LTF'de purge sonrası invert olmuş, mid CRT C1 aralığında,
-  henüz mitigate edilmemiş FVG) → giriş **IFVG %50 (mid)**, `entry_model='ifvg'`.
+  henüz mitigate edilmemiş FVG) → giriş **bölgenin girişe en yakın kenarı**
+  (`IFVGZone.entry_for`): **LONG'da üst, SHORT'ta alt**. `entry_model='ifvg'`.
+  Retest'te fiyatın ilk dokunduğu nokta budur — fill olasılığı mid'e göre
+  yüksek, karşılığında entry SL'ye biraz uzak (RR ortalama ~0.3 düşük).
+  `mid` alanı zone bilgisi olarak duruyor, giriş için kullanılmıyor.
   Ön koşullar: `ifvg_requires_c2_closed` (C2 kapanmadan IFVG girişi devre dışı),
   IFVG mid'i SL–TP arasında olmalı, boşluk ≥ `MIN_IFVG_GAP_RANGE_FRAC` (0.15) ×
   son 20 LTF mumunun ort. range'i (gürültü filtresi), **ve IFVG RR'si CISD
