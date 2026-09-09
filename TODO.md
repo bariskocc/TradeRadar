@@ -1,7 +1,8 @@
 # Yapılacaklar
 
-Tamamlanan madde bu dosyadan **silinir** — kararı verilmiş ama ileride tekrar
-bakılacak konular "açık gözden geçirme" olarak kalır (tetikleyicisiyle birlikte).
+Tamamlanan madde bu dosyadan **silinir**. Kararı verilmiş ve canlıya alınmış ama
+etkisi izlenecek konular → [IZLEME.md](IZLEME.md).
+
 Her madde, yeniden araştırma gerektirmeyecek kadar bağlam içerir. Çapraz
 referanslar numara değil **isim** kullanır; numaralar madde silindikçe kayıyor.
 
@@ -11,13 +12,13 @@ Son güncelleme: 2026-09-09
 
 ## 1. IFVG dolmazsa CISD/MSS'e fallback
 
-**Durum:** #1'in yarısı yapıldı (IFVG, CISD'den kötü RR veriyorsa artık
-seçilmiyor). Kalan yarı bu.
+**Durum:** Yarısı yapıldı — IFVG, CISD'den kötü RR veriyorsa artık seçilmiyor.
+Kalan yarı bu.
 
-**Sorun:** IFVG entry modeli seçildikten sonra fiyat IFVG bölgesine hiç
-gelmezse (etiketlemezse) sinyal orada asılı kalır ve fiyat CRT %60'ı geçince
-`invalidated` olur. CISD/MSS entry'sine geri dönüş yok — oysa fiyat oraya
-retest vermiş olabilir.
+**Sorun:** IFVG entry modeli seçildikten sonra fiyat IFVG bölgesine hiç gelmezse
+(etiketlemezse) sinyal orada asılı kalır ve fiyat CRT %60'ı geçince
+`invalidated` olur. CISD/MSS entry'sine geri dönüş yok — oysa fiyat oraya retest
+vermiş olabilir.
 
 **Yapılacak:** Bekleyen sinyalde "IFVG N mumdur dolmadı → entry'yi CISD'ye
 çevir" mantığı. Durum tutmayı gerektiriyor:
@@ -26,122 +27,12 @@ retest vermiş olabilir.
 
 **Maliyet tahmini:** ~0,3–0,5M token (migration dahil).
 
-**Not:** En seyrek tetiklenen madde. Canlı loglarda gerçekten ne sıklıkta
-olduğunu görmeden yapmaya değmeyebilir.
+**⚠️ Önce ölç:** En seyrek tetiklenen madde. [IZLEME.md](IZLEME.md)'de
+`BACKFILL FILL` hiç tetiklemiyorsa buna gerek olmayabilir.
 
 ---
 
-## 2. 1D BIAS — bayatlık düzeltildi, izlemede (açık gözden geçirme)
-
-**✅ Yapıldı (2026-09-09):** `STRUCTURE_STALE_DAYS = 7`. Yapısal kırılım 7
-kapalı günden eskiyse structure yön belirtmiyor ve karar ict'ye bırakılıyor
-(seçenek **a′**). XAUUSD artık **BEARISH**; evrende yönlü bias **18/26 → 20/26**.
-
-**Neden düz (a) değil:** yalnızca bayatlık eşiği koyup AND'i korumak
-15/26'ya *düşürüyordu* — `NEUTRAL AND BEARISH` yine NEUTRAL verdiği için XAU
-düzelmiyor, üstüne structure'ı bayat ama ict ile hemfikir olan ETH/US100/USDCAD
-gibi doğru okumalar da ölüyordu.
-
-### ⚠️ Kalan sorun: ict tek-mumluk
-
-Bayatlık düzeltmesi **dünkü vetoyu engellemezdi.** 07.09'da structure BULLISH
-(bayat) **ve ict de BULLISH**'ti — çünkü 07.09 mumu önceki low'u süpürüp içeri
-kapattı, bu kitaba göre "failed low" yani boğa sinyali. İkisi de aynı yönde
-olduğu için hiçbir varyant farklı sonuç vermezdi:
-
-```
-SKIPPED (BIAS): XAUUSD SHORT filter=BULLISH daily=BULLISH weekly=BEARISH structure=BULLISH
-```
-
-O gün motor "yanlış" değildi; piyasa tek günlük boğa sinyali verdi, ertesi gün
-sert döndü. Ama **weekly BEARISH'ti ve doğruydu** — weekly karara girmiyor.
-
-**Hâlâ değerlendirilebilir:**
-
-| | Fikir | Ölçülen etki |
-|---|---|---|
-| c | **weekly'yi karara kat** (structure/ict/weekly çoğunluğu) | 25/26 yönlü — çok iddialı; NEUTRAL izin verdiği için *daha çok* bloklama demek |
-| d | **1D PD array / FVG'yi bias'a kat** — kullanıcının bahsettiği IFVG + bearish FVG iğnesi bugün bias'ta hiç kullanılmıyor | En büyük iş |
-| e | Bias'ı hard filtre olmaktan çıkar, yalnızca skora bırak | Radikal; `REQUIRE_HTF_BIAS_ALIGN = False` |
-
-**Tetikleyici — şu olursa buraya dön:** rapordaki `structure ↔ ict` ayrışma
-oranı kalıcı olarak >%40 olursa, ya da bias elemesi yine en sık kapı olur ve
-gözle bakınca yön yanlış görünürse.
-
-**Ölçüm:** `/logs` → Engine Report → "1D Bias takibi". Log satırı artık yapısal
-yaşı da taşıyor: `structure=BULLISH(14)`.
-
----
-
-<details>
-<summary>Arka plan: sorun nasıl teşhis edildi (2026-09-09)</summary>
-
-**Bu filtre elemelerin ~%30'unu tek başına yapıyor** — en sık tetikleyen kapı.
-Ve yanlış çalıştığında hem sinyali bloklar hem kalite puanını düşürür.
-
-### Nasıl çalışıyor
-
-`compute_daily_bias` = **`compute_htf_bias` (structure) VE `compute_ict_bias`**
-aynı yönde ise o yön, değilse **NEUTRAL**.
-
-- **structure** — son kapanışın kırdığı teyitli swing high/low yönü. **Kalıcı
-  durum**: ters bir kırılım olana kadar eski yönü taşır. Bayatlama sınırı YOK.
-- **ict** — yalnızca **son 2 mum**: close > önceki high → BULLISH, close <
-  önceki low → BEARISH, failed high/low → ters yön, inside/outside → NEUTRAL.
-  Çok reaktif, her gün dönebilir.
-
-Yani **yavaş + hızlı** iki sinyalin AND'i alınıyor.
-
-### Ölçüm (2026-09-09, 1D-1H evreni, 26 sembol)
-
-| | |
-|---|---|
-| Yönlü `daily` bias | 18/26 |
-| **NEUTRAL** | **8/26 (%31)** |
-| Yapısal kırılım yaşı | ortanca **5 gün**, max **17 gün** |
-| ≥10 gün bayat | 6/26 (%23) |
-
-### XAUUSD vakası (kullanıcının tespiti — doğrulandı)
-
-```
-07.09  O4426.65 H4433.66 L4385.14 C4427.16
-08.09  O4427.16 H4447.39 L4350.14 C4353.73   close < önceki LOW
-```
-- **ict = BEARISH** ✅ (Sept 8 kapanışı Sept 7 low'unun altında — kullanıcının
-  gözlemi motorda doğru okunuyor)
-- **structure = BULLISH** — ama kırılım **25.08**, yani **14 gün önce**. Altın
-  o tarihten beri 4287–4700 aralığında; yeni kırılım olmadığı için eski boğa
-  yönü duruyor.
-- **daily = NEUTRAL**
-
-### İki ayrı zarar
-
-1. **NEUTRAL, sinyali bloklamaz** (`_bias_aligned` NEUTRAL'de `True` döner) ama
-   `_calc_live_setup_bias` içinde `htf_score` **+2 yerine 0** olur. 9 tavanlı,
-   7 eşikli bir skorda bu belirleyici.
-2. **Daha kötüsü:** bayat structure + tek günlük ict sapması *yanlış yönde*
-   `daily` üretebiliyor ve o zaman **hard blok** olur. 08.09 logu:
-   ```
-   SKIPPED (BIAS): XAUUSD SHORT filter=BULLISH daily=BULLISH weekly=BEARISH structure=BULLISH
-   ```
-   O gün ict, 07.09'un "failed low" dalından BULLISH gelmişti; structure zaten
-   bayat BULLISH'ti → geçerli bir short vetolandı. **weekly BEARISH'ti ama
-   weekly filtre olarak kullanılmıyor.**
-
-### Kural varyantları — gerçek veride ölçüldü (26 sembol)
-
-| Kural | XAUUSD | Yönlü | NEUTRAL |
-|---|---|---|---|
-| Eski (koşulsuz AND) | NEUTRAL | 18/26 | 8 |
-| (a) bayat → NEUTRAL, yine AND | NEUTRAL ❌ | **15/26** ⬇ | 11 |
-| **(a′) bayat → ict'ye düş** ✅ **seçildi** | **BEARISH** | **20/26** | 6 |
-| (c) structure/ict/weekly çoğunluğu | BEARISH | 25/26 | 1 |
-
-</details>
-
----
-
-## 3. `TARGET TAKEN` filtresi fazla katı mı? (ticaret kararı)
+## 2. `TARGET TAKEN` filtresi fazla katı mı? (ticaret kararı)
 
 **Gözlem (2026-09-08 taraması):** 62 setup'ın **10'unda** tetikledi — en sık
 üçüncü filtre.
@@ -159,7 +50,7 @@ tolerans anlamlı olur mu?
 
 ---
 
-## 4. Signals + Radar sayfalarına "Entry Model" sütunu
+## 3. Signals + Radar sayfalarına "Entry Model" sütunu
 
 **İstenen:** Her sinyalde girişin hangi modelden geldiği görünsün: `IFVG`,
 `CISD`, `MSS`.
@@ -172,9 +63,9 @@ tolerans anlamlı olur mu?
 - **MSS** = purge öncesi son swing high/low
 
 `_pick_wider_stop` hangisi daha iyi RR veriyorsa onu seçiyor **ama hangisinin
-kazandığını döndürmüyor** — `CISDConfirmation.entry_model` dataclass
-varsayılanı olarak her hâlükârda `"cisd"` kalıyor. Yani bugün "cisd" yazan
-kayıtların bir kısmı aslında MSS.
+kazandığını döndürmüyor** — `CISDConfirmation.entry_model` dataclass varsayılanı
+olarak her hâlükârda `"cisd"` kalıyor. Yani bugün "cisd" yazan kayıtların bir
+kısmı aslında MSS.
 
 **Yapılacaklar:**
 
@@ -188,8 +79,8 @@ kayıtların bir kısmı aslında MSS.
    - **IFVG** = setup'ta IFVG *var mı?* (varlık)
    - **Entry Model** = giriş *hangi modelden geldi?* (IFVG / CISD / MSS)
 
-   #1 düzeltmesinden sonra bunlar gerçekten ayrışıyor: IFVG var ama RR'yi
-   kötüleştirdiği için kullanılmamış olabilir → `IFVG ✓` + `Entry Model: CISD`.
+   IFVG-RR koruması eklendikten sonra bunlar gerçekten ayrışıyor: IFVG var ama
+   RR'yi kötüleştirdiği için kullanılmamış olabilir → `IFVG ✓` + `Entry: CISD`.
 4. **Radar** (`app/templates/radar.html` + `/api/radar`): radar entry model'i
    hiç taşımıyor. Zincir: `_preview_trade_levels` dönüşüne `model` eklensin →
    `_set_radar(...)` yeni parametre → `api_radar` (`app/main.py`) JSON'a koysun
@@ -201,8 +92,8 @@ kayıtlar geriye dönük düzelmez (hepsi `"cisd"` yazıyor); istenirse
 
 ### ⚠️ Bonus hata: mevcut IFVG sütunu "var mı"yı doğru göstermiyor
 
-Kullanıcı bu sütunu "setup'ta IFVG var mı" diye okuyor, ama her iki kaynak da
-**"IFVG var VE kullanılabilir"** anlamına geliyor:
+Sütun "setup'ta IFVG var mı" diye okunuyor, ama her iki kaynak da **"IFVG var VE
+kullanılabilir"** anlamına geliyor:
 
 - `_maybe_ifvg_entry` (signals kaynağı, `app/scanner.py`):
   ```python
@@ -225,6 +116,28 @@ tespit et, `allow_ifvg`'yi yalnızca *entry olarak kullanma* kararında kullan.
 **Maliyet notu:** bu, IFVG'nin izinli olmadığı her setup'ta bir ek
 `detect_ltf_ifvg` çağrısı demek. Sıcak yolda; `_cpu()` ile thread'e atılıyor,
 muhtemelen sorun değil ama ölçmeye değer.
+
+---
+
+## 4. Kısmi kâr alma: %50'de yarı kapat + BE
+
+TP yolunun %50'sine gelince:
+1. **İşlemin yarısını kapat** → kâr realize edilir
+2. Kalan yarı devam eder, **SL = BE (entry)**
+
+Böylece en kötü senaryo "yarım pozisyondan alınan kâr + kalan yarıda 0R" olur;
+SUI gibi vakalarda hem kâr cebe girer hem TP'ye yürüme ihtimali korunur.
+(SUI vakası → [IZLEME.md](IZLEME.md) "1D/1H'te BE".)
+
+**⚠️ Gereken altyapı bugün yok** — sistem pozisyon büyüklüğü tutmuyor. `Signal`
+tek bir `rr_value` yazıyor. En az şunlar gerekir:
+- `Signal`'a kısım büyüklüğü / kısmi çıkış fiyatı + zamanı kolonları
+  (+ `_MIGRATIONS`)
+- `rr_value` hesabının ağırlıklı hale gelmesi (`0.5 × partial_R + 0.5 × final_R`)
+- Dashboard/analytics R toplamlarının bu ağırlığa uyması
+- Telegram mesajında kısmi çıkış bildirimi
+- `partial_hit` alanı bugün "BE aktif" anlamında kullanılıyor; adı doğru ama
+  anlamı değişecek, karışıklığa dikkat
 
 ---
 
@@ -256,120 +169,13 @@ Doğrulanıp bu dosya silinebilir.
 
 ---
 
-## 6. İzleme (madde değil, süreç)
-
-2026-09-08'de 7 düzeltme canlıya alındı ve loglama kuruldu. Bir süre
-`logs/traderadar.log` izlenmeli:
-
-- Üretilen `waiting` sinyal sayısı ve kalitesi (düzeltmeler öncesi **sıfırdı**)
-- `SKIPPED (...)` dağılımının zaman içinde değişimi
-- 1H-5M'de C2 kapanmadan fill'in gerçek etkisi (daha çok fırsat mı, daha çok
-  −1R mi?)
-- `BACKFILL FILL` hiç tetikliyor mu (tetiklemiyorsa "IFVG fallback" gereksiz)
-- Tamponsuz SL'in stop-out oranı
-- Kripto küme limiti — bkz. bir sonraki madde
-
----
-
-## 7. Kripto küme limiti — gerekirse yeniden ayarla (açık gözden geçirme)
-
-**Karar verildi, madde kapanmadı.** Sinyal akışı fazlalaşırsa güncel veriyle
-tekrar bakılacak; o yüzden bağlam burada duruyor.
-
-**Mevcut ayar** (`app/scanner.py`):
-
-| Parametre | Değer | Yer |
-|---|---|---|
-| `cluster_open` | 2 | `_RISK_GATES` |
-| `cluster_recent` | 2 | `_RISK_GATES` |
-| `cluster_window_hours` | 4 (1D'de 24) | `_RISK_GATES` / `STRATEGY_1D` |
-| `CLUSTER_EXEMPT_SYMBOLS` | BTC, ETH | modül sabiti |
-| `CLUSTER_EXEMPT_MIN_SCORE` | **9** | modül sabiti |
-
-Yalnızca **kripto**; FX/metal/oil/index bu limite hiç dahil değil.
-
-**2026-09-09'da yapılan:** Skoru ≥9 olan setup'lar limiti delebiliyor. Sebep:
-ETH/LINK/SUI SHORT açılınca kota doldu ve ADA (RR 4.47), BNB, TAO, XRP —
-**hepsi tam 9** — bloklandı. Eşik 10 olsaydı 40 setup'ta yalnızca 1'i geçerdi
-(SMT'siz skor tavanı 9, SMT +2 ekliyor).
-
-Muaf setup limiti **deler ama sayıma dâhildir** (BTC/ETH gibi sayımdan
-çıkmaz) — yoksa SMT'li bir piyasa hareketinde sınırsız korele pozisyon açılırdı.
-
-**Tetikleyici — şu olursa buraya dön:**
-- Aynı yönde eşzamanlı açık kripto sinyal sayısı rahatsız edici olursa
-- Aynı 4 saatlik pencerede çok sayıda korele sinyal gelirse
-- `logstat` raporunda `CLUSTER` elemesi neredeyse sıfırlanırsa (= limit artık
-  hiçbir şey yapmıyor demektir)
-
-**Kısabileceğimiz kollar:** `CLUSTER_EXEMPT_MIN_SCORE`'u 10'a çekmek · muaf
-setup'a ayrı bir tavan koymak · `cluster_window_hours`'ı kısaltmak ·
-`cluster_open`/`cluster_recent`'ı ayrıştırmak.
-
-**Ölçüm:** `/logs` → Engine Report → "Setup neden sinyale dönüşmedi" içinde
-`CLUSTER` satırı, ve aynı anda açık sinyallerin yön dağılımı.
-
----
-
-## 8. 1D/1H'te BE açılsın mı? + kısmi kâr alma fikri
-
-**Bağlam:** 2026-09-08'de SUI 4H SHORT, MFE +1.48R'ye gitti ama trail TP %50'de
-(+1.356R) açılıp 1R geride durduğu için sadece ~0.36R kilitliyordu; ilk geri
-çekilme işlemi **+0.48R**'de kesti (planned 2.71R). Arm eşiği ile trail mesafesi
-neredeyse eşitti.
-
-**Yapıldı (4H):** BE → TP %50, trail → TP %75, sabit R tetikleyicileri
-(`be_arm_r`, `trail_arm_r`) kapatıldı. Yeni anahtar `be_arm_tp_fraction`.
-SUI verisiyle doğrulandı: trail açılmaz, SL entry'de kalır, **işlem açık kalırdı.**
-
-### Kalan karar: 1D/1H'te BE
-
-Şu an **kapalı** (`be_arm_tp_fraction: None`). Kasıtlı — koddaki gerekçe:
-
-```python
-# 1D: 1s range 1R'yi yer (NZDUSD +1.31R sahte trail). Eski %75.
-```
-
-1 saatlik mumun boyu 1R'ye yakın olduğu için SL'yi entry'ye çekmek iğneye açık
-hale getiriyor. BE'yi geç tetiklemek bunu **çözmez** — armanma zamanı değişir,
-stop yine tam entry'de durur.
-
-`min_stop_range_mult: 1.0` artık 1R ≥ 1 ortalama LTF mumu garanti ediyor (ama
-*ancak* eşit), ve aynı-mum MFE koruması var. Yine de risk gerçek.
-
-**Karar:** 4H'te BE @ TP %50'nin sonucunu bir süre izle, sonra 1D/1H'e de
-açılsın mı karar ver. Ölçülecek: BE tetiklenen işlemlerin kaçı 0R'de kapandı,
-kaçı TP'ye yürüdü.
-
-### Yeni fikir: %50'de BE + işlemin yarısını kapat
-
-TP yolunun %50'sine gelince:
-1. **İşlemin yarısını kapat** → kâr realize edilir
-2. Kalan yarı devam eder, **SL = BE (entry)**
-
-Böylece en kötü senaryo "yarım pozisyondan alınan kâr + kalan yarıda 0R" olur;
-SUI gibi vakalarda hem kâr cebe girer hem de TP'ye yürüme ihtimali korunur.
-
-**Gereken altyapı (bugün yok):** sistem pozisyon büyüklüğü tutmuyor. `Signal`
-tek bir `rr_value` yazıyor; kısmi çıkış için en az şunlar gerekir:
-- `Signal`'a kısım büyüklüğü / kısmi çıkış fiyatı + zamanı kolonları
-  (+ `_MIGRATIONS`)
-- `rr_value` hesabının ağırlıklı hale gelmesi
-  (`0.5 × partial_R + 0.5 × final_R`)
-- Dashboard/analytics R toplamlarının bu ağırlığa uyması
-- Telegram mesajında kısmi çıkış bildirimi
-- `partial_hit` alanı bugün "BE aktif" anlamında kullanılıyor; adı doğru ama
-  anlamı değişecek, karışıklığa dikkat
-
----
-
-## 9. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
+## 6. Mimari analizi: tek kullanıcılık bir sistem için web yapısı doğru mu?
 
 > **Öncelik: EN DÜŞÜK.** Acelesi yok, diğer maddelerin hepsi bitince bakılacak.
 > **Çıktı bir rapor/öneri**, doğrudan refactor değil.
 
-**Soru:** Sistem web sitesi olarak tasarlandı ama tek kullanıcı var (sen).
-Farklı bir yapı daha mı uygun?
+**Soru:** Sistem web sitesi olarak tasarlandı ama tek kullanıcı var. Farklı bir
+yapı daha mı uygun?
 
 ### Web olduğu için var olan, tek kullanıcıda karşılığı olmayan şeyler
 
@@ -415,15 +221,18 @@ Oysa **değerli olan motor**, UI sadece bir görüntüleyici.
 
 ---
 
-## Tamamlananlar (2026-09-08)
+## Tamamlananlar (2026-09-08 / 09)
 
-Referans için; ayrıntı [CLAUDE.md](CLAUDE.md) "US100 1H-5M LONG incelemesi".
+Ayrıntı [CLAUDE.md](CLAUDE.md) ve [IZLEME.md](IZLEME.md)'de.
 
-- ~~#2 IFVG minimum boşluk (`MIN_IFVG_GAP_RANGE_FRAC = 0.15`)~~
-- ~~#6 CISD bloğu süpüren mumu içeriyor~~
-- ~~#7 SL tamponu kaldırıldı~~
-- ~~#5 1H-5M `require_c2_closed = False`~~
-- ~~#1 (yarısı) IFVG RR'yi kötüleştiriyorsa kullanılmıyor~~
-- ~~#4 Invalidation kronolojisi + pencereli backfill~~
+- ~~IFVG minimum boşluk (`MIN_IFVG_GAP_RANGE_FRAC = 0.15`)~~
+- ~~CISD bloğu süpüren mumu içeriyor~~
+- ~~SL tamponu kaldırıldı~~
+- ~~1H-5M `require_c2_closed = False`~~
+- ~~IFVG RR'yi kötüleştiriyorsa kullanılmıyor~~
+- ~~Invalidation kronolojisi + pencereli backfill~~
 - ~~`min_stop_range_mult` 1.5 → 1.0~~
-- ~~Loglama yapılandırması~~
+- ~~Loglama yapılandırması + `scripts/logstat.py` + Engine Report sayfası~~
+- ~~Kripto küme muafiyeti (skor ≥9)~~
+- ~~BE/trail eşikleri TP yoluna taşındı (4H)~~
+- ~~1D bias bayatlık düzeltmesi (`STRUCTURE_STALE_DAYS = 7`)~~

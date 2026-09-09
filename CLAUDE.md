@@ -2,7 +2,8 @@
 
 TradeRadar — CRT/ICT tabanlı kişisel trade sinyal radarı ve dashboard'u.
 
-Açık işler: **[TODO.md](TODO.md)** — madde tamamlanınca o dosyadan silinir.
+Açık işler: **[TODO.md](TODO.md)** (yapılacaklar, tamamlanınca silinir) ·
+**[IZLEME.md](IZLEME.md)** (canlıya alınmış ama etkisi izlenen konular, tetikleyicileriyle).
 
 ## Çalışma kuralları (her görevden önce)
 
@@ -62,7 +63,7 @@ iki arayüzü var:
 
 İçerik: setup'ların hangi kapıda elendiği (dağılım + en sık semboller), sinyal
 yaşam döngüsü sayıları, kapanan işlemler tablosu (R, win rate, çıkış türü),
-[TODO.md](TODO.md) "İzleme" maddesinin metrikleri (BACKFILL tetiklenme, koruma
+[IZLEME.md](IZLEME.md) metrikleri (BACKFILL tetiklenme, koruma
 etkisi, CRT %60 kronolojisi) ve WS bağlantı sağlığı.
 
 **Önemli ayrım:** `/logs` Events sekmesi `event_logs` **DB tablosunu** gösterir
@@ -129,7 +130,7 @@ tetikleyicileri (`be_arm_r`, `trail_arm_r`) kapalı. BE yalnızca **4H**'te aç�
 5R'lik bir işlemde yolun %20'sinde tetikleyip işlemi erken boğuyordu; TP kesri
 hedefe göre ölçekleniyor (min RR 2.0'da TP %50 zaten +1R'ye denk). 1D/1H'te BE
 kapalı — 1h/5m mum boyu 1R'ye yakın olduğu için entry'deki stop iğneye açık
-(bkz. NZDUSD notu, [TODO.md](TODO.md) "1D/1H'te BE" maddesi).
+(bkz. NZDUSD notu, [IZLEME.md](IZLEME.md) "1D/1H'te BE").
 
 **1H-5M istisnası**: `require_c2_closed = False`. C2 yalnızca 1 saat olduğu için
 kapanışını beklemek CISD onayından sonra 45 dk'ya kadar ölü bekleme demek ve
