@@ -73,6 +73,21 @@ SMT_QUALITY_BONUS = 2  # Korele parite ile 15M SMT divergence varsa +2
 MAX_QUALITY_SCORE = 11  # baz tavan 9 + SMT 2
 PREMIUM_QUALITY_SCORE = 11  # yalnizca 11 = Premium
 
+# CRT %60 invalidation ("fiyat bizi almadan kacti" kontrolu).
+#
+# KAPALI (10.09.2026): fiyat %60 seviyesini gectikten SONRA entry'ye geri donup
+# TP'ye gidebiliyor. Kronoloji kontrolu yalnizca "fill breach'ten once" halini
+# kurtariyordu; ters sira (once breach, sonra fill) eleniyordu.
+#
+# True yapmak kurali eski haliyle geri getirir. Bayrak uc uygulama noktasini
+# birden yonetir - setup olusturma, pending iptali, waiting iptali; yalnizca
+# birini kapatmak tutarsiz olurdu (sinyal dogar, sonra beklerken ayni kuralla
+# olurdu).
+#
+# Bilinen yan etki: %60'i gecip donmeyen setuplar artik `waiting`'de asili
+# kalir ve acik sinyal kotasi ile kume limitini isgal eder.
+REQUIRE_CRT_MID_INVALIDATION = False
+
 # 1D bias (Swing structure + ICT): ayni yon veya NEUTRAL acilir.
 # LONG=BULLISH/NEUTRAL, SHORT=BEARISH/NEUTRAL. Karsi yon -> bias_mismatch.
 REQUIRE_HTF_BIAS_ALIGN = True
@@ -625,7 +640,8 @@ def _waiting_event(
     Fill ve missed iğnede. Ayni mumda entry+TP varsa fill (sonra aktif TP).
     """
     if (
-        bar_closed
+        REQUIRE_CRT_MID_INVALIDATION
+        and bar_closed
         and close is not None
         and invalidation_level is not None
         and check_signal_invalidation(
@@ -1641,7 +1657,7 @@ async def _detect_and_create_waiting_locked(
     breach_ts = _first_past_crt_mid_ts(
         df_ltf, setup.direction, cisd.entry_price,
         cisd.invalidation_level, cisd.cisd_time, after_time=setup.purge_time,
-    )
+    ) if REQUIRE_CRT_MID_INVALIDATION else None
     # Gecmis fill'i yalnizca taze ise (pencere ici) ve C2 kosulu saglanmisken
     # dirilt; boylece saatler once dolmus bayat bir emir sinyale donusmez.
     backfill_ts = fill_ts if (
@@ -1860,7 +1876,8 @@ async def manage_symbol_on_price(
         try:
             if sig.status == PENDING_STATUS:
                 if (
-                    bar_closed
+                    REQUIRE_CRT_MID_INVALIDATION
+                    and bar_closed
                     and sig.entry_price is not None
                     and sig.invalidation_level is not None
                     and check_signal_invalidation(
