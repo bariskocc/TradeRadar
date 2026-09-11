@@ -115,10 +115,21 @@ def _format_signal_result(sig: Signal) -> str:
         plan_txt = "-"
     dur = f"{sig.duration_hours}s" if sig.duration_hours is not None else "-"
 
-    exit_kind = getattr(sig, "_exit_kind", None)
+    exit_kind = getattr(sig, "_exit_kind", None) or getattr(sig, "exit_reason", None)
+    partial_line = ""
+    if getattr(sig, "partial_size", None) and getattr(sig, "partial_rr", None) is not None:
+        partial_line = (
+            f"\U0001f4b0 <b>Kismi kar:</b> %{int(float(sig.partial_size) * 100)} @ "
+            f"<code>{sig.partial_price}</code> (+{float(sig.partial_rr):.2f}R)\n"
+        )
 
     strat = _strategy_label(sig)
-    if sig.status == "breakeven" or sig.result == "breakeven" or exit_kind == "be":
+    if exit_kind == "be" and rr > 0:
+        # Kismi kar alinip kalan yari giriste kapandi: toplamda kar + BE.
+        head = f"✅ <b>BE (KISMI KAR) – {sig.symbol} ({strat})</b>"
+        rr_txt = f"+{rr:g}R"
+        exit_line = f"\U0001f6d1 <b>Kalan cikis:</b> <code>{sig.entry_price}</code> (giris)\n"
+    elif sig.status == "breakeven" or sig.result == "breakeven" or exit_kind == "be":
         head = f"\u2796 <b>BREAKEVEN – {sig.symbol} ({strat})</b>"
         rr_txt = "0R"
         exit_line = f"\U0001f6d1 <b>Cikis:</b> <code>{sig.entry_price}</code> (giris)\n"
@@ -141,6 +152,7 @@ def _format_signal_result(sig: Signal) -> str:
         f"\U0001f4cd <b>{sig.direction}</b> | <b>Gerceklesen:</b> {rr_txt}\n"
         f"\U0001f4ca <b>Plan R:R:</b> {plan_txt}\n"
         f"\U0001f3af <b>Giris:</b> <code>{sig.entry_price}</code>\n"
+        f"{partial_line}"
         f"{exit_line}"
         f"\U000023f1 <b>Sure:</b> {dur}"
     )
@@ -199,6 +211,29 @@ async def send_signal_result(sig: Signal) -> bool:
     mid = await _send_message(text, reply_to_message_id=sig.tg_message_id)
     if mid:
         log.info("Telegram: result sent for %s %s (reply_to=%s)", sig.symbol, sig.direction, sig.tg_message_id)
+    return mid is not None
+
+
+def _format_signal_partial(sig: Signal) -> str:
+    """Kismi kar bildirimi: pozisyonun bir kismi kapatildi, kalan SL girise cekildi."""
+    strat = _strategy_label(sig)
+    pct = int(float(sig.partial_size or 0) * 100)
+    return (
+        f"\U0001f4b0 <b>KISMI KAR – {sig.symbol} ({strat})</b>\n"
+        f"\n"
+        f"\U0001f4cd <b>{sig.direction}</b> | <b>%{pct} kapatildi:</b> +{float(sig.partial_rr or 0):.2f}R\n"
+        f"\U0001f3af <b>Fiyat:</b> <code>{sig.partial_price}</code>\n"
+        f"\U0001f6e1️ <b>Kalan SL:</b> <code>{sig.entry_price}</code> (giris)"
+    )
+
+
+async def send_signal_partial(sig: Signal) -> bool:
+    """Kismi kar bildirimini aktif sinyal mesajina reply olarak gonderir."""
+    if not is_configured():
+        return False
+    mid = await _send_message(_format_signal_partial(sig), reply_to_message_id=sig.tg_message_id)
+    if mid:
+        log.info("Telegram: partial sent for %s %s (reply_to=%s)", sig.symbol, sig.direction, sig.tg_message_id)
     return mid is not None
 
 

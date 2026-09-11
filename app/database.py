@@ -35,6 +35,10 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("ifvg_high", "ALTER TABLE signals ADD COLUMN ifvg_high FLOAT"),
         ("protection_armed_time", "ALTER TABLE signals ADD COLUMN protection_armed_time DATETIME"),
         ("exit_reason", "ALTER TABLE signals ADD COLUMN exit_reason VARCHAR"),
+        ("partial_size", "ALTER TABLE signals ADD COLUMN partial_size FLOAT"),
+        ("partial_price", "ALTER TABLE signals ADD COLUMN partial_price FLOAT"),
+        ("partial_rr", "ALTER TABLE signals ADD COLUMN partial_rr FLOAT"),
+        ("partial_time", "ALTER TABLE signals ADD COLUMN partial_time DATETIME"),
     ],
 }
 

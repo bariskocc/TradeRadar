@@ -287,7 +287,10 @@
                             </td>
                             <td class="px-2 py-2 text-center whitespace-nowrap">
                                 {% set real_rr = signal_realized_rr(signal) %}
-                                {% if signal.status == 'breakeven' or signal.result == 'breakeven' %}
+                                {% if signal.result == 'win' and signal.exit_reason == 'be' and real_rr is not none %}
+                                {# Kismi kar alinip kalan yari giriste kapandi: toplam R + BE #}
+                                <span class="text-xs font-bold text-green-400">+{{ real_rr }}R</span> <span class="text-xs font-bold text-yellow-400">BE</span>
+                                {% elif signal.status == 'breakeven' or signal.result == 'breakeven' %}
                                 <span class="text-xs font-bold text-yellow-400">0R (BE)</span>
                                 {% elif real_rr is none %}
                                 <span class="text-gray-600 text-xs">-</span>
@@ -315,7 +318,11 @@
                                     <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span> Waiting MSS
                                 </span>
                                 {% elif signal.status == 'expired' %}
-                                    {% if signal.result == 'win' %}
+                                    {% if signal.result == 'win' and signal.exit_reason == 'be' %}
+                                    <span class="inline-flex items-center gap-1 text-xs font-medium text-yellow-400">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-yellow-400"></span> Breakeven
+                                    </span>
+                                    {% elif signal.result == 'win' %}
                                     <span class="inline-flex items-center gap-1 text-xs font-medium text-green-400">
                                         <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> TP Hit
                                     </span>

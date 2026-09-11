@@ -35,6 +35,13 @@ class Signal(Base):
     # mumunun kendi low'u (LONG'da dogal olarak entry'nin altinda) BE stopunu
     # tetikliyor ve kazanan islem "breakeven" yaziliyordu.
     protection_armed_time = Column(DateTime, nullable=True)
+    # Kismi kar (4H/1D): BE esiginde pozisyonun `partial_size` kesri `partial_price`
+    # seviyesinden kapatilir. rr_value kapanista agirlikli yazilir:
+    # partial_size x partial_rr + (1 - partial_size) x kalan kismin R'si.
+    partial_size = Column(Float, nullable=True)
+    partial_price = Column(Float, nullable=True)
+    partial_rr = Column(Float, nullable=True)
+    partial_time = Column(DateTime, nullable=True)
 
     # CISD confirmation (15M)
     cisd_confirmed = Column(Boolean, default=False)

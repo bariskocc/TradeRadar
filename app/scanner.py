@@ -61,7 +61,7 @@ from app.exchange import (
 from app.models import Signal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
-from app.telegram import send_signal_active, send_signal_result
+from app.telegram import send_signal_active, send_signal_partial, send_signal_result
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +162,9 @@ _RISK_GATES = {
     # %90: trail yalnizca hedefe cok yaklasip donen islemi korur, yoldakini kesmez.
     "trail_arm_tp_fraction": 0.90,
     "trail_arm_r": None,
+    # Kismi kar: BE esigine gelindiginde pozisyonun bu kesri kapatilir (None = kapali).
+    # Kapanista toplam R = kesir x kismi R + (1 - kesir) x kalan R (_blend_partial_rr).
+    "partial_close_fraction": None,
     "cluster_open": 2,
     "cluster_recent": 2,
     "cluster_window_hours": 4.0,
@@ -178,8 +181,15 @@ STRATEGY_CFG = {
         # ~0.36R kilitliyordu; MFE +1.48R iken ilk geri cekilme islemi 0.48R'de
         # kesti. Arm esigi ile trail mesafesi neredeyse esitti. BE TP %50'ye,
         # trail TP %75'e cekildi (ikisi de _RISK_GATES'ten; burada yalnizca BE
-        # acik edilir). 1D/1H'te BE hala kapali.
+        # acik edilir).
         "be_arm_tp_fraction": 0.50,
+        # Kismi kar (11.09): TP yolunun %50'sinde yarisi kapatilir, kalan yari
+        # SL=entry ile devam eder; trail kapali. Replay 22.06-10.09 (175 islem):
+        # ayni setup'larda +8.3R ama donemler arasi tutarsiz (GA sifiri iceriyor).
+        # BE zaten %50'de oldugu icin SL sayisi degismez; WR %22 -> %47.
+        # Bkz. IZLEME.md "Kismi kar - 4H replay".
+        "partial_close_fraction": 0.50,
+        "trail_arm_tp_fraction": None,
     },
     STRATEGY_1D: {
         "htf": "1d",
@@ -189,9 +199,16 @@ STRATEGY_CFG = {
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1D,
         **_RISK_GATES,
         "cluster_window_hours": 24.0,
-        # 1D: 1s range 1R'yi yer (NZDUSD +1.31R sahte trail). Eski %75.
         "be_arm_r": None,
         "trail_arm_r": None,
+        # Kismi kar (11.09): TP yolunun %50'sinde yarisi kapatilir, kalan yari
+        # SL=entry ile devam eder; trail kapali. Eskiden 1D'de BE kapaliydi (1h mum
+        # boyu 1R'ye yakin, NZDUSD sahte trail); yari kar realize edildigi icin
+        # BE'ye donus artik 0R degil. Replay 01.11.25-10.09.26 (108 islem): ayni
+        # setup'larda fark 0R, WR %31 -> %44. Bkz. IZLEME.md "Kismi kar - 1D replay".
+        "be_arm_tp_fraction": 0.50,
+        "partial_close_fraction": 0.50,
+        "trail_arm_tp_fraction": None,
     },
     STRATEGY_1H: {
         "htf": "1h",
@@ -629,6 +646,21 @@ def _bar_closed_before(bar_ts, created_at, ltf: str) -> bool:
     if b is None or c is None:
         return False
     return b + pd.Timedelta(ltf).to_pytimedelta() <= c
+
+
+def _blend_partial_rr(sig: Signal, rr_rest: float, bar_ts=None) -> float:
+    """Kismi kar alinmissa toplam R: kesir x kismi R + (1 - kesir) x kalan R.
+
+    Cikis mumu kismi kardan ONCE aciliyorsa (reconcile gecmisi yeniden oynatirken)
+    kismi kar o an henuz yoktu; kalan R aynen doner.
+    """
+    size = float(getattr(sig, "partial_size", None) or 0.0)
+    if size <= 0 or getattr(sig, "partial_rr", None) is None:
+        return float(rr_rest)
+    p_time, b = _as_utc(sig.partial_time), _as_utc(bar_ts)
+    if p_time is not None and b is not None and b < p_time:
+        return float(rr_rest)
+    return size * float(sig.partial_rr) + (1.0 - size) * float(rr_rest)
 
 
 def _waiting_event(
@@ -1907,6 +1939,7 @@ async def manage_symbol_on_price(
     changed = False
     activated: list[Signal] = []
     finished: list[Signal] = []  # TP/SL/BE kapanan sinyaller (sonuc reply'i icin)
+    partial_taken: list[Signal] = []  # kismi kar alinanlar (Telegram bildirimi)
     mgmt_ltf = STRATEGY_CFG.get(timeframe, STRATEGY_CFG[STRATEGY_4H])["ltf"]
 
     for sig in signals:
@@ -2187,7 +2220,9 @@ async def manage_symbol_on_price(
                 )
                 be_r = prot.get("be_arm_r")
                 be_frac = prot.get("be_arm_tp_fraction")
-                trail_frac = float(prot.get("trail_arm_tp_fraction", TRAIL_ARM_TP_FRACTION))
+                trail_frac = prot.get("trail_arm_tp_fraction", TRAIL_ARM_TP_FRACTION)
+                trail_frac = float(trail_frac) if trail_frac is not None else None  # None = trail kapali
+                partial_frac = prot.get("partial_close_fraction")
                 trail_r = prot.get("trail_arm_r")
                 if (be_r or be_frac) and not sig.partial_hit:
                     be_lvl = None
@@ -2206,10 +2241,25 @@ async def manage_symbol_on_price(
                         sig.stop_loss = entry
                         # Bu andan ONCEKI mumlar cekilmis stopa tabi degil.
                         sig.protection_armed_time = bar_ts or now
+                        partial_txt = ""
+                        if partial_frac and sig.partial_size is None:
+                            # Kismi kar: pozisyonun `partial_frac` kadari BE esiginde
+                            # (limit TP gibi) kapatilir; kalan kisim SL=entry ile devam.
+                            sig.partial_size = float(partial_frac)
+                            sig.partial_price = round(float(be_lvl), 8)
+                            sig.partial_rr = round(
+                                _rr_at_exit(sig.direction, entry, float(be_lvl), risk), 4,
+                            )
+                            sig.partial_time = bar_ts or now
+                            partial_taken.append(sig)
+                            partial_txt = (
+                                f" + %{int(sig.partial_size * 100)} kar alindi"
+                                f" (+{sig.partial_rr:.2f}R)"
+                            )
                         changed = True
                         await record_event(
                             "be_arm",
-                            f"BE acildi @{be_why} ({be_lvl}) SL->entry",
+                            f"BE acildi @{be_why} ({be_lvl}) SL->entry{partial_txt}",
                             symbol=sig.symbol, direction=sig.direction,
                             market_type=sig.market_type, level="info", session=session,
                         )
@@ -2217,9 +2267,18 @@ async def manage_symbol_on_price(
                             "BE ARM: %s %s @%s level=%s",
                             sig.symbol, sig.direction, be_why, be_lvl,
                         )
-                if not sig.trail_active:
-                    arm_lvl = _trail_arm_level(sig.direction, entry, tp, trail_frac)
-                    hit_frac = _hits_level(
+                        if partial_txt:
+                            log.info(
+                                "PARTIAL: %s %s %.0f%% @%s (+%.2fR)",
+                                sig.symbol, sig.direction, sig.partial_size * 100,
+                                sig.partial_price, sig.partial_rr,
+                            )
+                if not sig.trail_active and (trail_frac is not None or trail_r):
+                    arm_lvl = (
+                        _trail_arm_level(sig.direction, entry, tp, trail_frac)
+                        if trail_frac is not None else None
+                    )
+                    hit_frac = arm_lvl is not None and _hits_level(
                         sig.direction, high, low, arm_lvl, favorable=True,
                     )
                     hit_r = False
@@ -2239,7 +2298,7 @@ async def manage_symbol_on_price(
                         changed = True
                         await record_event(
                             "trail_arm",
-                            f"Trail acildi @{arm_lvl} (TP yolunun %{int(trail_frac * 100)}s"
+                            f"Trail acildi @{arm_lvl} (TP yolunun %{int((trail_frac or 0) * 100)}s"
                             + (f" veya +{trail_r}R" if trail_r else "")
                             + f") | min {TRAIL_OFFSET_R}R / {TRAIL_RANGE_MULT}x LTF range",
                             symbol=sig.symbol, direction=sig.direction,
@@ -2288,7 +2347,9 @@ async def manage_symbol_on_price(
                 if event == "hit_tp":
                     sig.status = "expired"
                     sig.result = "win"
-                    sig.rr_value = round(_planned_rr(entry, initial_sl, tp), 2)
+                    sig.rr_value = round(
+                        _blend_partial_rr(sig, _planned_rr(entry, initial_sl, tp), bar_ts), 2,
+                    )
                     sig.exit_reason = "tp"
                     result["closed"].append({"symbol": sig.symbol, "result": "win"})
                     await record_event(
@@ -2299,9 +2360,9 @@ async def manage_symbol_on_price(
                 elif event == "hit_trail":
                     sig.status = "expired"
                     sig.result = "win"
-                    sig.rr_value = round(
-                        _rr_at_exit(sig.direction, entry, float(sig.stop_loss), risk), 2
-                    )
+                    sig.rr_value = round(_blend_partial_rr(
+                        sig, _rr_at_exit(sig.direction, entry, float(sig.stop_loss), risk), bar_ts,
+                    ), 2)
                     sig.exit_reason = "trail"
                     result["closed"].append({"symbol": sig.symbol, "result": "win"})
                     await record_event(
@@ -2311,16 +2372,31 @@ async def manage_symbol_on_price(
                         market_type=sig.market_type, level="success", session=session,
                     )
                 elif event == "hit_be":
-                    sig.status = "breakeven"
-                    sig.result = "breakeven"
-                    sig.rr_value = 0.0
+                    be_rr = round(_blend_partial_rr(sig, 0.0, bar_ts), 2)
+                    sig.rr_value = be_rr
                     sig.exit_reason = "be"
-                    result["breakeven"].append(sig.symbol)
-                    await record_event(
-                        "breakeven", f"Breakeven / trail floor (entry {sig.entry_price})",
-                        symbol=sig.symbol, direction=sig.direction,
-                        market_type=sig.market_type, level="info", session=session,
-                    )
+                    if be_rr > 0:
+                        # Kismi kar alinmis: kalan yari giriste kapandi ama islem
+                        # toplamda karda. `result` R'nin isaretine gore yazilir
+                        # (istatistikler), "BE oldu" bilgisi exit_reason'da durur.
+                        sig.status = "expired"
+                        sig.result = "win"
+                        result["closed"].append({"symbol": sig.symbol, "result": "win"})
+                        await record_event(
+                            "closed_win",
+                            f"Kalan kisim BE (entry {sig.entry_price}), kismi kar ile +{be_rr}R",
+                            symbol=sig.symbol, direction=sig.direction,
+                            market_type=sig.market_type, level="success", session=session,
+                        )
+                    else:
+                        sig.status = "breakeven"
+                        sig.result = "breakeven"
+                        result["breakeven"].append(sig.symbol)
+                        await record_event(
+                            "breakeven", f"Breakeven / trail floor (entry {sig.entry_price})",
+                            symbol=sig.symbol, direction=sig.direction,
+                            market_type=sig.market_type, level="info", session=session,
+                        )
                 else:  # hit_sl
                     sig.status = "expired"
                     sig.result = "loss"
@@ -2373,6 +2449,12 @@ async def manage_symbol_on_price(
                         tg_changed = True
                 except Exception:
                     log.warning("telegram send failed for %s", sig.symbol)
+            # Kismi kar: aktif sinyal mesajina reply (kapanis mesajindan once).
+            for sig in partial_taken:
+                try:
+                    await send_signal_partial(sig)
+                except Exception:
+                    log.warning("telegram partial send failed for %s", sig.symbol)
             # Kapanan sinyaller: sonucu aktif sinyal mesajina reply olarak gonder.
             for sig in finished:
                 try:
@@ -2480,7 +2562,7 @@ async def close_session_positions(
             log.warning("WEEK CLOSE: %s risk hesaplanamadi, atlandi.", sig.symbol)
             continue
 
-        rr = round(_rr_at_exit(sig.direction, entry, exit_price, risk), 2)
+        rr = round(_blend_partial_rr(sig, _rr_at_exit(sig.direction, entry, exit_price, risk)), 2)
         # `result` R'nin isaretine gore yazilir ki dashboard/analytics bozulmasin;
         # "nasil cikildi" bilgisi exit_reason'da durur.
         if rr > 0:
