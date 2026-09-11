@@ -127,7 +127,7 @@ RADAR_STATE_META = {
     "missed_quality": {"label": "Missed (score<7 at entry)",  "color": "yellow", "rank": 4},
     "invalidated":    {"label": "CRT 60% crossed",            "color": "yellow", "rank": 4},
     "past_sl":        {"label": "SL before fill",             "color": "yellow", "rank": 4},
-    "stale":          {"label": "Waiting expired (stale)",    "color": "yellow", "rank": 4},
+    "stale":          {"label": "Retest too old (stale)",     "color": "yellow", "rank": 4},
     "week_close":     {"label": "Cancelled (week close)",      "color": "yellow", "rank": 4},
     "same_bar_sl":    {"label": "SL before fill",             "color": "yellow", "rank": 4},
     # "same_color":   {"label": "CRT/purge same color",      "color": "red",    "rank": 4},

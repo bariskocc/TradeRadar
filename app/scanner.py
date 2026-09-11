@@ -623,6 +623,14 @@ def _is_post_cisd_candle(candle_ts: datetime | None, cisd_time: datetime | None)
     return c > cisd
 
 
+def _bar_closed_before(bar_ts, created_at, ltf: str) -> bool:
+    """LTF mumu (acilis zamani `bar_ts`) sinyal kaydi olusturulmadan ONCE kapanmis mi?"""
+    b, c = _as_utc(bar_ts), _as_utc(created_at)
+    if b is None or c is None:
+        return False
+    return b + pd.Timedelta(ltf).to_pytimedelta() <= c
+
+
 def _waiting_event(
     direction: str,
     high: float,
@@ -1713,6 +1721,34 @@ async def _detect_and_create_waiting_locked(
                 )
                 return None
 
+    # Bayat retest: fiyat entry'yi backfill penceresinden ONCE zaten test etmis ve
+    # limit emri o an canliymis -> emir o zaman dolmustu; islem ya coktan
+    # sonuclandi ya da gercek zamanda hic alinamazdi. Setup ACILMAZ.
+    # Eskiden bu durumda duz `waiting` aciliyor, reconcile de onu dunun
+    # mumlariyla doldurup kapatiyordu - kayit olustugunda islem bitmis, Telegram
+    # aktif+sonuc ayni saniyede ("hayalet islem"). CRT %60 kurali bu vakalarin
+    # cogunu tesadufen eliyordu; kural kapatilinca acik ortaya cikti.
+    if cisd.confirmed and fill_ts is not None and backfill_ts is None:
+        order_live_at_fill = True
+        if cfg.get("require_c2_closed"):
+            c2_open = _as_utc(setup.purge_time)
+            order_live_at_fill = bool(setup.c2_closed) and (
+                c2_open is None
+                or _as_utc(fill_ts) >= c2_open + timedelta(hours=float(cfg["c2_hours"]))
+            )
+        if order_live_at_fill and not _fill_within_backfill_window(df_ltf, fill_ts, cfg):
+            if existing_pending is not None:
+                await _delete_pending(session, existing_pending, "stale")
+            _radar("stale", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
+                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+            log.info(
+                "SKIPPED (STALE FILL): %s %s entry %s zaten %s tarihinde test edilmis (pencere disi).",
+                setup.symbol, setup.direction, cisd.entry_price, fill_ts,
+            )
+            return None
+
     can_wait = bool(cisd.confirmed) and (
         not cfg.get("require_c2_closed") or bool(setup.c2_closed)
     )
@@ -1871,9 +1907,19 @@ async def manage_symbol_on_price(
     changed = False
     activated: list[Signal] = []
     finished: list[Signal] = []  # TP/SL/BE kapanan sinyaller (sonuc reply'i icin)
+    mgmt_ltf = STRATEGY_CFG.get(timeframe, STRATEGY_CFG[STRATEGY_4H])["ltf"]
 
     for sig in signals:
         try:
+            # reconcile bekleyen sinyali cisd_time'dan itibaren REST mumlariyla
+            # yeniden oynatir. Yas kontrolu yokken kayit olusmadan KAPANMIS mumlar
+            # sinyali doldurup trail/TP ile kapatiyordu (BTC 1D #26, SUI 4H #8).
+            # Gecmis retest'in tek gecerli yolu olusturma anindaki pencereli
+            # backfill'dir; burada yalnizca kayittan sonraki mumlar sayilir.
+            if sig.status in (PENDING_STATUS, WAITING_STATUS) and _bar_closed_before(
+                bar_ts, sig.created_at, mgmt_ltf,
+            ):
+                continue
             if sig.status == PENDING_STATUS:
                 if (
                     REQUIRE_CRT_MID_INVALIDATION
@@ -2032,12 +2078,19 @@ async def manage_symbol_on_price(
                 if ev == "fill" and not bar_closed:
                     continue
                 mgmt_cfg = STRATEGY_CFG.get(timeframe, STRATEGY_CFG[STRATEGY_4H])
-                if (
-                    ev == "fill"
-                    and mgmt_cfg.get("require_c2_closed")
-                    and not sig.c2_closed
-                ):
-                    continue
+                if ev == "fill" and mgmt_cfg.get("require_c2_closed"):
+                    if not sig.c2_closed:
+                        continue
+                    # Sinyalin SIMDIKI c2_closed bayragi yetmez: pending -> waiting
+                    # terfisinden sonra reconcile, C2 kapanmadan ONCEKI retest
+                    # mumunu yeniden oynatip fill yapabiliyordu (BTC 1D #26:
+                    # 11:00 retest, C2 00:00'da kapandi). Mum C2 kapanisindan once
+                    # aciliyorsa emir o an canli degildi.
+                    c2_open = _as_utc(sig.purge_time)
+                    if c2_open is not None and bar_ts is not None and bar_ts < (
+                        c2_open + timedelta(hours=float(mgmt_cfg["c2_hours"]))
+                    ):
+                        continue
                 if ev == "fill":
                     sig.status = "active"
                     sig.entry_filled_time = now
