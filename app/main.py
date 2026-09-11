@@ -601,6 +601,165 @@ async def signals_page(
     )
 
 
+# ──────────────────── Open Signals ────────────────────
+# Uc stratejinin aktif + bekleyen sinyalleri tek panoda. Signals sayfalari
+# gecmisi (TF bazli, sayfali) gosterir; burasi "su an ne acik" sorusu icin.
+
+_OPEN_STATUSES = ("active", "waiting_entry", "pending_cisd")
+_OPEN_TF_LABELS = {"4h": "4H-15M", "1d": "1D-1H", "1h": "1H-5M"}
+_OPEN_LTF = {"4h": "15m", "1d": "1h", "1h": "5m"}
+
+
+def _last_ltf_price(signal) -> float | None:
+    """Stratejinin LTF'indeki son fiyat (forming mum dahil). WebSocket store'undan; REST yok."""
+    from app.exchange import from_display_symbol
+
+    try:
+        bingx_symbol, _ = from_display_symbol(signal.symbol)
+    except Exception:
+        return None
+    store = getattr(market_data, "store", None)
+    if store is None:
+        return None
+    tf = signal.timeframe or "4h"
+    for ltf in dict.fromkeys((_OPEN_LTF.get(tf, "15m"), "15m", "1h", "5m")):
+        try:
+            df = store.get_df(bingx_symbol, ltf)
+        except Exception:
+            continue
+        if df is not None and not df.empty:
+            return float(df.iloc[-1]["close"])
+    return None
+
+
+def _fmt_age(ts) -> str:
+    if ts is None:
+        return "-"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    mins = max(0, int((datetime.now(timezone.utc) - ts).total_seconds() // 60))
+    if mins < 60:
+        return f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours}h {mins:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
+    tab = tab if tab in ("all", "active", "waiting") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1h") else "all"
+    result = await db.execute(select(Signal).where(Signal.status.in_(_OPEN_STATUSES)))
+    open_signals = result.scalars().all()
+
+    def _tf_of(s) -> str:
+        return s.timeframe or "4h"
+
+    def _tab_ok(s) -> bool:
+        return tab == "all" or (s.status == "active") == (tab == "active")
+
+    in_tf = [s for s in open_signals if tf == "all" or _tf_of(s) == tf]
+    tf_counts = Counter(_tf_of(s) for s in open_signals if _tab_ok(s))
+    tf_counts["all"] = sum(1 for s in open_signals if _tab_ok(s))
+    counts = {
+        "all": len(in_tf),
+        "active": sum(1 for s in in_tf if s.status == "active"),
+        "waiting_entry": sum(1 for s in in_tf if s.status == "waiting_entry"),
+        "pending_cisd": sum(1 for s in in_tf if s.status == "pending_cisd"),
+        "tf": tf_counts,
+    }
+    counts["waiting"] = counts["waiting_entry"] + counts["pending_cisd"]
+
+    rows = []
+    for s in in_tf:
+        if not _tab_ok(s):
+            continue
+        entry = float(s.entry_price) if s.entry_price is not None else None
+        sl0 = s.initial_stop_loss if s.initial_stop_loss is not None else s.stop_loss
+        risk = abs(entry - float(sl0)) if entry is not None and sl0 is not None else 0.0
+        price = _last_ltf_price(s)
+        live_r = to_entry_r = None
+        if price is not None and entry is not None and risk > 0:
+            move = (price - entry) if s.direction == "LONG" else (entry - price)
+            if s.status == "active":
+                rest_r = move / risk
+                # Kismi kar alinmissa motorla ayni agirlik: kesir x kismi R + kalan x anlik R.
+                size = float(s.partial_size or 0.0)
+                live_r = size * float(s.partial_rr or 0.0) + (1.0 - size) * rest_r if size > 0 else rest_r
+            else:
+                to_entry_r = abs(move) / risk
+        banked_r = (
+            round(float(s.partial_size) * float(s.partial_rr), 2)
+            if s.partial_size and s.partial_rr is not None else None
+        )
+        sl_be = (
+            s.status == "active" and entry is not None and s.stop_loss is not None
+            and abs(float(s.stop_loss) - entry) <= abs(entry) * 1e-9
+        )
+        since = s.entry_filled_time if (s.status == "active" and s.entry_filled_time) else s.created_at
+        rows.append({
+            "sig": s,
+            "tf": _tf_of(s),
+            "tf_label": _OPEN_TF_LABELS.get(_tf_of(s), _tf_of(s).upper()),
+            "price": price,
+            "live_r": live_r,
+            "to_entry_r": to_entry_r,
+            "banked_r": banked_r,
+            "sl_be": sl_be,
+            "since": since,
+            "age": _fmt_age(since),
+        })
+
+    # Once aktifler, sonra waiting entry, en son waiting MSS; her grupta en yeni ustte.
+    rank = {"active": 0, "waiting_entry": 1, "pending_cisd": 2}
+    rows.sort(key=lambda r: r["since"] or datetime.min, reverse=True)
+    rows.sort(key=lambda r: rank.get(r["sig"].status, 9))
+
+    live = [r["live_r"] for r in rows if r["sig"].status == "active" and r["live_r"] is not None]
+    return {
+        "tab": tab,
+        "tf": tf,
+        "counts": counts,
+        "rows": rows,
+        "open_r": round(sum(live), 2) if live else None,
+        "banked_r": round(sum(r["banked_r"] for r in rows if r["banked_r"] is not None), 2),
+    }
+
+
+@app.get("/open-signals", response_class=HTMLResponse)
+async def open_signals_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tab: str = Query(default="all"),
+    tf: str = Query(default="all"),
+):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    ctx = await _open_signals_context(db, tab, tf)
+    return templates.TemplateResponse(request=request, name="open_signals.html", context={
+        "user": user,
+        "active_page": "open_signals",
+        **ctx,
+    })
+
+
+@app.get("/open-signals/table", response_class=HTMLResponse)
+async def open_signals_table(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tab: str = Query(default="all"),
+    tf: str = Query(default="all"),
+):
+    """Sayfanin 30 sn'lik yenilemesi: yalnizca pano parcasi (HTML)."""
+    user = get_current_user(request)
+    if not user:
+        return HTMLResponse(status_code=401, content="")
+    ctx = await _open_signals_context(db, tab, tf)
+    return templates.TemplateResponse(request=request, name="open_signals_table.html", context=ctx)
+
+
 # ──────────────────── Analytics Page ────────────────────
 
 @app.get("/analytics", response_class=HTMLResponse)

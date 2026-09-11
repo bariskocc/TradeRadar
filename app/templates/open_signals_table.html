@@ -1,0 +1,181 @@
+{# Open Signals panosu. Sayfa ilk yuklemede include eder; /open-signals/table 30 sn'de bir ayni parcayi yeniden verir. #}
+<!-- Summary -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+    <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Active</p>
+        <p class="text-lg font-bold text-accent-blue">{{ counts.active }}</p>
+        <p class="text-[10px] text-gray-500 mt-1">filled, in trade</p>
+    </div>
+    <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Waiting</p>
+        <p class="text-lg font-bold text-amber-400">{{ counts.waiting }}</p>
+        <p class="text-[10px] text-gray-500 mt-1">entry {{ counts.waiting_entry }} · MSS {{ counts.pending_cisd }}</p>
+    </div>
+    <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1" title="Aktif islemlerin anlik R toplami (kismi kar dahil)">Open R</p>
+        {% if open_r is none %}
+        <p class="text-lg font-bold text-gray-500">-</p>
+        {% else %}
+        <p class="text-lg font-bold {% if open_r > 0 %}text-green-400{% elif open_r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ '%+.2f'|format(open_r) }}R</p>
+        {% endif %}
+        <p class="text-[10px] text-gray-500 mt-1">live, on {{ counts.active }} active</p>
+    </div>
+    <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1" title="Kismi kar ile realize edilmis R">Banked</p>
+        <p class="text-lg font-bold {% if banked_r > 0 %}text-green-400{% else %}text-gray-500{% endif %}">{{ '%+.2f'|format(banked_r) }}R</p>
+        <p class="text-[10px] text-gray-500 mt-1">partial profit taken</p>
+    </div>
+</div>
+
+<!-- Tabs + timeframe -->
+<div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+    <div class="flex items-center gap-1">
+        <a href="/open-signals?tab=all&tf={{ tf }}" data-tab="all"
+            class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tab == 'all' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            All <span class="ml-1 text-xs opacity-70">{{ counts.all }}</span>
+        </a>
+        <a href="/open-signals?tab=active&tf={{ tf }}" data-tab="active"
+            class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tab == 'active' %}bg-green-500/20 text-green-400{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            Active <span class="ml-1 text-xs opacity-70">{{ counts.active }}</span>
+        </a>
+        <a href="/open-signals?tab=waiting&tf={{ tf }}" data-tab="waiting"
+            class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tab == 'waiting' %}bg-amber-500/20 text-amber-400{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            Waiting <span class="ml-1 text-xs opacity-70">{{ counts.waiting }}</span>
+        </a>
+    </div>
+    <div class="flex items-center gap-1">
+        {% for key, label in [('all', 'All TF'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1h', '1H-5M')] %}
+        <a href="/open-signals?tab={{ tab }}&tf={{ key }}" data-tf="{{ key }}"
+            class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == key %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            {{ label }} <span class="ml-0.5 opacity-70">{{ counts.tf.get(key, 0) }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Table -->
+<div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto">
+    <table class="w-full min-w-[1100px]">
+        <thead>
+            <tr class="border-b border-dark-600">
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TF</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SYMBOL</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">MARKET</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DIRECTION</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">STATUS</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SCORE</th>
+                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Giris hangi modelden geldi: IFVG / CISD / MSS">MODEL</th>
+                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ENTRY</th>
+                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Guncel stop; girise cekildiyse BE">SL</th>
+                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TP</th>
+                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PLAN R</th>
+                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Son LTF kapanisi (WebSocket)">PRICE</th>
+                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Aktif: anlik R (kismi kar dahil). Bekleyen: fiyatin entry'ye uzakligi (R)">LIVE R</th>
+                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Kismi kar ile realize edilen R">PARTIAL</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Aktif: dolum zamani. Bekleyen: sinyal gelis zamani (TSI)">SINCE</th>
+                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">AGE</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-dark-700">
+            {% for r in rows %}
+            {% set s = r.sig %}
+            <tr class="hover:bg-dark-700/50 transition-colors">
+                <td class="px-2 py-2 whitespace-nowrap">
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
+                        {% if r.tf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.tf == '1h' %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">
+                        {{ r.tf_label }}
+                    </span>
+                </td>
+                <td class="px-2 py-2 whitespace-nowrap">
+                    <div class="text-sm font-medium text-white">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</div>
+                </td>
+                <td class="px-2 py-2 whitespace-nowrap">
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-dark-700 text-gray-300">{{ (s.market_type or '')|upper }}</span>
+                </td>
+                <td class="px-2 py-2 whitespace-nowrap">
+                    <span class="inline-flex px-2 py-0.5 rounded text-xs font-bold
+                        {% if s.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">
+                        {{ s.direction }}
+                    </span>
+                </td>
+                <td class="px-2 py-2 whitespace-nowrap">
+                    {% if s.status == 'active' %}
+                    <span class="inline-flex items-center gap-1 text-xs font-medium text-accent-blue">
+                        <span class="w-1.5 h-1.5 rounded-full bg-accent-blue animate-pulse"></span> Active
+                    </span>
+                    {% elif s.status == 'waiting_entry' %}
+                    <span class="inline-flex items-center gap-1 text-xs font-medium text-amber-400">
+                        <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span> Waiting entry
+                    </span>
+                    {% else %}
+                    <span class="inline-flex items-center gap-1 text-xs font-medium text-sky-400">
+                        <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span> Waiting MSS
+                    </span>
+                    {% endif %}
+                </td>
+                <td class="px-2 py-2 whitespace-nowrap">
+                    {% if s.bias_score is not none %}
+                    {% set score_n = s.bias_score|int %}
+                    <span class="text-xs font-bold {% if score_n >= 11 %}text-accent-purple{% elif score_n >= 7 %}text-green-400{% else %}text-orange-400{% endif %}">{{ score_n }}/10</span>
+                    {% if score_n >= 11 %}<span class="ml-1 inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-accent-purple/15 text-accent-purple">Premium</span>{% endif %}
+                    {% else %}
+                    <span class="text-gray-600 text-xs">-</span>
+                    {% endif %}
+                </td>
+                <td class="px-2 py-2 text-center whitespace-nowrap">
+                    {% set em = s.entry_model or 'cisd' %}
+                    {% if em == 'ifvg' %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple">IFVG</span>
+                    {% elif em == 'mss' %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400">MSS</span>
+                    {% else %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-blue/15 text-accent-blue">CISD</span>
+                    {% endif %}
+                </td>
+                <td class="px-2 py-2 text-right text-xs font-mono text-white whitespace-nowrap">{{ s.entry_price|fmt_price }}</td>
+                <td class="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
+                    <span class="text-red-400">{{ s.stop_loss|fmt_price }}</span>
+                    {% if r.sl_be %}<span class="ml-1 inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold bg-yellow-400/15 text-yellow-400" title="Stop girise cekildi">BE</span>{% endif %}
+                </td>
+                <td class="px-2 py-2 text-right text-xs font-mono text-green-400 whitespace-nowrap">{{ s.take_profit|fmt_price }}</td>
+                <td class="px-2 py-2 text-center whitespace-nowrap">
+                    {% set plan_rr = signal_planned_rr(s) %}
+                    {% if plan_rr is none %}<span class="text-gray-600 text-xs">-</span>
+                    {% else %}<span class="text-xs font-bold text-accent-blue">1:{{ plan_rr }}</span>{% endif %}
+                </td>
+                <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
+                    {% if r.price is none %}<span class="text-gray-600">-</span>{% else %}{{ r.price|fmt_price }}{% endif %}
+                </td>
+                <td class="px-2 py-2 text-center whitespace-nowrap">
+                    {% if s.status == 'active' %}
+                        {% if r.live_r is none %}
+                        <span class="text-gray-600 text-xs">-</span>
+                        {% else %}
+                        <span class="text-xs font-bold {% if r.live_r > 0 %}text-green-400{% elif r.live_r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ '%+.2f'|format(r.live_r) }}R</span>
+                        {% endif %}
+                    {% else %}
+                        {% if r.to_entry_r is none %}
+                        <span class="text-gray-600 text-xs">-</span>
+                        {% else %}
+                        <span class="text-xs text-gray-400" title="Fiyatin entry'ye uzakligi">{{ '%.2f'|format(r.to_entry_r) }}R to entry</span>
+                        {% endif %}
+                    {% endif %}
+                </td>
+                <td class="px-2 py-2 text-center whitespace-nowrap">
+                    {% if r.banked_r is not none %}
+                    <span class="text-xs font-bold text-green-400" title="%{{ (s.partial_size * 100)|int }} @ {{ s.partial_price|fmt_price }}">{{ '%+.2f'|format(r.banked_r) }}R</span>
+                    {% else %}
+                    <span class="text-gray-600 text-xs">-</span>
+                    {% endif %}
+                </td>
+                <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.since|fmt_date_tsi }}</td>
+                <td class="px-2 py-2 text-right text-xs text-gray-400 whitespace-nowrap">{{ r.age }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="16" class="px-2 py-10 text-center text-sm text-gray-600">No open signals</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
