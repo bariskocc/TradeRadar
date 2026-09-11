@@ -114,18 +114,42 @@ class CISDConfirmation:
         return self.cisd_time is not None
 
 
-def _drop_forming_daily(df_daily: pd.DataFrame) -> pd.DataFrame:
-    """Kapanmamis (bugunku) gunluk mumu dus; bos/yetersiz ise oldugu gibi don."""
+# NY 17:00 hizali seans kovalari (FX/metal/endeks/petrol) UTC'de onceki gunun
+# 21:00/22:00'inda baslar. Gun/hafta/ay kovanin ISLEM GUNUNE gore belirlenmeli:
+# 12 saat ileri kaydirmak bu kovalari islem gunlerine tasir, UTC gece yarisi
+# mumlarini (kripto) ise ayni gunde birakir.
+_SESSION_DAY_SHIFT = pd.Timedelta(hours=12)
+
+
+def _trading_day_shift(index) -> pd.Timedelta:
+    """Gunluk seri NY-hizali seans kovasi mi (UTC gece yarisi disinda baslayan bar)?"""
+    idx = pd.DatetimeIndex(index)
+    if len(idx) and bool(((idx.hour != 0) | (idx.minute != 0)).any()):
+        return _SESSION_DAY_SHIFT
+    return pd.Timedelta(0)
+
+
+def _drop_forming_daily(df_daily: pd.DataFrame, now: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Kapanmamis (olusan) gunluk mumu dus; bos/yetersiz ise oldugu gibi don.
+
+    Karar zamanla verilir: son barin 24 saati `now` aninda bitmediyse olusan
+    mumdur. Eskiden takvim tarihi karsilastiriliyordu; NY kovasi UTC'de onceki
+    gun basladigi icin seans sembollerinde olusan mum gunun ~21 saati kapanmis
+    sayiliyor, 1D bias yarim mumla hesaplaniyordu. UTC gece yarisi mumlarinda
+    iki kural ayni sonucu verir.
+    """
     if df_daily is None or df_daily.empty:
         return df_daily
     closed = df_daily.sort_index()
-    now_utc = pd.Timestamp.now(tz="UTC")
+    now_utc = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.tz_localize("UTC")
     last_ts = pd.Timestamp(closed.index[-1])
     if last_ts.tzinfo is None:
         last_ts = last_ts.tz_localize("UTC")
     else:
         last_ts = last_ts.tz_convert("UTC")
-    if last_ts.date() >= now_utc.date():
+    if last_ts + pd.Timedelta(days=1) > now_utc:
         closed = closed.iloc[:-1]
     return closed
 
@@ -284,7 +308,11 @@ def htf_bias_with_age(
 
 
 def daily_to_weekly_ohlcv(df_1d: pd.DataFrame) -> pd.DataFrame:
-    """1D OHLCV'yi ISO hafta (Pazartesi baslangic) bazinda haftalik mumlara cevir."""
+    """1D OHLCV'yi ISO hafta (Pazartesi baslangic) bazinda haftalik mumlara cevir.
+
+    Seans kovalari islem gunune kaydirilir (`_trading_day_shift`); aksi halde NY
+    Pazartesi kovasi (Pazar 21:00 UTC) bir onceki haftaya dusuyordu.
+    """
     if df_1d is None or df_1d.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
     d = df_1d.sort_index().copy()
@@ -292,6 +320,7 @@ def daily_to_weekly_ohlcv(df_1d: pd.DataFrame) -> pd.DataFrame:
         d.index = d.index.tz_localize("UTC")
     else:
         d.index = d.index.tz_convert("UTC")
+    d.index = d.index + _trading_day_shift(d.index)
     agg: dict[str, str] = {
         "open": "first",
         "high": "max",
@@ -304,7 +333,7 @@ def daily_to_weekly_ohlcv(df_1d: pd.DataFrame) -> pd.DataFrame:
     return weekly
 
 
-def compute_weekly_bias(df_1d: pd.DataFrame) -> str:
+def compute_weekly_bias(df_1d: pd.DataFrame, now: pd.Timestamp | None = None) -> str:
     """Haftalik bias — ICT/purge; kalite skorunda uyumda +1 (hard filter degil).
 
     1D -> haftalik OHLCV; forming hafta dusulur; son iki kapali haftaya
@@ -314,8 +343,11 @@ def compute_weekly_bias(df_1d: pd.DataFrame) -> str:
     if weekly.empty or len(weekly) < 2:
         return "NEUTRAL"
 
-    now = pd.Timestamp.now(tz="UTC")
-    cur_iso = now.isocalendar()
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    # Seans serisinde haftalar islem gunune kaydirildi; "su anki hafta" da oyle.
+    cur_iso = (now + _trading_day_shift(df_1d.index)).isocalendar()
     cur_key = (int(cur_iso.year), int(cur_iso.week))
 
     def _week_key(ts) -> tuple[int, int]:
@@ -809,10 +841,11 @@ def _previous_week_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float
     if df_1d is None or df_1d.empty or len(df_1d) < 7:
         return None, None
     d = df_1d.sort_index()
+    shift = _trading_day_shift(d.index)  # seans kovalari islem haftasina
     weeks: dict[tuple, tuple[float, float]] = {}
     order: list[tuple] = []
     for ts, row in d.iterrows():
-        iso = pd.Timestamp(ts).isocalendar()
+        iso = (pd.Timestamp(ts) + shift).isocalendar()
         key = (int(iso[0]), int(iso[1]))  # (iso_year, iso_week)
         hi = float(row["high"]); lo = float(row["low"])
         if key not in weeks:
@@ -821,7 +854,7 @@ def _previous_week_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float
         else:
             ph, pl = weeks[key]
             weeks[key] = (max(ph, hi), min(pl, lo))
-    as_iso = _as_of_ts(d).isocalendar()
+    as_iso = (_as_of_ts(d) + shift).isocalendar()
     cur_key = (int(as_iso[0]), int(as_iso[1]))
     completed = [k for k in order if k != cur_key]
     if not completed:
@@ -835,12 +868,14 @@ def _previous_month_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[floa
     if df_1d is None or df_1d.empty or len(df_1d) < 20:
         return None, None
     d = df_1d.sort_index()
+    shift = _trading_day_shift(d.index)  # seans kovalari islem gunune
     months: dict[tuple[int, int], tuple[float, float]] = {}
     order: list[tuple[int, int]] = []
     for ts, row in d.iterrows():
         t = pd.Timestamp(ts)
         if t.tzinfo is not None:
             t = t.tz_convert("UTC")
+        t = t + shift
         key = (int(t.year), int(t.month))
         hi = float(row["high"]); lo = float(row["low"])
         if key not in months:
@@ -849,7 +884,7 @@ def _previous_month_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[floa
         else:
             ph, pl = months[key]
             months[key] = (max(ph, hi), min(pl, lo))
-    as_of = _as_of_ts(d)
+    as_of = _as_of_ts(d) + shift
     cur_key = (int(as_of.year), int(as_of.month))
     completed = [k for k in order if k != cur_key]
     if not completed:
