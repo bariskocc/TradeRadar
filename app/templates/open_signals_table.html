@@ -63,6 +63,7 @@
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">MARKET</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DIRECTION</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">STATUS</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Purge (C2) mumu kapandi mi; aciksa kapanis saati (TSI)">C2</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SCORE</th>
                 <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Giris hangi modelden geldi: IFVG / CISD / MSS">MODEL</th>
                 <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ENTRY</th>
@@ -111,6 +112,15 @@
                     <span class="inline-flex items-center gap-1 text-xs font-medium text-sky-400">
                         <span class="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span> Waiting MSS
                     </span>
+                    {% endif %}
+                </td>
+                <td class="px-2 py-2 whitespace-nowrap">
+                    {% if r.c2_close_at is none %}
+                    <span class="text-gray-600 text-xs">-</span>
+                    {% elif r.c2_open %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-400" title="C2 henuz kapanmadi; kapanis {{ r.c2_close_at|fmt_date_tsi }} TSI">Open · {{ r.c2_close_at|fmt_date_tsi }}</span>
+                    {% else %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/15 text-green-400" title="C2 kapandi ({{ r.c2_close_at|fmt_date_tsi }} TSI)">Closed</span>
                     {% endif %}
                 </td>
                 <td class="px-2 py-2 whitespace-nowrap">
@@ -173,7 +183,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="16" class="px-2 py-10 text-center text-sm text-gray-600">No open signals</td>
+                <td colspan="17" class="px-2 py-10 text-center text-sm text-gray-600">No open signals</td>
             </tr>
             {% endfor %}
         </tbody>

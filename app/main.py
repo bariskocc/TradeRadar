@@ -608,6 +608,7 @@ async def signals_page(
 _OPEN_STATUSES = ("active", "waiting_entry", "pending_cisd")
 _OPEN_TF_LABELS = {"4h": "4H-15M", "1d": "1D-1H", "1h": "1H-5M"}
 _OPEN_LTF = {"4h": "15m", "1d": "1h", "1h": "5m"}
+_OPEN_C2_HOURS = {"4h": 4, "1d": 24, "1h": 1}
 
 
 def _last_ltf_price(signal) -> float | None:
@@ -698,6 +699,12 @@ async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
             and abs(float(s.stop_loss) - entry) <= abs(entry) * 1e-9
         )
         since = s.entry_filled_time if (s.status == "active" and s.entry_filled_time) else s.created_at
+        # C2 durumu anlik: kayittaki c2_closed olusturma anindan kalir, aktif islemde bayatlar.
+        purge = s.purge_time
+        if purge is not None and purge.tzinfo is not None:
+            purge = purge.astimezone(timezone.utc).replace(tzinfo=None)
+        c2_close_at = purge + timedelta(hours=_OPEN_C2_HOURS.get(_tf_of(s), 4)) if purge is not None else None
+        c2_open = c2_close_at is not None and c2_close_at > datetime.now(timezone.utc).replace(tzinfo=None)
         rows.append({
             "sig": s,
             "tf": _tf_of(s),
@@ -707,6 +714,8 @@ async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
             "to_entry_r": to_entry_r,
             "banked_r": banked_r,
             "sl_be": sl_be,
+            "c2_close_at": c2_close_at,
+            "c2_open": c2_open,
             "since": since,
             "age": _fmt_age(since),
         })
