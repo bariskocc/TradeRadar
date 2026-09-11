@@ -209,6 +209,14 @@ STRATEGY_CFG = {
         "be_arm_tp_fraction": 0.50,
         "partial_close_fraction": 0.50,
         "trail_arm_tp_fraction": None,
+        # 1D'de C2 kapanisi beklenmez (11.09, kullanici karari): C2 24 saat surer;
+        # kapanisini beklemek ayni gun TP'ye gidebilen islemi kacirtiyordu (XAUUSD
+        # 11.09: CISD 05:00 UTC, fiyat entry'ye 11:00'de geldi, C2 21:00'de
+        # kapanacakti). 1H-5M ile ayni takas: CISD onayi yeterli; IFVG girisi C2
+        # kapanmadan hala kapali (ifvg_requires_c2_closed), skor-7 kapisindaki C2
+        # sarti duser. Risk: SL = purge ucu ve C2 henuz bitmedi; dolmus islemde C2
+        # icinde yeni dip/tepe olursa SL yenir (dolmamissa setup yeniden seviyelenir).
+        "require_c2_closed": False,
     },
     STRATEGY_1H: {
         "htf": "1h",
