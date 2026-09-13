@@ -769,6 +769,71 @@ async def open_signals_table(
     return templates.TemplateResponse(request=request, name="open_signals_table.html", context=ctx)
 
 
+# ──────────────────── Setup Journal ────────────────────
+# Motorun gordugu her setup (strateji+sembol+yon+C2): nereye kadar gitti, neden durdu,
+# sonra fiyat ne yapti. Yazan: app/setup_journal.py.
+
+_JOURNAL_MAX_ROWS = 400
+
+
+@app.get("/setup-journal", response_class=HTMLResponse)
+async def setup_journal_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tf: str = Query(default="all"),
+    stage: str = Query(default="all"),
+    symbol: str = Query(default=""),
+    days: int = Query(default=7),
+):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from app import setup_journal as journal
+    from app.models import SetupJournal
+
+    tf = tf if tf in ("all", "4h", "1d", "1h") else "all"
+    stage = stage if stage in journal.STAGE_LABELS else "all"
+    days = days if days in (1, 3, 7, 30, 90) else 7
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    query = select(SetupJournal).where(SetupJournal.last_seen >= since)
+    if tf != "all":
+        query = query.where(SetupJournal.strategy == tf)
+    if symbol:
+        query = query.where(SetupJournal.symbol.ilike(f"%{symbol}%"))
+    rows = (await db.execute(query.order_by(desc(SetupJournal.last_seen)))).scalars().all()
+
+    # Ozet asama filtresinden ONCE: hangi kapi kac kazanci engelledi / kac kaybi onledi.
+    summary = []
+    for code, label in journal.STAGES:
+        sub = [r for r in rows if r.best_stage == code]
+        if not sub:
+            continue
+        outcomes = Counter(r.outcome or "-" for r in sub)
+        r_if = sum(
+            (r.rr or 0.0) if r.outcome == "win" else (-1.0 if r.outcome == "loss" else 0.0)
+            for r in sub
+        )
+        summary.append({"code": code, "label": label, "n": len(sub), "oc": outcomes, "r_if": round(r_if, 2)})
+
+    if stage != "all":
+        rows = [r for r in rows if r.best_stage == stage]
+    truncated = len(rows) > _JOURNAL_MAX_ROWS
+    return templates.TemplateResponse(request=request, name="setup_journal.html", context={
+        "user": user,
+        "active_page": "setup_journal",
+        "rows": rows[:_JOURNAL_MAX_ROWS],
+        "truncated": truncated,
+        "summary": summary,
+        "tf": tf,
+        "stage": stage,
+        "symbol": symbol,
+        "days": days,
+        "stages": journal.STAGES,
+        "stage_labels": journal.STAGE_LABELS,
+        "outcome_labels": journal.OUTCOME_LABELS,
+    })
+
+
 # ──────────────────── Analytics Page ────────────────────
 
 @app.get("/analytics", response_class=HTMLResponse)

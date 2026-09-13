@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, UniqueConstraint
 from datetime import datetime, timezone
 
 from app.database import Base
@@ -91,6 +91,53 @@ class Signal(Base):
     market_type = Column(String, default="crypto")
     timeframe = Column(String, default="4h")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SetupJournal(Base):
+    """Setup basina tek satir: motor kapilarindaki yolu + elendikten sonra fiyatin ne yaptigi.
+
+    Anahtar: strateji + sembol + yon + purge (C2) zamani. Yazan: app/setup_journal.py.
+    entry/sl/tp/rr ilk goruldugu haliyle dondurulur; outcome bunlarla izlenir.
+    """
+    __tablename__ = "setup_journal"
+    __table_args__ = (
+        UniqueConstraint("strategy", "symbol", "direction", "purge_time", name="uq_setup_journal_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    strategy = Column(String, nullable=False, index=True)       # 4h / 1d / 1h
+    symbol = Column(String, nullable=False, index=True)
+    market_type = Column(String, nullable=True)
+    direction = Column(String, nullable=False)
+    purge_time = Column(DateTime, nullable=False)
+    crt_bar_time = Column(DateTime, nullable=True)
+
+    first_seen = Column(DateTime, nullable=True, index=True)
+    last_seen = Column(DateTime, nullable=True, index=True)
+    last_stage = Column(String, nullable=True)                  # son degerlendirmedeki asama
+    best_stage = Column(String, nullable=True)                  # ulastigi en ileri asama
+    best_stage_at = Column(DateTime, nullable=True)
+    detail = Column(String, nullable=True)                      # "score 6 · RR 1.54 · 1D BEARISH"
+    score = Column(Float, nullable=True)
+    htf_bias = Column(String, nullable=True)
+    weekly_bias = Column(String, nullable=True)
+    c2_closed = Column(Boolean, nullable=True)
+    model = Column(String, nullable=True)
+
+    entry = Column(Float, nullable=True)
+    sl = Column(Float, nullable=True)
+    tp = Column(Float, nullable=True)
+    rr = Column(Float, nullable=True)
+    levels_at = Column(DateTime, nullable=True)                 # seviyelerin ilk goruldugu an
+
+    deleted_reason = Column(String, nullable=True)              # pending/waiting silindiyse neden
+    deleted_at = Column(DateTime, nullable=True)
+
+    # pending/filled (izleniyor) | tp_before_entry | win | loss | no_touch | open | ambiguous | signal
+    outcome = Column(String, nullable=True)
+    outcome_at = Column(DateTime, nullable=True)
+    entry_touched_at = Column(DateTime, nullable=True)
+    tracked_until = Column(DateTime, nullable=True)
 
 
 class ScanLog(Base):

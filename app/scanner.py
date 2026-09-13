@@ -59,6 +59,7 @@ from app.exchange import (
     to_display_symbol,
 )
 from app.models import Signal
+from app import setup_journal as journal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_partial, send_signal_result
@@ -274,6 +275,7 @@ def _set_radar(
     purge_time=None,
     crt_bar_time=None,
     strategy: str = STRATEGY_4H,
+    reason: str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
     key = (strategy, display_symbol)
@@ -322,6 +324,16 @@ def _set_radar(
         "updated_at": now,
     }
     _RADAR_META["last_update"] = now
+    # Setup Journal: radar ayni state kodunu iki farkli kapi icin kullaniyor ("missed" = hedef
+    # tuketilmis / entry oncesi TP; "low_quality" = skor<7 / skor-7 kapisi); ayrim `reason` ile.
+    # purge_time yalniz ACIKCA verildiyse kullanilir (radar'daki onceki setup'a yazilmasin).
+    stage = reason or {"missed": "past_tp", "same_bar_sl": "past_sl"}.get(state, state)
+    journal.note(
+        strategy, display_symbol, market, stage,
+        direction=direction, purge_time=purge_time, crt_bar_time=crt_bar_time,
+        score=score, bias=bias, weekly_bias=weekly_bias, rr=rr, entry=entry, sl=sl, tp=tp,
+        c2_closed=c2_closed, model=model, now=now,
+    )
 
 
 def get_radar_snapshot(strategy: str = STRATEGY_4H) -> dict:
@@ -540,6 +552,7 @@ async def _delete_pending(
     if sig is None:
         return
     log.info("PENDING DELETE: %s %s (%s)", sig.symbol, sig.direction, reason)
+    journal.note_deleted(sig, reason)
     await session.delete(sig)
     await session.commit()
     _OPEN_SYMBOLS.discard((sig.symbol, sig.timeframe or STRATEGY_4H))
@@ -1466,6 +1479,7 @@ async def _detect_and_create_waiting_locked(
             await _delete_pending(session, existing_pending, "past_tp")
         _radar(
             "missed",
+            reason="target_taken",
             direction=setup.direction,
             score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
             smt=setup.smt_pair, pd=setup.pd_array,
@@ -1616,7 +1630,7 @@ async def _detect_and_create_waiting_locked(
     if not _score7_strict_ok(setup, cisd, cfg):
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "score7_gate")
-        _radar("low_quality", direction=setup.direction,
+        _radar("low_quality", reason="score7", direction=setup.direction,
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
                    entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
                    smt=setup.smt_pair, pd=setup.pd_array)
@@ -1660,7 +1674,7 @@ async def _detect_and_create_waiting_locked(
     if _price_hit_tp_after(df_ltf, setup.direction, cisd.take_profit, tp_after):
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "past_tp")
-        _radar("missed", direction=setup.direction,
+        _radar("missed", reason="past_tp", direction=setup.direction,
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
                    entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
                    smt=setup.smt_pair, pd=setup.pd_array)
@@ -1978,8 +1992,10 @@ async def manage_symbol_on_price(
                         sl=sig.stop_loss, tp=sig.take_profit,
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
+                        purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
+                    journal.note_deleted(sig, "invalidated")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2005,8 +2021,10 @@ async def manage_symbol_on_price(
                         sl=sig.stop_loss, tp=sig.take_profit,
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
+                        purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
+                    journal.note_deleted(sig, "past_tp")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2039,8 +2057,10 @@ async def manage_symbol_on_price(
                         sl=sig.stop_loss, tp=sig.take_profit,
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
+                        purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
+                    journal.note_deleted(sig, "past_sl")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2074,8 +2094,10 @@ async def manage_symbol_on_price(
                         sl=sig.stop_loss, tp=sig.take_profit,
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
+                        purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
+                    journal.note_deleted(sig, "invalidated")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2100,8 +2122,10 @@ async def manage_symbol_on_price(
                         sl=sig.stop_loss, tp=sig.take_profit,
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
+                        purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
+                    journal.note_deleted(sig, "past_tp")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2533,6 +2557,7 @@ async def close_session_positions(
                 bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                 entry=sig.entry_price, sl=sig.stop_loss, tp=sig.take_profit,
                 smt=sig.smt_pair, pd=sig.pd_array, c2_closed=sig.c2_closed,
+                purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                 strategy=tf,
             )
             await record_event(
@@ -2540,6 +2565,7 @@ async def close_session_positions(
                 symbol=sig.symbol, direction=sig.direction,
                 market_type=sig.market_type, level="info", session=session,
             )
+            journal.note_deleted(sig, "week_close")
             await session.delete(sig)
             changed = True
             result["cancelled"].append(sig.symbol)
@@ -2592,6 +2618,7 @@ async def close_session_positions(
         log.info("WEEK CLOSE: %s %s %s exit=%s entry=%s R=%+0.2f",
                  sig.symbol, sig.direction, tf, exit_price, entry, rr)
 
+    await journal.flush(session)
     if changed:
         await session.commit()
         if tg_configured():
@@ -2718,6 +2745,10 @@ async def reconcile_open_signals(
 # ──────────────────── WS olay isleyicileri ────────────────────
 
 
+def _journal_bingx(display_symbol: str) -> str:
+    return from_display_symbol(display_symbol)[0]
+
+
 async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> None:
     """BingX WS: bir mum kapandiginda cagrilir.
 
@@ -2744,6 +2775,7 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
             "5m": STRATEGY_1H,
         }.get(timeframe)
         async with async_session() as session:
+            await journal.ensure_loaded(session, store, _journal_bingx)
             for strategy in strategies:
                 await detect_and_create_waiting(
                     session, bingx_symbol, frames, store=store, strategy=strategy,
@@ -2763,6 +2795,13 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                         avg_ltf_range=_avg_ltf_range(df_ltf),
                         bar_closed=True,
                     )
+            # Setup Journal sonuc izleme: kapanan LTF mumu (sinyal olsun olmasin).
+            if ltf_strategy:
+                df_bar = store.get_df(bingx_symbol, timeframe)
+                if df_bar is not None and len(df_bar) >= 2:
+                    jb = df_bar.iloc[-2]
+                    journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]))
+            await journal.flush(session)
     except Exception:
         log.exception("on_candle_closed failed for %s %s", bingx_symbol, timeframe)
 
@@ -2804,6 +2843,7 @@ async def on_price_update(
                 avg_ltf_range=avg_range,
                 bar_closed=False,
             )
+            await journal.flush(session)
     except Exception:
         log.exception("on_price_update failed for %s", bingx_symbol)
 
@@ -2839,6 +2879,7 @@ async def run_scan(
     client = httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0) if store is None else None
     try:
         await refresh_open_symbols(session)
+        await journal.ensure_loaded(session, store, _journal_bingx)
 
         for strategy in strategies:
             cfg = STRATEGY_CFG[strategy]
@@ -2892,6 +2933,7 @@ async def run_scan(
                         log.warning("scan failed for %s %s: %s", strategy, bingx_symbol, e)
                     await asyncio.sleep(0)
 
+        await journal.flush(session)
         log.info(
             "Scan complete - %d waiting, %d activated, %d closed, %d breakeven.",
             len(result["new_setups"]), len(result["activated"]),
