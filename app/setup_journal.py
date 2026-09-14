@@ -33,6 +33,14 @@ log = logging.getLogger(__name__)
 
 # Motor kapilari, geriden ileriye. Kayit ulastigi EN ILERI asamayi tutar.
 STAGES: list[tuple[str, str]] = [
+    # detect_crt_setup'in setup'a CEVIRMEDEN eledigi CRT adaylari (14.09) -- en geri kapilar.
+    # Yalniz kapanmis C2 ve gercekten delinmis C1 ucu; bkz. crt_engine.detect_crt_setup(rejected=).
+    ("sweep_small", "CRT: sweep below threshold"),
+    ("range_atr", "CRT: C1 range outside ATR band"),
+    ("c1_stale", "CRT: C1 extreme taken earlier"),
+    ("c2_breakout", "CRT: C2 closed outside C1"),
+    ("c2_wrong_color", "CRT: C2 wrong color"),
+    ("not_selected", "CRT: another candidate chosen"),
     ("bias_mismatch", "1D bias opposite"),
     ("target_taken", "Target already taken"),
     ("low_quality", "Score < 7"),
@@ -54,6 +62,7 @@ STAGES: list[tuple[str, str]] = [
     ("week_close", "Cancelled at week close"),
 ]
 STAGE_LABELS = dict(STAGES)
+PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "not_selected"))
 _RANK = {code: i for i, (code, _) in enumerate(STAGES)}
 SIGNAL_STAGE = "waiting"
 
@@ -249,6 +258,17 @@ def note(
             _CACHE[key] = rec
             changed = True
         rec["last_seen"] = now
+        if (
+            stage not in PRE_SETUP_STAGES
+            and rec.get("best_stage") in PRE_SETUP_STAGES
+            and rec.get("levels_at") is not None
+        ):
+            # Ayni anahtar (yon + C2) once elenen aday olarak -- belki farkli C1 ile -- kaydedildi;
+            # artik motorun setup'i: izleme onun seviyeleriyle yeniden baslar.
+            for k in ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
+                      "entry_touched_at", "tracked_until", "shadow"):
+                rec[k] = None
+            changed = True
         if market:
             rec["market_type"] = market
         if crt_bar_time is not None:
@@ -308,6 +328,15 @@ def note_deleted(sig, reason: str, now=None) -> None:
         _DIRTY.add(key)
     except Exception:
         log.exception("setup_journal.note_deleted failed for %s", getattr(sig, "symbol", "?"))
+
+
+def has_levels(strategy: str, symbol: str, direction: str, purge_time) -> bool:
+    """Bu anahtarin (bellekte) dondurulmus seviyeleri var mi? Elenen aday icin tekrar hesaplamamak."""
+    try:
+        rec = _CACHE.get(_key(strategy, symbol, direction, purge_time))
+        return bool(rec and rec.get("levels_at") is not None)
+    except Exception:
+        return False
 
 
 def _final(rec: dict, outcome: str, ts) -> None:

@@ -64,6 +64,7 @@ from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_partial, send_signal_result
 from app.telegram import send_potential_cancel, send_signal_potential
+from app.crt_engine import build_rejected_setup
 
 log = logging.getLogger(__name__)
 
@@ -604,6 +605,78 @@ async def _flush_journal_and_potential(session: AsyncSession) -> None:
     """Olay isleyicilerinin sonunda: Setup Journal yazimi + bekleyen iptal reply'lari."""
     await journal.flush(session)
     await _flush_potential_outbox()
+
+
+_REJECTED_RETRY = timedelta(minutes=30)
+_REJECTED_TRIED: dict[tuple, datetime] = {}
+
+
+def _rejected_levels(todo, df_htf, df_1d, df_ltf, display_sym, market, htf_bias, strategy, cfg) -> list[dict]:
+    """Elenen CRT adaylari icin journal notu; seviyesi bilinmeyenlerde skor + CISD/MSS seviyeleri (thread'de)."""
+    out = []
+    for r, known in todo:
+        note = {
+            "stage": r["reason"], "direction": r["direction"],
+            "purge_time": r["purge_time"], "crt_bar_time": r["crt_bar_time"],
+        }
+        if not known:
+            try:
+                cand = r.get("setup") or build_rejected_setup(
+                    df_htf, display_sym, market, htf_bias, r["crt_bar_time"], r["purge_time"],
+                    r["direction"], df_1d=df_1d, timeframe=strategy, df_ltf=df_ltf,
+                )
+                if cand is not None:
+                    note["score"] = cand.bias_score
+                    preview = _preview_trade_levels(cand, df_ltf, cfg["c2_hours"], cfg)
+                    note.update({k: preview[k] for k in ("rr", "entry", "sl", "tp", "model") if k in preview})
+            except Exception:
+                log.exception("rejected CRT levels failed for %s %s", display_sym, r.get("reason"))
+        out.append(note)
+    return out
+
+
+async def _journal_rejected(
+    rejected, setup, df_htf, df_1d, df_ltf, display_sym, market, htf_bias, weekly_bias, strategy, cfg,
+) -> list[dict]:
+    """detect_crt_setup'in setup'a cevirmeden eledigi adaylari (kapanmis C2) Setup Journal'a yaz.
+
+    Motor karari degismez. Seviyeler anahtar basina bir kez hesaplanir (journal'da seviyesi olan
+    aday tekrar hesaplanmaz); agir kisim thread'de, journal yazimi event loop'ta.
+    """
+    best_key = (setup.direction, journal._naive_utc(setup.purge_time)) if setup is not None else None
+    now = datetime.now(timezone.utc)
+    if len(_REJECTED_TRIED) > 5000:
+        for k in [k for k, t in _REJECTED_TRIED.items() if now - t > timedelta(days=1)]:
+            _REJECTED_TRIED.pop(k, None)
+    todo, seen = [], set()
+    for r in rejected:
+        key = (r["direction"], journal._naive_utc(r["purge_time"]))
+        # Ayni yon + C2 motorun setup'iyla (farkli C1) ortak journal anahtari: setup'in kaydini bozma.
+        if key == best_key or key in seen:
+            continue
+        seen.add(key)
+        known = journal.has_levels(strategy, display_sym, r["direction"], r["purge_time"])
+        if not known:
+            # Seviyesi cikmayan aday (cogu c2_breakout: CISD yok) her LTF kapanisinda yeniden
+            # hesaplanmasin: anahtar basina _REJECTED_RETRY'de bir.
+            tried_key = (strategy, display_sym) + key
+            last = _REJECTED_TRIED.get(tried_key)
+            if last is not None and now - last < _REJECTED_RETRY:
+                known = True
+            else:
+                _REJECTED_TRIED[tried_key] = now
+        todo.append((r, known))
+    if not todo:
+        return []
+    notes = await _cpu(_rejected_levels, todo, df_htf, df_1d, df_ltf, display_sym, market, htf_bias, strategy, cfg)
+    for n_ in notes:
+        journal.note(
+            strategy, display_sym, market, n_["stage"],
+            direction=n_["direction"], purge_time=n_["purge_time"], crt_bar_time=n_["crt_bar_time"],
+            score=n_.get("score"), bias=htf_bias, weekly_bias=weekly_bias, rr=n_.get("rr"),
+            entry=n_.get("entry"), sl=n_.get("sl"), tp=n_.get("tp"), c2_closed=True, model=n_.get("model"),
+        )
+    return notes
 
 
 async def _notify_potential_1d(session: AsyncSession, sig: Signal, cfg: dict) -> None:
@@ -1498,15 +1571,29 @@ async def _detect_and_create_waiting_locked(
 
     existing_pending = await _get_unfilled_setup_signal(session, display_sym, strategy)
 
+    rejected: list[dict] = []
     setup = await _cpu(
         detect_crt_setup,
         df_htf, display_sym, market, htf_bias,
-        df_1d=df_1d, timeframe=strategy, df_ltf=df_ltf,
+        df_1d=df_1d, timeframe=strategy, df_ltf=df_ltf, rejected=rejected,
     )
+    rejected_notes = await _journal_rejected(
+        rejected, setup, df_htf, df_1d, df_ltf, display_sym, market, htf_bias, weekly_bias, strategy, cfg,
+    ) if rejected else []
     if setup is None:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "crt_gone")
-        _radar("no_setup", bias=htf_bias, weekly_bias=weekly_bias)
+        if rejected_notes:
+            # Motorun CRT saymadigi en guncel aday: radar "no_setup" yerine elenme nedenini gostersin.
+            r = max(rejected_notes, key=lambda x: _as_utc(x["purge_time"]))
+            _radar(
+                r["stage"], direction=r["direction"], score=r.get("score"),
+                bias=htf_bias, weekly_bias=weekly_bias, rr=r.get("rr"),
+                entry=r.get("entry"), sl=r.get("sl"), tp=r.get("tp"), c2_closed=True,
+                model=r.get("model"), purge_time=r["purge_time"], crt_bar_time=r["crt_bar_time"],
+            )
+        else:
+            _radar("no_setup", bias=htf_bias, weekly_bias=weekly_bias)
         return None
 
     _radar_base = _radar

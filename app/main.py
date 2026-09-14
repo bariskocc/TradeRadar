@@ -17,6 +17,7 @@ from app.log_report import build_report
 from app.logging_config import recent_issues, setup_logging
 from app.database import init_db, get_db
 from app.models import Signal, EventLog, SetupJournal
+from app.setup_journal import PRE_SETUP_STAGES
 from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR
 from app.telegram import is_configured as tg_is_configured
 from app.auth import verify_credentials, create_access_token, get_current_user
@@ -139,6 +140,12 @@ RADAR_STATE_META = {
     "corr_open":      {"label": "Correlated pair open",       "color": "purple", "rank": 8},
     "duplicate":      {"label": "Setup already saved",        "color": "purple", "rank": 9},
     "low_quality":    {"label": "Low quality (score<7)",      "color": "gray",   "rank": 10},
+    # detect_crt_setup'in setup'a cevirmeden eledigi CRT (setup yoksa en guncel adayin nedeni).
+    "c2_wrong_color": {"label": "CRT rejected: C2 wrong color",    "color": "dim", "rank": 11},
+    "c2_breakout":    {"label": "CRT rejected: C2 closed outside", "color": "dim", "rank": 11},
+    "c1_stale":       {"label": "CRT rejected: C1 extreme taken",  "color": "dim", "rank": 11},
+    "range_atr":      {"label": "CRT rejected: C1 range vs ATR",   "color": "dim", "rank": 11},
+    "sweep_small":    {"label": "CRT rejected: sweep too small",   "color": "dim", "rank": 11},
     "no_setup":       {"label": "No setup",                   "color": "dim",    "rank": 11},
     "no_data":        {"label": "Insufficient data",          "color": "dim",    "rank": 12},
 }
@@ -429,7 +436,12 @@ def _period_summary(closed: list[tuple[datetime, Signal]], start: datetime, end:
 async def _period_activity(db: AsyncSession, start: datetime, end: datetime) -> dict:
     """Motor aktivitesi: donemde ilk gorulen setup'lar ve sinyale donusenler (Setup Journal), dolumlar."""
     s0, e0 = start.replace(tzinfo=None), end.replace(tzinfo=None)
-    in_range = (SetupJournal.first_seen >= s0, SetupJournal.first_seen < e0)
+    # Motorun CRT saymadigi adaylar (PRE_SETUP_STAGES) "setup gorundu" sayisina girmez.
+    in_range = (
+        SetupJournal.first_seen >= s0,
+        SetupJournal.first_seen < e0,
+        SetupJournal.best_stage.notin_(tuple(PRE_SETUP_STAGES)),
+    )
     setups = (await db.execute(select(func.count()).select_from(SetupJournal).where(*in_range))).scalar() or 0
     signals = (await db.execute(
         select(func.count()).select_from(SetupJournal)

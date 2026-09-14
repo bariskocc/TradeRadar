@@ -1161,6 +1161,107 @@ def detect_ltf_ifvg(
     return picked
 
 
+def _build_crt_setup(
+    df_4h: pd.DataFrame,
+    live_i: int,
+    purge_j: int,
+    direction: str,
+    symbol: str,
+    market_type: str,
+    htf_bias: str,
+    *,
+    df_1d: Optional[pd.DataFrame] = None,
+    timeframe: str = "4h",
+    df_ltf: Optional[pd.DataFrame] = None,
+) -> CRTSetup:
+    """C1 (live_i) + C2 (purge_j) cifti icin CRTSetup: skor, PD array, hedef tarafi.
+
+    `df_4h` sirali olmali. detect_crt_setup'in gecerli adaylari ve build_rejected_setup
+    (elenen adayin seviyelerini hesaplamak icin) ayni kodu kullanir.
+    """
+    live_crt = df_4h.iloc[live_i]
+    purge_row = df_4h.iloc[purge_j]
+    live_range = float(live_crt["high"] - live_crt["low"])
+    crt_high = float(live_crt["high"])
+    crt_low = float(live_crt["low"])
+
+    # C1'den SONRAKI mumlar (purge/C2 ve forming dahil) — hedef taraf kontrolu icin.
+    after = df_4h.iloc[live_i + 1:]
+    # Hedef taraf tuketilmis olsa da aday kalir (radar); sinyal acilmaz.
+    target_consumed = (
+        (direction == "SHORT" and float(after["low"].min()) < crt_low)
+        or (direction == "LONG" and float(after["high"].max()) > crt_high)
+    )
+
+    pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j)
+    bias, score = _calc_live_setup_bias(
+        df_4h, live_i, direction, htf_bias,
+        pd_labels=pd_labels, purge_idx=purge_j, df_1d=df_1d,
+        df_ltf=df_ltf, timeframe=timeframe,
+    )
+    purge_extreme = float(purge_row["high"]) if direction == "SHORT" else float(purge_row["low"])
+    crt_bull = float(live_crt["close"]) > float(live_crt["open"])
+    crt_bear = float(live_crt["close"]) < float(live_crt["open"])
+    rev_bull = float(purge_row["close"]) > float(purge_row["open"])
+    rev_bear = float(purge_row["close"]) < float(purge_row["open"])
+    same_color = (crt_bull and rev_bull) or (crt_bear and rev_bear)
+    if direction == "LONG":
+        inv_level = crt_low + (live_range * CRT_INVALIDATION_FRAC)
+    else:
+        inv_level = crt_high - (live_range * CRT_INVALIDATION_FRAC)
+    return CRTSetup(
+        symbol=symbol,
+        direction=direction,
+        purge_type="HIGH" if direction == "SHORT" else "LOW",
+        bias=bias,
+        bias_score=score,
+        key_level_high=round(crt_high, 8),
+        key_level_low=round(crt_low, 8),
+        crt_bar_time=live_crt.name.to_pydatetime(),
+        purge_time=purge_row.name.to_pydatetime(),
+        invalidation_level=round(inv_level, 8),
+        purge_extreme=round(purge_extreme, 8),
+        last_4h_high=round(float(purge_row["high"]), 8),
+        last_4h_low=round(float(purge_row["low"]), 8),
+        market_type=market_type,
+        pd_array=",".join(pd_labels) if pd_labels else None,
+        c2_closed=purge_j < (len(df_4h) - 1),
+        color_opposite=not same_color,
+        timeframe=timeframe,
+        target_consumed=target_consumed,
+        c2_reclaim=c2_reclaim_pct(live_crt, purge_row, direction),
+    )
+
+
+def build_rejected_setup(
+    df_4h: pd.DataFrame,
+    symbol: str,
+    market_type: str,
+    htf_bias: str,
+    crt_bar_time,
+    purge_time,
+    direction: str,
+    *,
+    df_1d: Optional[pd.DataFrame] = None,
+    timeframe: str = "4h",
+    df_ltf: Optional[pd.DataFrame] = None,
+) -> Optional[CRTSetup]:
+    """detect_crt_setup(rejected=...) kaydindaki C1/C2 icin setup'i yeniden kur.
+
+    Yalniz Setup Journal'in seviye/skor kaydi icindir; motor karari degildir.
+    """
+    try:
+        df = df_4h.sort_index()
+        live_i = int(df.index.get_loc(pd.Timestamp(crt_bar_time)))
+        purge_j = int(df.index.get_loc(pd.Timestamp(purge_time)))
+    except Exception:
+        return None
+    return _build_crt_setup(
+        df, live_i, purge_j, direction, symbol, market_type, htf_bias,
+        df_1d=df_1d, timeframe=timeframe, df_ltf=df_ltf,
+    )
+
+
 def detect_crt_setup(
     df_4h: pd.DataFrame,
     symbol: str,
@@ -1169,6 +1270,7 @@ def detect_crt_setup(
     df_1d: Optional[pd.DataFrame] = None,
     timeframe: str = "4h",
     df_ltf: Optional[pd.DataFrame] = None,
+    rejected: Optional[list] = None,
 ) -> Optional[CRTSetup]:
     """4H verisinde CRT pattern tespit et; en buyuk gecerli C1'i sec.
 
@@ -1199,6 +1301,11 @@ def detect_crt_setup(
 
     Birden fazla gecerli aday varsa high-low mesafesi (range) EN BUYUK olan secilir
     (esitlikte hacimce buyuk, sonra en guncel).
+    `rejected` (liste verilirse): setup'a cevrilmeden elenen adaylar -- yalniz KAPANMIS C2 ve
+    C1 ucu gercekten delinmisse -- {reason, direction, crt_bar_time, purge_time, setup} olarak
+    eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small /
+    not_selected (gecerliydi, baska aday secildi; `setup` dolu). Motor karari DEGISMEZ; Setup
+    Journal bu adaylarin sonrasini izler (14.09).
     """
     df_4h = df_4h.sort_index()
 
@@ -1214,37 +1321,32 @@ def detect_crt_setup(
     candidates: list[tuple[float, float, int, CRTSetup]] = []
 
     c1_back = CRT_C1_LOOKBACK_1H if (timeframe or "").lower() == "1h" else CRT_C1_LOOKBACK
-    for live_i in range(n - 2, n - c1_back - 1, -1):
-        if live_i < 1 or live_i + 1 >= n:
-            continue
 
-        live_crt = df_4h.iloc[live_i]
-        live_range = float(live_crt["high"] - live_crt["low"])
-        live_atr = atr.iloc[live_i]
-        if live_atr == 0 or live_range <= 0:
-            continue
+    def _reject(reason: str, direction: str, c1_i: int, c2_i: int) -> None:
+        # Yalniz KAPANMIS C2: forming mumun rengi/kapanisi fiyatla degisir (gurultu).
+        if rejected is None or c2_i >= n - 1:
+            return
+        rejected.append({
+            "reason": reason,
+            "direction": direction,
+            "crt_bar_time": df_4h.index[c1_i].to_pydatetime(),
+            "purge_time": df_4h.index[c2_i].to_pydatetime(),
+            "setup": None,
+        })
 
-        live_ratio = live_range / live_atr
-        if live_ratio < MIN_RANGE_ATR_RATIO or live_ratio > MAX_RANGE_ATR_RATIO:
-            continue
+    def _scan_purge(c1_i: int, crt_high: float, crt_low: float):
+        """Purge/C2'yi C1'den sonraki 1-3 mum icinde ara (ilk gecerli purge/breakout durdurur).
 
-        crt_high = float(live_crt["high"])
-        crt_low = float(live_crt["low"])
-        crt_vol = float(live_crt["volume"])
-
-        # C1'den SONRAKI mumlar (purge/C2 ve forming dahil) — hedef taraf kontrolu icin.
-        after = df_4h.iloc[live_i + 1:]
-
-        # Purge/C2'yi C1'den sonraki 1-3 mum icinde ara (ilk gecerli purge/breakout durdurur).
-        direction = None
-        purge_row = None
-        purge_j = None
+        Donus (direction, purge_j, red): gecerli purge'de direction ve purge_j dolu. C1 elendiyse
+        red = (reason, direction, j): c2_breakout / c2_wrong_color / c1_stale / sweep_small.
+        """
         # C1 ekstreminin purge'den ONCE (araya giren bir mumla) HAM olarak delinip
         # delinmedigini izle. Delinmisse o taraftaki likidite zaten alinmis demektir
         # ve C1 bayat/gecersiz sayilir (esik alti kucuk delmeler de dahil).
         pre_low_breach = False
         pre_high_breach = False
-        for j in range(live_i + 1, min(live_i + 1 + CRT_PURGE_SEARCH, n)):
+        raw_breach = None
+        for j in range(c1_i + 1, min(c1_i + 1 + CRT_PURGE_SEARCH, n)):
             c2 = df_4h.iloc[j]
             c2_high = float(c2["high"])
             c2_low = float(c2["low"])
@@ -1257,8 +1359,15 @@ def detect_crt_setup(
                     and c2_state in ("bearish", "doji")
                     and not pre_high_breach
                 ):
-                    direction, purge_row, purge_j = "SHORT", c2, j
-                break                                        # asti / guclu yanlis renk -> C1 gecersiz
+                    return "SHORT", j, None
+                # asti / guclu yanlis renk / bayat -> C1 gecersiz
+                if c2_close > crt_high:
+                    reason = "c2_breakout"
+                elif c2_state not in ("bearish", "doji"):
+                    reason = "c2_wrong_color"
+                else:
+                    reason = "c1_stale"
+                return None, None, (reason, "SHORT", j)
             if c2_low < crt_low * (1 - purge_threshold):    # LOW supuruldu
                 # geri kapatti + (yesil veya doji) + low onceden delinmemis -> LONG
                 c2_state = _candle_state(c2)
@@ -1267,61 +1376,57 @@ def detect_crt_setup(
                     and c2_state in ("bullish", "doji")
                     and not pre_low_breach
                 ):
-                    direction, purge_row, purge_j = "LONG", c2, j
-                break                                        # asti / guclu yanlis renk -> C1 gecersiz
+                    return "LONG", j, None
+                if c2_close < crt_low:
+                    reason = "c2_breakout"
+                elif c2_state not in ("bullish", "doji"):
+                    reason = "c2_wrong_color"
+                else:
+                    reason = "c1_stale"
+                return None, None, (reason, "LONG", j)
             # Bu mum esikli purge yapmadi; ama C1 ekstremini HAM olarak delmisse
             # ilgili taraf bayat sayilir (likidite onceden tuketilmis).
             if c2_low < crt_low:
                 pre_low_breach = True
+                raw_breach = raw_breach or ("LONG", j)
             if c2_high > crt_high:
                 pre_high_breach = True
+                raw_breach = raw_breach or ("SHORT", j)
+        if raw_breach is not None:
+            return None, None, ("sweep_small", raw_breach[0], raw_breach[1])
+        return None, None, None
 
-        if direction is None or purge_row is None or purge_j is None:
+    for live_i in range(n - 2, n - c1_back - 1, -1):
+        if live_i < 1 or live_i + 1 >= n:
             continue
 
-        # Hedef taraf tuketilmis olsa da aday kalir (radar); sinyal acilmaz.
-        target_consumed = (
-            (direction == "SHORT" and float(after["low"].min()) < crt_low)
-            or (direction == "LONG" and float(after["high"].max()) > crt_high)
-        )
+        live_crt = df_4h.iloc[live_i]
+        live_range = float(live_crt["high"] - live_crt["low"])
+        live_atr = atr.iloc[live_i]
+        if live_atr == 0 or live_range <= 0:
+            continue
 
-        pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j)
-        bias, score = _calc_live_setup_bias(
-            df_4h, live_i, direction, htf_bias,
-            pd_labels=pd_labels, purge_idx=purge_j, df_1d=df_1d,
-            df_ltf=df_ltf, timeframe=timeframe,
-        )
-        purge_extreme = float(purge_row["high"]) if direction == "SHORT" else float(purge_row["low"])
-        crt_bull = float(live_crt["close"]) > float(live_crt["open"])
-        crt_bear = float(live_crt["close"]) < float(live_crt["open"])
-        rev_bull = float(purge_row["close"]) > float(purge_row["open"])
-        rev_bear = float(purge_row["close"]) < float(purge_row["open"])
-        same_color = (crt_bull and rev_bull) or (crt_bear and rev_bear)
-        if direction == "LONG":
-            inv_level = crt_low + (live_range * CRT_INVALIDATION_FRAC)
-        else:
-            inv_level = crt_high - (live_range * CRT_INVALIDATION_FRAC)
-        candidates.append((live_range, crt_vol, live_i, CRTSetup(
-            symbol=symbol,
-            direction=direction,
-            purge_type="HIGH" if direction == "SHORT" else "LOW",
-            bias=bias,
-            bias_score=score,
-            key_level_high=round(crt_high, 8),
-            key_level_low=round(crt_low, 8),
-            crt_bar_time=live_crt.name.to_pydatetime(),
-            purge_time=purge_row.name.to_pydatetime(),
-            invalidation_level=round(inv_level, 8),
-            purge_extreme=round(purge_extreme, 8),
-            last_4h_high=round(float(purge_row["high"]), 8),
-            last_4h_low=round(float(purge_row["low"]), 8),
-            market_type=market_type,
-            pd_array=",".join(pd_labels) if pd_labels else None,
-            c2_closed=purge_j < (len(df_4h) - 1),
-            color_opposite=not same_color,
-            timeframe=timeframe,
-            target_consumed=target_consumed,
-            c2_reclaim=c2_reclaim_pct(live_crt, purge_row, direction),
+        crt_high = float(live_crt["high"])
+        crt_low = float(live_crt["low"])
+        crt_vol = float(live_crt["volume"])
+
+        direction, purge_j, red = _scan_purge(live_i, crt_high, crt_low)
+
+        live_ratio = live_range / live_atr
+        if live_ratio < MIN_RANGE_ATR_RATIO or live_ratio > MAX_RANGE_ATR_RATIO:
+            # Aralik ATR bandi disinda: yalniz gecerli bir purge olsaydi kaydet.
+            if direction is not None:
+                _reject("range_atr", direction, live_i, purge_j)
+            continue
+
+        if direction is None or purge_j is None:
+            if red is not None:
+                _reject(red[0], red[1], live_i, red[2])
+            continue
+
+        candidates.append((live_range, crt_vol, live_i, _build_crt_setup(
+            df_4h, live_i, purge_j, direction, symbol, market_type, htf_bias,
+            df_1d=df_1d, timeframe=timeframe, df_ltf=df_ltf,
         )))
 
     if not candidates:
@@ -1332,6 +1437,16 @@ def detect_crt_setup(
         candidates,
         key=lambda c: (0 if c[3].target_consumed else 1, c[0], c[1], c[2]),
     )
+    if rejected is not None:
+        for c in candidates:
+            if c is not best and c[3].c2_closed:
+                rejected.append({
+                    "reason": "not_selected",
+                    "direction": c[3].direction,
+                    "crt_bar_time": c[3].crt_bar_time,
+                    "purge_time": c[3].purge_time,
+                    "setup": c[3],
+                })
     return best[3]
 
 
