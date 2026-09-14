@@ -146,6 +146,9 @@ class SetupJournal(Base):
     outcome_at = Column(DateTime, nullable=True)
     entry_touched_at = Column(DateTime, nullable=True)
     tracked_until = Column(DateTime, nullable=True)
+    # Golge izleme (14.09, dar stop sorusu; 4H/1D/1H): ayni setup farkli SL kesirleriyle izlenir.
+    # JSON: {"1": {...}, "0.75": {...}, "0.5": {...}} -> sl, rr, o (outcome), e (entry), at, until.
+    shadow = Column(String, nullable=True)
 
 
 class ScanLog(Base):
