@@ -4,15 +4,16 @@ Hem `/logs?view=report` sayfasi hem `scripts/logstat.py` bu modulu kullanir;
 toplama mantigi tek yerde durur. Dosyayi yalnizca OKUR — DB'ye/sunucuya
 dokunmaz, sunucu kapaliyken de calisir.
 
-IZLEME.md'deki sorular icin: setup'lar hangi kapida eleniyor,
-BACKFILL hic tetikliyor mu, koruma (BE/trail) islemleri erken mi boguyor.
+Motor sagligi ve yasam dongusu: WS baglantisi, BACKFILL, koruma (BE/trail) etkisi,
+1D bias takibi. Kapi elemeleri burada DEGIL, Setup Journal'da (14.09): SKIPPED satiri
+sayimi ayni setup'i her LTF mumunda tekrar sayiyordu, strateji ve sonrasi da yoktu.
 """
 
 from __future__ import annotations
 
 import re
 import warnings
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,7 +27,6 @@ LINE_RE = re.compile(
     r"^(?P<ts>\d{2}\.\d{2}(?:\.\d{2,4})? \d{2}:\d{2}:\d{2})\s+"
     r"(?P<level>\w+)\s+(?P<logger>[\w.]+)\s*\|\s*(?P<msg>.*)$"
 )
-SKIPPED_RE = re.compile(r"^SKIPPED \((?P<reason>[^)]+)\):\s*(?P<sym>\S+)?")
 NEW_RE = re.compile(
     r"^NEW (?P<kind>WAITING|PENDING|ACTIVE[^:]*):\s*(?P<sym>\S+) "
     r"(?P<dir>LONG|SHORT).*?RR:(?P<rr>[-\d.]+)"
@@ -40,7 +40,6 @@ BACKFILL_RE = re.compile(r"^BACKFILL FILL:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
 BE_RE = re.compile(r"^BE ARM:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
 TRAIL_ARM_RE = re.compile(r"^TRAIL ARM:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
 SMT_RE = re.compile(r"^SMT\+\d+:\s*(?P<sym>\S+) (?P<dir>LONG|SHORT)")
-CRT60_RE = re.compile(r"breach=(?P<breach>\S+ \S+) fill=(?P<fill>\S+?)\)?\.?$")
 # "SKIPPED (BIAS): XAUUSD SHORT filter=B daily=B structure=B ict=B weekly=B"
 BIAS_RE = re.compile(
     r"^SKIPPED \(BIAS\):\s*(?P<sym>\S+) (?P<dir>LONG|SHORT) "
@@ -101,29 +100,9 @@ def build_report(path: str | Path | None = None, hours: float | None = None) -> 
         "sessions": sum(1 for _, _, lg, _ in rows if lg.endswith("logging_config")),
     }
     if not rows:
-        report.update(skipped=[], skipped_total=0, lifecycle={}, closes=[],
+        report.update(lifecycle={}, closes=[],
                       close_stats={}, monitoring={}, bias={}, health={})
         return report
-
-    # ── Setup neden sinyale donusmedi ───────────────────────────────
-    skipped: Counter = Counter()
-    skipped_syms: dict[str, Counter] = defaultdict(Counter)
-    for _, _, _, msg in rows:
-        if m := SKIPPED_RE.match(msg):
-            skipped[m["reason"]] += 1
-            if m["sym"]:
-                skipped_syms[m["reason"]][m["sym"]] += 1
-    sk_total = sum(skipped.values())
-    report["skipped_total"] = sk_total
-    report["skipped"] = [
-        {
-            "reason": reason,
-            "count": n,
-            "pct": round(n / sk_total * 100, 1) if sk_total else 0.0,
-            "top": [s for s, _ in skipped_syms[reason].most_common(4)],
-        }
-        for reason, n in skipped.most_common()
-    ]
 
     # ── Yasam dongusu ───────────────────────────────────────────────
     created: Counter = Counter()
@@ -198,14 +177,6 @@ def build_report(path: str | Path | None = None, hours: float | None = None) -> 
     # ── Izleme metrikleri (IZLEME.md) ────────────────────────────
     by_how = Counter(c["how"] for c in closes)
     trail_exits = [c["rr"] for c in closes if c["how"] == "hit_trail"]
-    crt_rows = [m for _, _, _, m in rows if m.startswith("SKIPPED (CRT 60%)")]
-    fill_first = no_fill = 0
-    for msg in crt_rows:
-        if m := CRT60_RE.search(msg):
-            if m["fill"] == "None":
-                no_fill += 1
-            elif m["fill"] < m["breach"]:
-                fill_first += 1
     report["monitoring"] = {
         "backfills": backfills,
         "protection": {
@@ -215,7 +186,6 @@ def build_report(path: str | Path | None = None, hours: float | None = None) -> 
             "sl": by_how.get("hit_sl", 0),
         },
         "trail_avg_r": round(sum(trail_exits) / len(trail_exits), 2) if trail_exits else None,
-        "crt60": {"total": len(crt_rows), "fill_first": fill_first, "no_fill": no_fill},
     }
 
     # ── 1D bias takibi ──────────────────────────────────────────────

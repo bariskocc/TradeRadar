@@ -13,7 +13,7 @@
             <div class="mb-4">
                 <h1 class="text-xl font-bold text-white">Engine Report</h1>
                 <p class="text-sm text-gray-500 mt-0.5">
-                    Why setups did not become signals — read from the engine log, not the database
+                    Engine health and signal lifecycle — read from the engine log, not the database
                 </p>
             </div>
 
@@ -59,11 +59,11 @@
                         → {{ report.end.strftime('%d.%m %H:%M') if report.end else '-' }} · {{ report.sessions }} başlatma
                     </p>
                 </div>
-                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Elenen setup</p>
-                    <p class="text-xl font-bold text-yellow-400">{{ report.skipped_total }}</p>
-                    <p class="text-[10px] text-gray-500 mt-1">{{ report.skipped|length }} farklı sebep</p>
-                </div>
+                <a href="/setup-journal" class="bg-dark-800 rounded-xl border border-dark-600 p-4 hover:bg-dark-700 transition">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Kapı elemeleri</p>
+                    <p class="text-sm font-medium text-accent-blue">Setup Journal →</p>
+                    <p class="text-[10px] text-gray-500 mt-1">setup başına tek satır + sonrası</p>
+                </a>
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
                     <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">WebSocket</p>
                     <p class="text-sm font-medium text-white">
@@ -74,32 +74,6 @@
                         <span class="{% if report.health.errors %}text-red-400{% endif %}">{{ report.health.errors }} hata</span>
                     </p>
                 </div>
-            </div>
-
-            <!-- Neden sinyale dönüşmedi -->
-            <div class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-4">
-                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-4">
-                    Setup neden sinyale dönüşmedi
-                </p>
-                {% if report.skipped %}
-                <div class="space-y-2.5">
-                    {% for s in report.skipped %}
-                    <div class="flex items-center gap-3">
-                        <span class="w-36 shrink-0 text-xs font-medium text-gray-300">{{ s.reason }}</span>
-                        <span class="w-12 shrink-0 text-xs font-bold text-white text-right">{{ s.count }}</span>
-                        <span class="w-12 shrink-0 text-[10px] text-gray-500 text-right">{{ s.pct }}%</span>
-                        <div class="flex-1 h-2 rounded-full bg-dark-600 overflow-hidden min-w-[60px]">
-                            <div class="h-full rounded-full bg-accent-blue" style="width: {{ s.pct }}%"></div>
-                        </div>
-                        <span class="w-56 shrink-0 text-[10px] text-gray-500 truncate" title="{{ s.top|join(', ') }}">
-                            {{ s.top|join(', ') }}
-                        </span>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <p class="text-sm text-gray-500">Bu pencerede eleme yok.</p>
-                {% endif %}
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -174,14 +148,6 @@
                         {% if mon.trail_avg_r < 1 %}
                         <p class="text-[10px] text-amber-500/70 -mt-1">Düşük — trail çok erken veya çok dar olabilir.</p>
                         {% endif %}
-                        {% endif %}
-                        {% if mon.crt60.total %}
-                        <div class="flex justify-between gap-3">
-                            <dt class="text-gray-400">CRT %60 elemesi</dt>
-                            <dd class="text-white font-medium text-[11px]">
-                                {{ mon.crt60.total }} <span class="text-gray-500">(fill önce={{ mon.crt60.fill_first }} · fill yok={{ mon.crt60.no_fill }})</span>
-                            </dd>
-                        </div>
                         {% endif %}
                     </dl>
                 </div>

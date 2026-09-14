@@ -931,7 +931,7 @@ async def logs_page(
         return RedirectResponse(url="/login", status_code=303)
 
     if view == "report":
-        # Motor logu (dosya) — `SKIPPED (...)` gibi eleme sebepleri DB'de yok.
+        # Motor logu (dosya): yasam dongusu, cikislar, bias, WS sagligi. Kapi elemeleri /setup-journal.
         report = await asyncio.to_thread(build_report, None, hours or None)
         return templates.TemplateResponse(request=request, name="log_report.html", context={
             "user": user,

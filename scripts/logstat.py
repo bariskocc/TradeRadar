@@ -51,12 +51,7 @@ def main() -> int:
     print(f"  Aralik     : {span}" + (f"   (son {r['hours']} saat)" if r["hours"] else ""))
     print(f"  Oturum     : {r['sessions']} baslatma")
 
-    if r["skipped"]:
-        head(f"SETUP NEDEN SINYALE DONUSMEDI  ({r['skipped_total']} eleme)")
-        for s in r["skipped"]:
-            top = ", ".join(s["top"][:3])
-            print(f"  {s['count']:>5}  {s['pct']:>5.1f}%  "
-                  f"{bar(s['count'], r['skipped_total']):<28} {s['reason']:<16} {top}")
+    print("  Kapi elemeleri: /setup-journal (Setup Journal, setup basina tek satir + sonrasi)")
 
     lc = r["lifecycle"]
     if lc:
@@ -103,10 +98,6 @@ def main() -> int:
             if mon["trail_avg_r"] is not None:
                 print(f"      trail cikislarinin ort. R = {mon['trail_avg_r']:+.2f}"
                       "   (dusukse trail cok erken/dar demektir)")
-        c60 = mon["crt60"]
-        if c60["total"]:
-            print(f"  CRT %60 elemeleri        : {c60['total']}  "
-                  f"(fill once={c60['fill_first']}, hic fill yok={c60['no_fill']})")
 
     b = r.get("bias") or {}
     if b.get("blocks"):
