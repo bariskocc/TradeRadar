@@ -213,7 +213,8 @@ async def send_signal_active(sig: Signal) -> Optional[int]:
     if not is_configured():
         return None
     text = _format_active_signal(sig)
-    mid = await _send_message(text)
+    # 1D potansiyel bildirimi gittiyse ACTIVE onun devami olarak gelir.
+    mid = await _send_message(text, reply_to_message_id=getattr(sig, "tg_potential_id", None))
     if mid:
         log.info("Telegram: active signal sent for %s %s (mid=%s)", sig.symbol, sig.direction, mid)
     return mid
@@ -251,6 +252,99 @@ async def send_signal_partial(sig: Signal) -> bool:
     mid = await _send_message(_format_signal_partial(sig), reply_to_message_id=sig.tg_message_id)
     if mid:
         log.info("Telegram: partial sent for %s %s (reply_to=%s)", sig.symbol, sig.direction, sig.tg_message_id)
+    return mid is not None
+
+
+_TSI = timezone(timedelta(hours=3))
+
+# Potansiyel 1D setup'in sinyale donusmeden silinme nedenleri (scanner reason kodlari).
+_POTENTIAL_CANCEL_REASONS = {
+    "crt_gone": "CRT yapısı bozuldu",
+    "crt_replaced": "Yerine yeni bir CRT yapısı oluştu",
+    "bias_mismatch": "1D bias ters döndü",
+    "past_tp": "Fiyat entry'ye gelmeden hedefe gitti",
+    "low_quality": "Kalite skoru 7'nin altına düştü",
+    "score7_gate": "Skor-7 kapısı (yapısal entry / PD array şartı)",
+    "no_levels": "Entry/MSS seviyeleri kayboldu",
+    "low_rr": "R:R 2'nin altına düştü",
+    "tight_stop": "Stop çok dar",
+    "past_sl": "Fiyat entry'ye gelmeden SL'i geçti",
+    "crt_50": "CRT %60 geçildi",
+    "invalidated": "CRT %60 geçildi",
+    "missed_quality": "Retest anında skor 7'nin altındaydı",
+    "stale": "Entry daha önce test edilmişti (bayat retest)",
+    "week_close": "Hafta kapanışı",
+}
+
+
+def _fmt_tsi(dt) -> str:
+    if dt is None:
+        return "-"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TSI).strftime("%d.%m.%Y %H:%M") + " UTC+3"
+
+
+def _format_signal_potential(sig: Signal, c2_close_at=None) -> str:
+    """1D CISD/MSS onayli, tum kapilardan gecmis setup: bilgi mesaji (C2 acik veya kapali)."""
+    c2_open = not bool(sig.c2_closed)
+    direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
+    rr = (
+        f"1:{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
+        if sig.planned_rr is not None else "-"
+    )
+    model = _ENTRY_MODEL_LABELS.get(getattr(sig, "entry_model", None) or "cisd", "CISD")
+    if c2_open:
+        tail = (
+            f"⏳ <b>C2 kapanışı:</b> {_fmt_tsi(c2_close_at)}\n"
+            f"\n"
+            f"⚠️ Sinyal değil: motor C2 kapanışını bekliyor. C2 kapanmadan girilen benzer "
+            f"1D yapılar geçmişte zararda; seviyeler C2 kapanışına kadar değişebilir."
+        )
+    else:
+        tail = (
+            f"\n"
+            f"ℹ️ Motor limit emri entry'de bekliyor; dolarsa ACTIVE mesajı buna yanıt olarak gelir."
+        )
+    return (
+        f"\U0001f440 <b>POTANSİYEL 1D CRT ({'C2 AÇIK' if c2_open else 'C2 KAPALI'}) – {sig.symbol}</b>\n"
+        f"\n"
+        f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/10"
+        f" | <b>R:R:</b> {rr}\n"
+        f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>  ·  {model}\n"
+        f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
+        f"\U00002705 <b>Take Profit:</b> <code>{sig.take_profit}</code>\n"
+        f"\U0001f4c8 <b>1D Bias:</b> {sig.htf_bias or 'NEUTRAL'}  ·  <b>1W:</b> {sig.weekly_bias or 'NEUTRAL'}\n"
+        f"\U0001f552 <b>CISD:</b> {_fmt_tsi(sig.cisd_time)}\n"
+        f"{tail}"
+    )
+
+
+async def send_signal_potential(sig: Signal, *, c2_close_at=None, reply_to: Optional[int] = None) -> Optional[int]:
+    """Potansiyel 1D bildirimi; C2 kapaninca ilk mesaja reply olarak tekrar gonderilir."""
+    if not is_configured():
+        return None
+    mid = await _send_message(_format_signal_potential(sig, c2_close_at), reply_to_message_id=reply_to)
+    if mid:
+        log.info("Telegram: potential sent for %s %s (mid=%s reply_to=%s)", sig.symbol, sig.direction, mid, reply_to)
+    return mid
+
+
+def _format_potential_cancel(symbol: str, direction: str, reason: str) -> str:
+    return (
+        f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>\n"
+        f"\n"
+        f"\U0001f4cd <b>{direction}</b> | <b>Neden:</b> {_POTENTIAL_CANCEL_REASONS.get(reason, reason)}"
+    )
+
+
+async def send_potential_cancel(symbol: str, direction: str, reason: str, reply_to: int) -> bool:
+    """Potansiyel setup sinyale donusmeden silindi: ilk mesaja reply."""
+    if not is_configured():
+        return False
+    mid = await _send_message(_format_potential_cancel(symbol, direction, reason), reply_to_message_id=reply_to)
+    if mid:
+        log.info("Telegram: potential cancel sent for %s %s (%s, reply_to=%s)", symbol, direction, reason, reply_to)
     return mid is not None
 
 

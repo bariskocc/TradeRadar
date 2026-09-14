@@ -63,6 +63,7 @@ from app import setup_journal as journal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_partial, send_signal_result
+from app.telegram import send_potential_cancel, send_signal_potential
 
 log = logging.getLogger(__name__)
 
@@ -552,10 +553,83 @@ async def _delete_pending(
     if sig is None:
         return
     log.info("PENDING DELETE: %s %s (%s)", sig.symbol, sig.direction, reason)
-    journal.note_deleted(sig, reason)
+    _note_deleted(sig, reason)
     await session.delete(sig)
     await session.commit()
     _OPEN_SYMBOLS.discard((sig.symbol, sig.timeframe or STRATEGY_4H))
+
+
+# ──────────────────── 1D potansiyel CRT bildirimi ────────────────────
+# 1D, C2 kapanmadan fill yapmaz (11.09 karari). Kullanici manuel karar verebilsin
+# diye CISD/MSS onayli ve tum kapilardan gecmis 1D setup'lar Telegram'a
+# "POTANSIYEL" olarak bildirilir (14.09). C2 kapaninca ve setup sinyale donusmeden
+# silinince ilk mesaja reply gider; fill olursa ACTIVE mesaji da ona reply olur.
+# Motor davranisina etkisi yok. Tekrar gonderim `tg_potential_state` (DB) ile engellenir.
+_POTENTIAL_OUTBOX: list[dict] = []
+
+
+def _note_deleted(s: Signal, reason: str) -> None:
+    """Setup Journal silme kaydi + potansiyel bildirimi gittiyse iptal reply'i kuyruga.
+
+    Silme noktalari commit'ten once calisir ve nesne sonra expire olabilir; bu
+    yuzden gereken alanlar burada kopyalanir, gonderim `_flush_potential_outbox`'ta.
+    """
+    journal.note_deleted(s, reason)
+    try:
+        mid = getattr(s, "tg_potential_id", None)
+        if mid:
+            _POTENTIAL_OUTBOX.append({
+                "symbol": s.symbol, "direction": s.direction,
+                "reason": reason, "reply_to": int(mid),
+            })
+    except Exception:
+        log.exception("potential cancel queue failed for %s", getattr(s, "symbol", "?"))
+
+
+async def _flush_potential_outbox() -> None:
+    if not _POTENTIAL_OUTBOX:
+        return
+    items = list(_POTENTIAL_OUTBOX)
+    _POTENTIAL_OUTBOX.clear()
+    if not tg_configured():
+        return
+    for it in items:
+        try:
+            await send_potential_cancel(it["symbol"], it["direction"], it["reason"], it["reply_to"])
+        except Exception:
+            log.warning("telegram potential cancel failed for %s", it["symbol"])
+
+
+async def _flush_journal_and_potential(session: AsyncSession) -> None:
+    """Olay isleyicilerinin sonunda: Setup Journal yazimi + bekleyen iptal reply'lari."""
+    await journal.flush(session)
+    await _flush_potential_outbox()
+
+
+async def _notify_potential_1d(session: AsyncSession, sig: Signal, cfg: dict) -> None:
+    """CISD onayli 1D setup icin POTANSIYEL bildirimi; C2 durumu degisince ilk mesaja reply."""
+    try:
+        state = "closed" if sig.c2_closed else "open"
+        if getattr(sig, "tg_potential_state", None) == state:
+            return
+        if not tg_configured():
+            return
+        purge = _as_utc(sig.purge_time)
+        c2_close_at = purge + timedelta(hours=float(cfg["c2_hours"])) if purge else None
+        mid = await send_signal_potential(sig, c2_close_at=c2_close_at, reply_to=sig.tg_potential_id)
+        if not mid:
+            return
+        if sig.tg_potential_id is None:
+            sig.tg_potential_id = mid
+        sig.tg_potential_state = state
+        await session.commit()
+        log.info(
+            "POTENTIAL 1D: %s %s C2 %s Entry:%s SL:%s TP:%s (mid=%s)",
+            sig.symbol, sig.direction, "KAPALI" if state == "closed" else "ACIK",
+            sig.entry_price, sig.stop_loss, sig.take_profit, mid,
+        )
+    except Exception:
+        log.exception("potential notify failed for %s", getattr(sig, "symbol", "?"))
 
 
 def _calc_planned_rr(entry: float | None, sl: float | None, tp: float | None) -> float | None:
@@ -1908,6 +1982,11 @@ async def _detect_and_create_waiting_locked(
         # Fill ile simdi arasindaki TP/SL/BE/trail'i yakala.
         await _replay_after_fill(session, setup.symbol, df_ltf, backfill_ts, strategy)
 
+    # 1D: CISD/MSS onayli ve buraya kadar tum kapilardan gecmis setup -> POTANSIYEL
+    # bildirimi (C2 acik: pending, C2 kapali: waiting). Motor davranisini degistirmez.
+    if strategy == STRATEGY_1D and status != "active" and cisd.confirmed:
+        await _notify_potential_1d(session, signal, cfg)
+
     return signal
 
 
@@ -1996,7 +2075,7 @@ async def manage_symbol_on_price(
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
-                    journal.note_deleted(sig, "invalidated")
+                    _note_deleted(sig, "invalidated")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2025,7 +2104,7 @@ async def manage_symbol_on_price(
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
-                    journal.note_deleted(sig, "past_tp")
+                    _note_deleted(sig, "past_tp")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2061,7 +2140,7 @@ async def manage_symbol_on_price(
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
-                    journal.note_deleted(sig, "past_sl")
+                    _note_deleted(sig, "past_sl")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2098,7 +2177,7 @@ async def manage_symbol_on_price(
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
-                    journal.note_deleted(sig, "invalidated")
+                    _note_deleted(sig, "invalidated")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2126,7 +2205,7 @@ async def manage_symbol_on_price(
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                         strategy=sig.timeframe or timeframe,
                     )
-                    journal.note_deleted(sig, "past_tp")
+                    _note_deleted(sig, "past_tp")
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
@@ -2582,7 +2661,7 @@ async def close_session_positions(
                 symbol=sig.symbol, direction=sig.direction,
                 market_type=sig.market_type, level="info", session=session,
             )
-            journal.note_deleted(sig, "week_close")
+            _note_deleted(sig, "week_close")
             await session.delete(sig)
             changed = True
             result["cancelled"].append(sig.symbol)
@@ -2635,7 +2714,7 @@ async def close_session_positions(
         log.info("WEEK CLOSE: %s %s %s exit=%s entry=%s R=%+0.2f",
                  sig.symbol, sig.direction, tf, exit_price, entry, rr)
 
-    await journal.flush(session)
+    await _flush_journal_and_potential(session)
     if changed:
         await session.commit()
         if tg_configured():
@@ -2818,7 +2897,7 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                 if df_bar is not None and len(df_bar) >= 2:
                     jb = df_bar.iloc[-2]
                     journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]))
-            await journal.flush(session)
+            await _flush_journal_and_potential(session)
     except Exception:
         log.exception("on_candle_closed failed for %s %s", bingx_symbol, timeframe)
 
@@ -2860,7 +2939,7 @@ async def on_price_update(
                 avg_ltf_range=avg_range,
                 bar_closed=False,
             )
-            await journal.flush(session)
+            await _flush_journal_and_potential(session)
     except Exception:
         log.exception("on_price_update failed for %s", bingx_symbol)
 
@@ -2950,7 +3029,7 @@ async def run_scan(
                         log.warning("scan failed for %s %s: %s", strategy, bingx_symbol, e)
                     await asyncio.sleep(0)
 
-        await journal.flush(session)
+        await _flush_journal_and_potential(session)
         log.info(
             "Scan complete - %d waiting, %d activated, %d closed, %d breakeven.",
             len(result["new_setups"]), len(result["activated"]),
