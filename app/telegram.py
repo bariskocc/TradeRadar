@@ -106,6 +106,20 @@ def _format_active_signal(sig: Signal) -> str:
     )
 
 
+def _partial_banked_r(sig: Signal) -> float | None:
+    """Kismi karla kasaya giren R, TUM pozisyonun riski cinsinden (kesir x kismi R).
+
+    `partial_rr` fiyatin kac R ilerledigidir; pozisyonun yalnizca `partial_size`
+    kadari kapandigi icin kazanc bunun o kadaridir. Mesajlarda ham partial_rr
+    yazilinca (+1.82R) sonuc mesajindaki toplam (+0.91R) dusus gibi gorunuyordu.
+    """
+    size = getattr(sig, "partial_size", None)
+    prr = getattr(sig, "partial_rr", None)
+    if not size or prr is None:
+        return None
+    return float(size) * float(prr)
+
+
 def _format_signal_result(sig: Signal) -> str:
     """Kapanan islem icin sonuc mesaji (aktif sinyale reply olarak gonderilir)."""
     rr = float(sig.rr_value) if sig.rr_value is not None else 0.0
@@ -117,16 +131,18 @@ def _format_signal_result(sig: Signal) -> str:
 
     exit_kind = getattr(sig, "_exit_kind", None) or getattr(sig, "exit_reason", None)
     partial_line = ""
-    if getattr(sig, "partial_size", None) and getattr(sig, "partial_rr", None) is not None:
+    banked = _partial_banked_r(sig)
+    if banked is not None:
         partial_line = (
             f"\U0001f4b0 <b>Kismi kar:</b> %{int(float(sig.partial_size) * 100)} @ "
-            f"<code>{sig.partial_price}</code> (+{float(sig.partial_rr):.2f}R)\n"
+            f"<code>{sig.partial_price}</code> (+{banked:.2f}R)\n"
         )
 
     strat = _strategy_label(sig)
     if exit_kind == "be" and rr > 0:
         # Kismi kar alinip kalan yari giriste kapandi: toplamda kar + BE.
-        head = f"✅ <b>BE (KISMI KAR) – {sig.symbol} ({strat})</b>"
+        # Kismi kar satiri zaten asagida; baslik sade.
+        head = f"✅ <b>BREAKEVEN – {sig.symbol} ({strat})</b>"
         rr_txt = f"+{rr:g}R"
         exit_line = f"\U0001f6d1 <b>Kalan cikis:</b> <code>{sig.entry_price}</code> (giris)\n"
     elif sig.status == "breakeven" or sig.result == "breakeven" or exit_kind == "be":
@@ -218,12 +234,13 @@ def _format_signal_partial(sig: Signal) -> str:
     """Kismi kar bildirimi: pozisyonun bir kismi kapatildi, kalan SL girise cekildi."""
     strat = _strategy_label(sig)
     pct = int(float(sig.partial_size or 0) * 100)
+    banked = _partial_banked_r(sig) or 0.0
     return (
         f"\U0001f4b0 <b>KISMI KAR – {sig.symbol} ({strat})</b>\n"
         f"\n"
-        f"\U0001f4cd <b>{sig.direction}</b> | <b>%{pct} kapatildi:</b> +{float(sig.partial_rr or 0):.2f}R\n"
+        f"\U0001f4cd <b>{sig.direction}</b> | <b>%{pct} kapatildi:</b> +{banked:.2f}R kazanildi\n"
         f"\U0001f3af <b>Fiyat:</b> <code>{sig.partial_price}</code>\n"
-        f"\U0001f6e1️ <b>Kalan SL:</b> <code>{sig.entry_price}</code> (giris)"
+        f"\U0001f6e1️ <b>Kalan SL:</b> <code>{sig.entry_price}</code> (giris) · en kotu toplam +{banked:.2f}R"
     )
 
 

@@ -690,7 +690,8 @@ def _waiting_event(
     """Bekleyen giris icin: 'invalidated' | 'fill' | 'missed' | None.
 
     CRT %60: yalniz kapanmis LTF close (wick iptal yok); fill'den once.
-    Fill ve missed iğnede. Ayni mumda entry+TP varsa fill (sonra aktif TP).
+    Fill ve missed iğnede. Ayni mumda entry+TP varsa fill; TP o mumda yazilmaz
+    (mum ici sira bilinmez), bir sonraki mumdan itibaren degerlendirilir.
     """
     if (
         REQUIRE_CRT_MID_INVALIDATION
@@ -2160,7 +2161,8 @@ async def manage_symbol_on_price(
                         market_type=sig.market_type, level="success", session=session,
                     )
                     log.info("FILLED: %s %s entry %s (closed bar)", sig.symbol, sig.direction, sig.entry_price)
-                    # continue YOK: kapanan mumda TP varsa win yazilabilir.
+                    # continue YOK: active dalina duser, ama dolum mumunda yalnizca
+                    # SL degerlendirilir (on_fill_bar); TP bir sonraki mumda.
                 else:
                     continue  # hala waiting, aktif degil
 
@@ -2178,8 +2180,19 @@ async def manage_symbol_on_price(
             if risk <= 0:
                 continue
 
+            # Dolum mumu (entry_filled_time her yolda mumun acilis zamani): mum ici
+            # sira bilinmez. SHORT limitte mumun LOW'u, LONG'da HIGH'i emir dolmadan
+            # ONCE olmus olabilir. BCH 4H #47 (14.09): 12:45 mumu 221.64'ten acilip
+            # 221.62'yi gordu, sonra 224.09'a cikip 223.86'dan doldu; motor 221.62'yi
+            # kismi kar sayip islemi +0.91R BE kapatti, fiyat dolumdan sonra o seviyeye
+            # hic donmedi. Bu mumda yalnizca orijinal SL; TP / BE / kismi kar / trail /
+            # MFE bir sonraki mumdan baslar (Setup Journal'daki ayni-mum kurali).
+            fill_at = _as_utc(sig.entry_filled_time)
+            on_fill_bar = bar_ts is not None and fill_at is not None and bar_ts <= fill_at
+
             # MFE guncelle (trail icin)
-            sig.mfe_price = _update_mfe(sig.direction, sig.mfe_price, entry, high, low)
+            if not on_fill_bar:
+                sig.mfe_price = _update_mfe(sig.direction, sig.mfe_price, entry, high, low)
 
             event: str | None = None
 
@@ -2221,7 +2234,11 @@ async def manage_symbol_on_price(
             )
 
             # Once mevcut SL/TP ile cikis (stop'u degistirmeden once)
-            if _hits_tp(sig.direction, high, low, tp):
+            if on_fill_bar:
+                # Temkinli: dolum mumunda TP ve SL birlikte gorulse de kayip.
+                if _hits_sl(sig.direction, high, low, initial_sl):
+                    event = "hit_sl"
+            elif _hits_tp(sig.direction, high, low, tp):
                 event = "hit_tp"
             elif (
                 not stale_trail_wick
@@ -2278,7 +2295,7 @@ async def manage_symbol_on_price(
                             partial_taken.append(sig)
                             partial_txt = (
                                 f" + %{int(sig.partial_size * 100)} kar alindi"
-                                f" (+{sig.partial_rr:.2f}R)"
+                                f" (+{sig.partial_size * sig.partial_rr:.2f}R)"
                             )
                         changed = True
                         await record_event(
