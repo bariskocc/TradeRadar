@@ -113,6 +113,14 @@ class BingXMarketData:
         self._running = False
         self._connected = False
         self._last_message_at: datetime | None = None
+        # Dashboard saglik karti: surec/WS gecmisi (bellekte; restart'ta sifirlanir).
+        self._started_at: datetime | None = None
+        self._bootstrap_done_at: datetime | None = None
+        self._connected_at: datetime | None = None
+        self._ws_connects = 0
+        self._ws_disconnects = 0
+        self._last_disconnect_at: datetime | None = None
+        self._last_disconnect_reason: str | None = None
         self._last_1d_day = None
         # Cuma kapanisi (kripto-disi pozisyonlari duzlestirme): haftada bir kez.
         self._week_close_pending = False
@@ -196,6 +204,7 @@ class BingXMarketData:
                         log.warning("5M bootstrap basarisiz %s: %s", sym, e)
         self._last_1d_day = datetime.now(timezone.utc).date()
         log.info("Bootstrap tamamlandi.")
+        self._bootstrap_done_at = datetime.now(timezone.utc)
 
     async def _bootstrap_session_symbol(self, sym: str, client, with_ltf: bool = True) -> None:
         """FX/metal/endeks/petrol bootstrap'i.
@@ -324,6 +333,7 @@ class BingXMarketData:
 
     async def start(self) -> None:
         self._running = True
+        self._started_at = datetime.now(timezone.utc)
         await self.bootstrap()
         self._tasks = [
             asyncio.create_task(self._ws_loop(), name="bingx-ws"),
@@ -355,6 +365,8 @@ class BingXMarketData:
             try:
                 async with websockets.connect(BINGX_WS_URL, max_size=None, ping_interval=None) as ws:
                     self._connected = True
+                    self._connected_at = datetime.now(timezone.utc)
+                    self._ws_connects += 1
                     await self._subscribe_all(ws)
                     log.info(
                         "BingX WS baglandi, %d sembol (4H) + %d (1h) + %d (5m).",
@@ -382,6 +394,9 @@ class BingXMarketData:
                 break
             except Exception as e:
                 self._connected = False
+                self._ws_disconnects += 1
+                self._last_disconnect_at = datetime.now(timezone.utc)
+                self._last_disconnect_reason = str(e)[:160]
                 log.warning("BingX WS koptu (%s). 5 sn sonra yeniden baglanilacak.", e)
                 if self._running:
                     await record_event(
@@ -621,6 +636,15 @@ class BingXMarketData:
                 self._last_message_at.astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S UTC+3")
                 if self._last_message_at else None
             ),
+            # Dashboard saglik karti (UTC aware datetime; UI TSI'ye cevirir).
+            "last_message_dt": self._last_message_at,
+            "started_at": self._started_at,
+            "bootstrap_done_at": self._bootstrap_done_at,
+            "connected_at": self._connected_at,
+            "ws_connects": self._ws_connects,
+            "ws_disconnects": self._ws_disconnects,
+            "last_disconnect_at": self._last_disconnect_at,
+            "last_disconnect_reason": self._last_disconnect_reason,
         }
 
 

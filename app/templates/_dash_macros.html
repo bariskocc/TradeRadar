@@ -1,0 +1,19 @@
+{# Dashboard ortak parcalari. Her parca kendi import'unu yapar (include edilen sablona import tasinmaz). #}
+
+{% macro rv(v, digits=2) -%}
+{%- if v is none -%}<span class="text-gray-600">—</span>
+{%- else -%}<span class="{% if v > 0.005 %}text-green-400{% elif v < -0.005 %}text-red-400{% else %}text-gray-300{% endif %}">{{ ('%+.' ~ digits ~ 'f')|format(v) }}R</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro low(title="Örneklem küçük; oranlar henüz güvenilir değil") -%}
+<span class="px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider bg-dark-600 text-gray-400" title="{{ title }}">az örnek</span>
+{%- endmacro %}
+
+{% macro dir(d) -%}
+<span class="{% if d == 'LONG' %}text-green-400{% else %}text-red-400{% endif %} font-semibold">{{ d }}</span>
+{%- endmacro %}
+
+{% macro tf(label) -%}
+<span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-dark-700 text-gray-400 whitespace-nowrap">{{ label }}</span>
+{%- endmacro %}

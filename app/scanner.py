@@ -2534,6 +2534,7 @@ async def manage_symbol_on_price(
                     if ref_time.tzinfo is None:
                         ref_time = ref_time.replace(tzinfo=timezone.utc)
                     sig.duration_hours = round((now - ref_time).total_seconds() / 3600, 1)
+                sig.closed_at = now
                 changed = True
                 finished.append(sig)
                 # Cikisin HANGI mumda ve hangi seviyede oldugu + o ana kadarki
@@ -2699,6 +2700,7 @@ async def close_session_positions(
         ref_time = _as_utc(sig.entry_filled_time or sig.cisd_time)
         if ref_time:
             sig.duration_hours = round((now - ref_time).total_seconds() / 3600, 1)
+        sig.closed_at = now
 
         finished.append(sig)
         changed = True

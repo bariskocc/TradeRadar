@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
@@ -41,8 +43,32 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("partial_time", "ALTER TABLE signals ADD COLUMN partial_time DATETIME"),
         ("tg_potential_id", "ALTER TABLE signals ADD COLUMN tg_potential_id INTEGER"),
         ("tg_potential_state", "ALTER TABLE signals ADD COLUMN tg_potential_state VARCHAR"),
+        ("closed_at", "ALTER TABLE signals ADD COLUMN closed_at DATETIME"),
     ],
 }
+
+
+async def _backfill_closed_at(conn) -> None:
+    """closed_at kolonundan once kapanan kayitlar: dolum (yoksa CISD) + duration_hours.
+
+    Iki kapanis yolu da sureyi bu referanstan kapanis anina kadar yazdigi icin kapanis
+    ani ±3 dk (0.1 saat yuvarlama) hassasiyetle geri elde edilir. Bir kez doldurulan
+    kayda tekrar dokunulmaz.
+    """
+    rows = (await conn.execute(text(
+        "SELECT id, entry_filled_time, cisd_time, duration_hours FROM signals "
+        "WHERE closed_at IS NULL AND result IS NOT NULL AND duration_hours IS NOT NULL"
+    ))).fetchall()
+    is_sqlite = "sqlite" in (DATABASE_URL or "")
+    for sid, filled, cisd, dur in rows:
+        ref = filled or cisd
+        if ref is None:
+            continue
+        if isinstance(ref, str):
+            ref = datetime.fromisoformat(ref)
+        closed = ref.replace(tzinfo=None) + timedelta(hours=float(dur))
+        value = closed.strftime("%Y-%m-%d %H:%M:%S.%f") if is_sqlite else closed
+        await conn.execute(text("UPDATE signals SET closed_at = :c WHERE id = :i"), {"c": value, "i": sid})
 
 
 async def _apply_column_migrations(conn) -> None:
@@ -62,6 +88,11 @@ async def init_db():
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
             await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+    # Veri guncellemesi AYRI transaction'da: UPDATE acik bir transaction baslatir ve ayni
+    # blokta ardindan gelen `PRAGMA synchronous` "Safety level may not be changed inside a
+    # transaction" ile uygulama acilisini dusuruyordu (14.09 16:11).
+    async with engine.begin() as conn:
+        await _backfill_closed_at(conn)
 
 
 async def get_db():

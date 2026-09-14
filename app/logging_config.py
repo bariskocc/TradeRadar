@@ -12,6 +12,7 @@ Zaman damgasi TSI (UTC+3) — UI ve Telegram ile ayni saat dilimi.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
@@ -35,6 +36,48 @@ class _TsiFormatter(logging.Formatter):
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         dt = datetime.fromtimestamp(record.created, tz=TSI)
         return dt.strftime(datefmt or _DATEFMT)
+
+
+class _IssueBuffer(logging.Handler):
+    """Son WARNING/ERROR kayitlarini bellekte tutar (Dashboard saglik karti).
+
+    Dashboard'un her yuklemede 3+ MB log dosyasini okumamasi icin; surec basindan beri
+    gecerli, restart'ta sifirlanir.
+    """
+
+    def __init__(self, maxlen: int = 30) -> None:
+        super().__init__(level=logging.WARNING)
+        self.items: deque[dict] = deque(maxlen=maxlen)
+        self.counts = {"WARNING": 0, "ERROR": 0}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = "ERROR" if record.levelno >= logging.ERROR else "WARNING"
+            self.counts[level] += 1
+            self.items.append({
+                "ts": datetime.fromtimestamp(record.created, tz=timezone.utc),
+                "level": level,
+                "logger": record.name,
+                "msg": record.getMessage()[:240],
+            })
+        except Exception:
+            pass
+
+
+_ISSUES = _IssueBuffer()
+
+
+def recent_issues(hours: float = 24.0) -> dict:
+    """Son `hours` saatteki uyari/hatalar (en yeni sonda) + surec basindan beri sayilar."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    items = [i for i in list(_ISSUES.items) if i["ts"] >= cutoff]
+    return {
+        "items": items,
+        "warnings": sum(1 for i in items if i["level"] == "WARNING"),
+        "errors": sum(1 for i in items if i["level"] == "ERROR"),
+        "total_warnings": _ISSUES.counts["WARNING"],
+        "total_errors": _ISSUES.counts["ERROR"],
+    }
 
 
 def setup_logging() -> None:
@@ -66,6 +109,7 @@ def setup_logging() -> None:
         root.removeHandler(h)
     root.addHandler(console)
     root.addHandler(file_handler)
+    root.addHandler(_ISSUES)
 
     for name in _NOISY:
         logging.getLogger(name).setLevel(logging.WARNING)

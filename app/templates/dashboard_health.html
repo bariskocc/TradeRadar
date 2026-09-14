@@ -1,0 +1,48 @@
+{% import '_dash_macros.html' as m %}
+{% set h = health %}
+<div class="mb-5 bg-dark-800 rounded-xl border px-4 py-3
+    {% if h.status == 'ok' %}border-dark-600{% elif h.status == 'warn' %}border-amber-500/40{% else %}border-red-500/50{% endif %}">
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
+        <span class="flex items-center gap-2 font-semibold
+            {% if h.status == 'ok' %}text-green-400{% elif h.status == 'warn' %}text-amber-400{% else %}text-red-400{% endif %}">
+            <span class="relative flex w-2 h-2">
+                {% if h.status == 'ok' %}<span class="absolute inline-flex w-full h-full rounded-full bg-green-400 opacity-60 animate-ping"></span>{% endif %}
+                <span class="relative inline-flex w-2 h-2 rounded-full
+                    {% if h.status == 'ok' %}bg-green-400{% elif h.status == 'warn' %}bg-amber-400{% else %}bg-red-500{% endif %}"></span>
+            </span>
+            {{ h.status_label }}
+        </span>
+
+        <span class="text-gray-500">Bot <span class="text-gray-200 font-medium">{{ h.uptime }}</span></span>
+
+        <span class="text-gray-500">WS
+            {% if h.connected %}<span class="text-green-400 font-medium">bağlı</span>{% else %}<span class="text-red-400 font-medium">bağlı değil</span>{% endif %}
+            <span class="{% if h.stale %}text-amber-400{% else %}text-gray-400{% endif %}">· son veri {{ h.last_msg_label }}</span>
+        </span>
+
+        <span class="text-gray-500"><span class="text-gray-200 font-medium">{{ h.symbols }}</span> sembol · <span class="text-gray-200 font-medium">{{ h.subs }}</span> abonelik</span>
+
+        <span class="text-gray-500">WS kopma <span class="{% if h.ws_disconnects %}text-amber-400{% else %}text-gray-200{% endif %} font-medium">{{ h.ws_disconnects }}</span></span>
+
+        <span class="text-gray-500" title="Son 24 saat (bot başlangıcından beri tutulur)">
+            Uyarı <span class="{% if h.warnings %}text-amber-400{% else %}text-gray-200{% endif %} font-medium">{{ h.warnings }}</span>
+            · Hata <span class="{% if h.errors %}text-red-400{% else %}text-gray-200{% endif %} font-medium">{{ h.errors }}</span>
+        </span>
+
+        <span class="text-gray-500 flex items-center gap-1.5">Telegram
+            {% if h.telegram %}
+            <span class="text-green-400 font-medium">açık</span>
+            <button type="button" onclick="testTelegram(this)"
+                    class="px-2 py-0.5 rounded bg-dark-700 hover:bg-dark-600 text-gray-300 text-[10px] font-medium transition">Test</button>
+            {% else %}
+            <span class="text-red-400 font-medium">yapılandırılmamış</span>
+            {% endif %}
+        </span>
+
+        <span class="{% if h.fx.soon %}text-amber-400{% else %}text-gray-500{% endif %}">{{ h.fx.label }}</span>
+
+        <span class="ml-auto text-gray-500">Tüm zamanlar
+            <span class="font-semibold">{{ m.rv(h.totals_r) }}</span> · <span class="text-gray-200 font-medium">{{ h.totals_n }}</span> işlem
+        </span>
+    </div>
+</div>

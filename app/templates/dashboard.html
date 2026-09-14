@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import '_dash_macros.html' as m %}
 
 {% block title %}TradeRadar - Dashboard{% endblock %}
 
@@ -8,117 +9,260 @@
     {% set active_page = 'dashboard' %}
     {% include 'sidebar.html' %}
 
-    <!-- Main Content -->
     <main class="flex-1 overflow-auto">
-        <div class="p-6 max-w-none">
-            <!-- Header -->
-            <div class="mb-6">
-                <h1 class="text-xl font-bold text-white">Dashboard</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Signal performance summary — {{ tf_label }}</p>
-            </div>
-            <div class="flex items-center gap-1 mb-6">
-                <a href="/?tf=4h" class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tf == '4h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">4H-15M</a>
-                <a href="/?tf=1d" class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tf == '1d' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1D-1H</a>
-                <a href="/?tf=1h" class="px-4 py-2 rounded-lg text-sm font-medium transition {% if tf == '1h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1H-5M</a>
+        <div class="p-6 max-w-[1600px]">
+            <!-- Başlık -->
+            <div class="mb-4 flex items-end justify-between gap-4">
+                <div>
+                    <h1 class="text-xl font-bold text-white">Dashboard</h1>
+                    <p class="text-sm text-gray-500 mt-0.5">Bot sağlığı, dönem özeti ve strateji performansı</p>
+                </div>
+                <p id="refresh-info" class="text-[10px] text-gray-500">Canlı bölümler 30 sn'de bir yenilenir</p>
             </div>
 
-            <!-- Split Dashboard: Crypto vs Global Markets -->
-            <div class="space-y-4 mb-4">
-                <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <div class="mb-3">
-                        <h2 class="text-sm font-bold text-white">Crypto</h2>
-                        <p class="text-xs text-gray-500">Only crypto market stats</p>
-                    </div>
-                    <div class="grid grid-cols-4 gap-3">
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total Signals</p>
-                            <p class="text-xl font-bold text-white">{{ stats_crypto.total_signals }}</p>
-                            <p class="text-xs text-gray-500 mt-1"><span class="text-green-400">{{ stats_crypto.active_signals }}</span> active</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Win Rate</p>
-                            <p class="text-xl font-bold {% if stats_crypto.win_rate >= 50 %}text-green-400{% else %}text-red-400{% endif %}">{{ stats_crypto.win_rate }}%</p>
-                            <p class="text-xs text-gray-500 mt-1">{{ stats_crypto.win_count }}W / {{ stats_crypto.loss_count }}L / {{ stats_crypto.be_count }}BE</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg R:R</p>
-                            <p class="text-xl font-bold {% if stats_crypto.avg_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_crypto.avg_rr) }}R</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total R:R</p>
-                            <p class="text-xl font-bold {% if stats_crypto.total_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_crypto.total_rr) }}R</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Profitable</p>
-                            <p class="text-sm font-bold text-white">{{ fmt_ui_symbol(stats_crypto.most_profitable, 'crypto') }}</p>
-                            <p class="text-xs text-green-400 mt-1">{{ '%+.2f'|format(stats_crypto.most_profitable_rr) }}R</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Traded</p>
-                            <p class="text-sm font-bold text-white">{{ fmt_ui_symbol(stats_crypto.most_traded, 'crypto') }}</p>
-                            <p class="text-xs text-gray-400 mt-1">{{ stats_crypto.most_traded_count }} trades</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Highest Win Rate</p>
-                            <p class="text-sm font-bold text-white">{{ fmt_ui_symbol(stats_crypto.best_wr_pair, 'crypto') }}</p>
-                            <p class="text-xs text-green-400 mt-1">{{ stats_crypto.best_wr_pct }}%</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg Duration</p>
-                            <p class="text-sm font-bold text-white">{{ stats_crypto.avg_duration }}h</p>
-                            <p class="text-xs text-gray-400 mt-1">per signal</p>
-                        </div>
-                    </div>
-                </section>
+            <!-- Sağlık şeridi (canlı) -->
+            <div id="live-health">{% include 'dashboard_health.html' %}</div>
 
+            <!-- Dönem özeti -->
+            {% set p = period %}{% set s = summary %}{% set a = activity %}
+            <section class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-5">
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div class="flex items-center gap-1">
+                        <a href="/?period=week"
+                           class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if p.kind == 'week' %}bg-accent-blue text-white{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600 hover:text-white{% endif %}">Haftalık</a>
+                        <a href="/?period=month"
+                           class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if p.kind == 'month' %}bg-accent-blue text-white{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600 hover:text-white{% endif %}">Aylık</a>
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                        <a href="/?period={{ p.kind }}&offset={{ p.offset - 1 }}" title="Önceki {{ 'hafta' if p.kind == 'week' else 'ay' }}"
+                           class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700 text-gray-300 hover:bg-dark-600 hover:text-white transition">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                        </a>
+                        <div class="text-center min-w-[200px]">
+                            <p class="text-sm font-semibold text-white">{{ p.label }}</p>
+                            <p class="text-[10px] text-gray-500">
+                                {% if p.offset == 0 %}{{ 'bu hafta' if p.kind == 'week' else 'bu ay' }}
+                                {% else %}<a href="/?period={{ p.kind }}" class="text-accent-blue hover:text-white">{{ 'bu haftaya' if p.kind == 'week' else 'bu aya' }} dön</a>{% endif %}
+                            </p>
+                        </div>
+                        {% if p.offset < 0 %}
+                        <a href="/?period={{ p.kind }}&offset={{ p.offset + 1 }}" title="Sonraki {{ 'hafta' if p.kind == 'week' else 'ay' }}"
+                           class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700 text-gray-300 hover:bg-dark-600 hover:text-white transition">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                        </a>
+                        {% else %}
+                        <span class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700/50 text-gray-700">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                        </span>
+                        {% endif %}
+                    </div>
+
+                    <div class="min-w-[90px] flex justify-end">{% if s.n and s.low_sample %}{{ m.low() }}{% endif %}</div>
+                </div>
+
+                {% if s.n %}
+                <div>
+                    <div>
+                        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+                            <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Toplam R</p>
+                                <p class="text-2xl font-bold">{{ m.rv(s.total_r) }}</p>
+                                <p class="text-[11px] text-gray-500 mt-1">
+                                    {% if s.delta_r is not none %}önceki döneme göre {{ m.rv(s.delta_r) }}{% else %}önceki dönem yok{% endif %}
+                                </p>
+                            </div>
+                            <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Win rate</p>
+                                <p class="text-2xl font-bold text-white">{{ s.win_rate }}%</p>
+                                <div class="mt-2 h-1.5 rounded-full bg-dark-600 overflow-hidden flex">
+                                    <div class="h-full bg-green-500" style="width: {{ (s.wins / s.n * 100)|round(1) }}%"></div>
+                                    <div class="h-full bg-gray-500" style="width: {{ (s.be / s.n * 100)|round(1) }}%"></div>
+                                    <div class="h-full bg-red-500" style="width: {{ (s.losses / s.n * 100)|round(1) }}%"></div>
+                                </div>
+                            </div>
+                            <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">İşlem</p>
+                                <p class="text-2xl font-bold text-white">{{ s.n }}</p>
+                                <p class="text-[11px] mt-1">
+                                    <span class="text-green-400">{{ s.wins }}W</span> · <span class="text-red-400">{{ s.losses }}L</span> · <span class="text-gray-400">{{ s.be }}BE</span>
+                                </p>
+                            </div>
+                            <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Ort. R</p>
+                                <p class="text-2xl font-bold">{{ m.rv(s.avg_r) }}</p>
+                                <p class="text-[11px] text-gray-500 mt-1">işlem başına</p>
+                            </div>
+                            <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
+                                <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">En iyi / en kötü</p>
+                                <p class="text-xs text-white truncate">{{ s.best.symbol }} <span class="text-gray-500">{{ s.best.tf_label }}</span> <span class="font-semibold">{{ m.rv(s.best.r) }}</span></p>
+                                {% if s.worst %}
+                                <p class="text-xs text-white truncate mt-1">{{ s.worst.symbol }} <span class="text-gray-500">{{ s.worst.tf_label }}</span> <span class="font-semibold">{{ m.rv(s.worst.r) }}</span></p>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="flex flex-wrap items-center gap-2 mt-4">
+                            {% for t in s.by_tf %}
+                            <span class="px-2.5 py-1 rounded-lg bg-dark-700 border border-dark-600 text-xs {% if not t.n %}opacity-50{% endif %}">
+                                <span class="text-gray-400">{{ t.label }}</span>
+                                <span class="font-semibold ml-1">{% if t.n %}{{ m.rv(t.r) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</span>
+                                <span class="text-gray-500">({{ t.n }})</span>
+                            </span>
+                            {% endfor %}
+                            <span class="w-px h-5 bg-dark-600 mx-1"></span>
+                            {% for mk in s.by_market %}
+                            <span class="px-2.5 py-1 rounded-lg bg-dark-700 border border-dark-600 text-xs {% if not mk.n %}opacity-50{% endif %}">
+                                <span class="text-gray-400">{{ mk.label }}</span>
+                                <span class="font-semibold ml-1">{% if mk.n %}{{ m.rv(mk.r) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</span>
+                                <span class="text-gray-500">({{ mk.n }})</span>
+                            </span>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="py-8 text-center">
+                    <p class="text-sm text-gray-400">Bu dönemde kapanan işlem yok.</p>
+                    {% if s.prev_total_r is not none %}
+                    <p class="text-xs text-gray-500 mt-1">Önceki dönem: {{ m.rv(s.prev_total_r) }}</p>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+                <div class="mt-4 pt-3 border-t border-dark-600 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-gray-400">
+                    <span class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Motor</span>
+                    <span><span class="text-white font-semibold">{{ a.setups }}</span> setup görüldü</span>
+                    <span><span class="text-white font-semibold">{{ a.signals }}</span> sinyale dönüştü</span>
+                    <span><span class="text-white font-semibold">{{ a.filled }}</span> dolum</span>
+                    <a href="/setup-journal" class="text-accent-blue hover:text-white transition">Setup Journal →</a>
+                    {% if a.partial %}
+                    <span class="text-gray-600">{% if a.journal_since %}setup sayıları {{ a.journal_since }} tarihinden beri{% else %}Setup Journal henüz boş{% endif %}</span>
+                    {% endif %}
+                </div>
+            </section>
+
+            <!-- Strateji kartları (tüm zamanlar) -->
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                Strateji performansı · tüm zamanlar{% if stats_since %} <span class="normal-case text-gray-600">({{ stats_since }}'dan beri)</span>{% endif %}
+            </p>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+                {% for st in strategies %}{% set t = st.total %}{% set c = st.crypto %}{% set f = st.fx %}
+                {% set cn = c.win_count + c.loss_count + c.be_count %}{% set fn = f.win_count + f.loss_count + f.be_count %}
                 <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <div class="mb-3">
-                        <h2 class="text-sm font-bold text-white">{{ global_markets_label }}</h2>
-                        <p class="text-xs text-gray-500">FX + Index + Metal + Oil stats</p>
-                    </div>
-                    <div class="grid grid-cols-4 gap-3">
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total Signals</p>
-                            <p class="text-xl font-bold text-white">{{ stats_global.total_signals }}</p>
-                            <p class="text-xs text-gray-500 mt-1"><span class="text-green-400">{{ stats_global.active_signals }}</span> active</p>
+                    <div class="flex items-start justify-between gap-2">
+                        <div>
+                            <p class="text-xs font-semibold text-gray-400">{{ st.label }}</p>
+                            <p class="text-2xl font-bold mt-0.5">{% if st.closed %}{{ m.rv(t.total_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</p>
                         </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Win Rate</p>
-                            <p class="text-xl font-bold {% if stats_global.win_rate >= 50 %}text-green-400{% else %}text-red-400{% endif %}">{{ stats_global.win_rate }}%</p>
-                            <p class="text-xs text-gray-500 mt-1">{{ stats_global.win_count }}W / {{ stats_global.loss_count }}L / {{ stats_global.be_count }}BE</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg R:R</p>
-                            <p class="text-xl font-bold {% if stats_global.avg_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_global.avg_rr) }}R</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Total R:R</p>
-                            <p class="text-xl font-bold {% if stats_global.total_rr >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ '%+.2f'|format(stats_global.total_rr) }}R</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Profitable</p>
-                            <p class="text-sm font-bold text-white">{{ stats_global.most_profitable }}</p>
-                            <p class="text-xs text-green-400 mt-1">{{ '%+.2f'|format(stats_global.most_profitable_rr) }}R</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Most Traded</p>
-                            <p class="text-sm font-bold text-white">{{ stats_global.most_traded }}</p>
-                            <p class="text-xs text-gray-400 mt-1">{{ stats_global.most_traded_count }} trades</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Highest Win Rate</p>
-                            <p class="text-sm font-bold text-white">{{ stats_global.best_wr_pair }}</p>
-                            <p class="text-xs text-green-400 mt-1">{{ stats_global.best_wr_pct }}%</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Avg Duration</p>
-                            <p class="text-sm font-bold text-white">{{ stats_global.avg_duration }}h</p>
-                            <p class="text-xs text-gray-400 mt-1">per signal</p>
+                        <div class="flex flex-col items-end gap-1">
+                            {% if st.open_count %}<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-accent-blue/15 text-accent-blue">{{ st.open_count }} açık</span>{% endif %}
+                            {% if st.low_sample %}{{ m.low() }}{% endif %}
                         </div>
                     </div>
+                    <p class="text-[11px] text-gray-500 mt-1">
+                        {{ st.closed }} kapanan{% if st.closed %} · WR {{ t.win_rate }}%{% endif %}
+                        · son 7 gün {% if st.last7_n %}{{ m.rv(st.last7_r) }} <span class="text-gray-600">({{ st.last7_n }})</span>{% else %}<span class="text-gray-600">işlem yok</span>{% endif %}
+                    </p>
+                    <table class="w-full mt-3 text-xs">
+                        <thead>
+                            <tr class="text-[10px] text-gray-500 uppercase tracking-wider">
+                                <th class="text-left font-semibold pb-1.5"></th>
+                                <th class="text-right font-semibold pb-1.5 w-[38%]">Crypto</th>
+                                <th class="text-right font-semibold pb-1.5 w-[38%]">FX</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-dark-700">
+                            <tr>
+                                <td class="py-1.5 text-gray-500">Sinyal <span class="text-gray-600">(aktif)</span></td>
+                                <td class="py-1.5 text-right text-white">{{ c.total_signals }} <span class="text-green-400">({{ c.active_signals }})</span></td>
+                                <td class="py-1.5 text-right text-white">{{ f.total_signals }} <span class="text-green-400">({{ f.active_signals }})</span></td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">Win rate</td>
+                                <td class="py-1.5 text-right text-white">{% if cn %}{{ c.win_rate }}%{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right text-white">{% if fn %}{{ f.win_rate }}%{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">W / L / BE</td>
+                                <td class="py-1.5 text-right text-gray-300">{% if cn %}{{ c.win_count }} / {{ c.loss_count }} / {{ c.be_count }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right text-gray-300">{% if fn %}{{ f.win_count }} / {{ f.loss_count }} / {{ f.be_count }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">Ort. R</td>
+                                <td class="py-1.5 text-right">{% if cn %}{{ m.rv(c.avg_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right">{% if fn %}{{ m.rv(f.avg_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">Toplam R</td>
+                                <td class="py-1.5 text-right font-semibold">{% if cn %}{{ m.rv(c.total_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right font-semibold">{% if fn %}{{ m.rv(f.total_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">En kârlı</td>
+                                <td class="py-1.5 text-right text-white truncate">{% if c.most_profitable != '-' %}{{ fmt_ui_symbol(c.most_profitable, 'crypto') }} {{ m.rv(c.most_profitable_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right text-white truncate">{% if f.most_profitable != '-' %}{{ fmt_ui_symbol(f.most_profitable, 'fx') }} {{ m.rv(f.most_profitable_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">En çok işlem</td>
+                                <td class="py-1.5 text-right text-white truncate">{% if c.most_traded != '-' %}{{ fmt_ui_symbol(c.most_traded, 'crypto') }} <span class="text-gray-500">×{{ c.most_traded_count }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right text-white truncate">{% if f.most_traded != '-' %}{{ fmt_ui_symbol(f.most_traded, 'fx') }} <span class="text-gray-500">×{{ f.most_traded_count }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500" title="En az 3 kapanan işlemi olan semboller arasında">En iyi WR</td>
+                                <td class="py-1.5 text-right text-white truncate">{% if c.best_wr_pair != '-' %}{{ fmt_ui_symbol(c.best_wr_pair, 'crypto') }} <span class="text-green-400">{{ c.best_wr_pct }}%</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right text-white truncate">{% if f.best_wr_pair != '-' %}{{ fmt_ui_symbol(f.best_wr_pair, 'fx') }} <span class="text-green-400">{{ f.best_wr_pct }}%</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="py-1.5 text-gray-500">Ort. süre</td>
+                                <td class="py-1.5 text-right text-gray-300">{% if cn %}{{ c.avg_duration }}s{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                                <td class="py-1.5 text-right text-gray-300">{% if fn %}{{ f.avg_duration }}s{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </section>
+                {% endfor %}
             </div>
+
+            <!-- Açık işlemler / son kapananlar / potansiyel 1D / dikkat (canlı) -->
+            <div id="live-board">{% include 'dashboard_board.html' %}</div>
         </div>
     </main>
 </div>
+
+<script>
+// Canlı parçalar: sağlık şeridi + alt pano.
+async function loadLive() {
+    const info = document.getElementById('refresh-info');
+    try {
+        const res = await fetch('/dashboard/live');
+        if (!res.ok || res.redirected) return;
+        const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+        for (const id of ['live-health', 'live-board']) {
+            const src = doc.getElementById(id);
+            const dst = document.getElementById(id);
+            if (src && dst) dst.innerHTML = src.innerHTML;
+        }
+        info.textContent = 'Güncellendi ' + new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (e) {
+        info.textContent = 'Yenileme başarısız';
+    }
+}
+setInterval(loadLive, 30000);
+
+async function testTelegram(btn) {
+    const old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+        const res = await fetch('/api/telegram-test', { method: 'POST' });
+        const data = await res.json();
+        btn.textContent = data.success ? 'Gönderildi ✓' : 'Hata';
+        if (!data.success && data.error) btn.title = data.error;
+    } catch (e) {
+        btn.textContent = 'Hata';
+    }
+    setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 4000);
+}
+</script>
 {% endblock %}

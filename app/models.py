@@ -63,6 +63,10 @@ class Signal(Base):
     planned_rr = Column(Float, nullable=True)              # Potansiyel R:R (olusturulunca; degismez)
     rr_value = Column(Float, nullable=True)                # Gerceklesen R (kapanista); acikken plan ile ayni olabilir
     duration_hours = Column(Float, nullable=True)
+    # Kapanis ani (TP/SL/BE/trail mumu ya da hafta kapanisi). Donem ozetleri (Dashboard
+    # haftalik/aylik, Analytics haftalik) islemi KAPANDIGI doneme sayar. 14.09 oncesi
+    # kayitlar init_db'de dolum (yoksa CISD) + duration_hours ile dolduruldu.
+    closed_at = Column(DateTime, nullable=True)
 
     # HTF Bias (1D) — trade filtresinde kullanilir
     htf_bias = Column(String, nullable=True)               # BULLISH / BEARISH / NEUTRAL

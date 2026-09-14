@@ -1,0 +1,125 @@
+{% import '_dash_macros.html' as m %}
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+
+    <!-- Açık işlemler -->
+    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <div class="flex items-center justify-between mb-3">
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+                Açık işlemler <span class="text-gray-400">({{ open_counts.all }})</span>
+            </p>
+            <div class="flex items-center gap-3 text-xs">
+                {% if open_r is not none %}<span class="text-gray-500">Anlık <span class="font-semibold">{{ m.rv(open_r) }}</span></span>{% endif %}
+                <a href="/open-signals" class="text-accent-blue hover:text-white transition">Open Signals →</a>
+            </div>
+        </div>
+        {% if open_rows %}
+        <div class="divide-y divide-dark-700">
+            {% for r in open_rows %}{% set s = r.sig %}
+            <div class="flex items-center gap-2.5 py-2 text-xs">
+                {{ m.tf(r.tf_label) }}
+                <span class="text-white font-medium w-20 truncate">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
+                <span class="w-12">{{ m.dir(s.direction) }}</span>
+                <span class="flex-1 text-gray-400 truncate">
+                    {% if s.status == 'active' %}<span class="text-green-400">Aktif</span>{% if r.sl_be %} · <span class="text-gray-300">SL girişte</span>{% endif %}
+                    {% elif s.status == 'waiting_entry' %}Limit bekliyor
+                    {% elif r.c2_open %}<span class="text-accent-blue">C2 açık</span>
+                    {% else %}MSS bekliyor{% endif %}
+                </span>
+                <span class="text-right w-24">
+                    {% if s.status == 'active' %}{{ m.rv(r.live_r) }}
+                    {% elif r.to_entry_r is not none %}<span class="text-gray-400">girişe {{ '%.2f'|format(r.to_entry_r) }}R</span>
+                    {% else %}<span class="text-gray-600">—</span>{% endif %}
+                </span>
+                <span class="text-right w-14 text-gray-500">{{ r.age }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% if open_more %}<p class="text-[10px] text-gray-500 mt-2">+{{ open_more }} işlem daha · Open Signals</p>{% endif %}
+        {% else %}
+        <p class="py-6 text-center text-sm text-gray-500">Açık veya bekleyen işlem yok.</p>
+        {% endif %}
+    </section>
+
+    <!-- Son kapananlar -->
+    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <div class="flex items-center justify-between mb-3">
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Son kapananlar</p>
+            <a href="/signals/crypto?tab=closed" class="text-xs text-accent-blue hover:text-white transition">Geçmiş →</a>
+        </div>
+        {% if recent_closed %}
+        <div class="divide-y divide-dark-700">
+            {% for c in recent_closed %}{% set s = c.sig %}
+            <div class="flex items-center gap-2.5 py-2 text-xs">
+                <span class="w-20 text-gray-500 whitespace-nowrap">{{ c.closed_label }}</span>
+                {{ m.tf(c.tf_label) }}
+                <span class="text-white font-medium w-20 truncate">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
+                <span class="w-12">{{ m.dir(s.direction) }}</span>
+                <span class="flex-1 text-gray-400">{{ c.how }}</span>
+                <span class="text-right w-16 font-semibold">{{ m.rv(c.r) }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="py-6 text-center text-sm text-gray-500">Henüz kapanan işlem yok.</p>
+        {% endif %}
+    </section>
+
+    <!-- Potansiyel 1D CRT -->
+    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <div class="flex items-center justify-between mb-3">
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+                Potansiyel 1D CRT <span class="text-gray-400">({{ potentials|length }})</span>
+            </p>
+            <span class="text-[10px] text-gray-600">CISD/MSS onaylı, tüm kapılardan geçmiş</span>
+        </div>
+        {% if potentials %}
+        <div class="divide-y divide-dark-700">
+            {% for p in potentials %}{% set s = p.sig %}
+            <div class="py-2 text-xs">
+                <div class="flex items-center gap-2.5">
+                    <span class="text-white font-medium w-20 truncate">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
+                    <span class="w-12">{{ m.dir(s.direction) }}</span>
+                    {% if p.c2_open %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-accent-blue/15 text-accent-blue">C2 AÇIK</span>
+                    <span class="text-gray-400">kapanışa {{ p.c2_left }}</span>
+                    {% else %}
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">C2 KAPALI</span>
+                    <span class="text-gray-400">limit bekliyor</span>
+                    {% endif %}
+                    <span class="ml-auto text-gray-400">Skor <span class="text-white">{{ s.bias_score|int if s.bias_score is not none else '-' }}</span> · R:R <span class="text-white">{{ '%.2f'|format(s.planned_rr) if s.planned_rr is not none else '-' }}</span></span>
+                </div>
+                <p class="mt-1 text-[11px] text-gray-500 font-mono">
+                    E {{ s.entry_price|fmt_price }} · SL {{ s.stop_loss|fmt_price }} · TP {{ s.take_profit|fmt_price }}
+                    {% if p.to_entry_r is not none %}<span class="text-gray-400"> · girişe {{ '%.2f'|format(p.to_entry_r) }}R</span>{% endif %}
+                </p>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="py-6 text-center text-sm text-gray-500">Bekleyen 1D yapı yok.</p>
+        {% endif %}
+    </section>
+
+    <!-- Dikkat -->
+    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+        <div class="flex items-center justify-between mb-3">
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Dikkat</p>
+            <span class="text-[10px] text-gray-600">son 24–48 saat</span>
+        </div>
+        {% if attention %}
+        <div class="space-y-2">
+            {% for a in attention %}
+            <div class="flex items-start gap-2.5 text-xs">
+                <span class="mt-1 w-1.5 h-1.5 rounded-full shrink-0
+                    {% if a.level == 'error' %}bg-red-500{% elif a.level == 'warn' %}bg-amber-400{% else %}bg-accent-blue{% endif %}"></span>
+                <span class="w-20 shrink-0 text-gray-500 whitespace-nowrap">{{ a.ts_label }}</span>
+                <span class="text-gray-300 break-words min-w-0">{{ a.text }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="py-6 text-center text-sm text-green-400/80">Her şey yolunda — dikkat gerektiren bir şey yok.</p>
+        {% endif %}
+    </section>
+
+</div>
