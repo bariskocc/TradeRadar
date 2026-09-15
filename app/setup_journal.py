@@ -291,7 +291,9 @@ def note(
             rec["shadow"] = _shadow_init(rec)
             changed = True
         detail = _detail(score, rr, bias, weekly_bias, c2_closed)
-        if detail and rec.get("detail") != detail:
+        # Skor/RR tasimayan bir degerlendirme (or. seviyesi bir kez hesaplanan elenen aday)
+        # onceki skorlu detayi ezmesin.
+        if detail and rec.get("detail") != detail and (score is not None or rr is not None or not rec.get("detail")):
             rec["detail"] = detail
             changed = True
         if stage == SIGNAL_STAGE and rec.get("outcome") != "signal":
