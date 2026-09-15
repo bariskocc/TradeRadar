@@ -57,6 +57,10 @@ _TF_SUFFIX = {
     "1h": "kline_1h",
 }
 _SUFFIX_TF = {v: k for k, v in _TF_SUFFIX.items()}
+# Forming 1D / seans 4H-1D kovasi her 1H mesajinda yeniden hesaplanir; bunun icin serinin
+# yalniz sonu gerekir (bir gun <= 24 1H mum). Eskiden tum seri (binlerce satir) kopyalanip
+# taraniyordu -- 15.09 sabah mum kapanislari 47-94 sn gecikti, CPU'nun buyuk kismi buradaydi.
+_FORMING_TAIL = 48
 
 
 class MarketDataStore:
@@ -90,12 +94,32 @@ class MarketDataStore:
             "volume": float(candle.get("volume", 0.0)),
         }
         if df is None or df.empty:
-            df = pd.DataFrame([row], index=[idx])
-        else:
-            df.loc[idx] = row
-            cap = self._cap(timeframe)
-            if len(df) > cap:
-                df = df.tail(cap)
+            self._frames[key] = pd.DataFrame([row], index=[idx])
+            return
+        # Hizli yol (15.09): her WS mesaji bu metottan gecer ve cogu forming (son) mumu gunceller.
+        # `df.loc[idx] = dict` mesaj basina ~5 ms suruyordu -- profilde botun surekli CPU'sunun ana
+        # kalemi, mum kapanislari dakikalarca gecikti. Son mum: hucre bazli yazim; yeni mum: sona
+        # tek satir (sort gereksiz). Beklenmeyen durumda (index/dtype) eski yola dus.
+        try:
+            last = df.index[-1]
+            if idx == last and all(df[c].dtype.kind == "f" for c in row if c in df.columns) \
+                    and all(c in df.columns for c in row):
+                for c, v in row.items():
+                    df.iat[-1, df.columns.get_loc(c)] = v
+                return
+            if idx > last:
+                df = pd.concat([df, pd.DataFrame([row], index=[idx], columns=df.columns)])
+                cap = self._cap(timeframe)
+                if len(df) > cap:
+                    df = df.tail(cap)
+                self._frames[key] = df
+                return
+        except (TypeError, ValueError, KeyError):
+            pass
+        df.loc[idx] = row
+        cap = self._cap(timeframe)
+        if len(df) > cap:
+            df = df.tail(cap)
         df.sort_index(inplace=True)
         self._frames[key] = df
 
@@ -254,9 +278,12 @@ class BingXMarketData:
         last_ts = df1h.index[-1]
         if fx_session.is_dead_session(last_ts):
             return  # piyasa kapali: HTF mumu ilerlemez
+        recent = df1h.iloc[-_FORMING_TAIL:]
         for tf in ("4h", "1d"):
             start = fx_session.bucket_start(last_ts, tf)
-            bars = fx_session.drop_dead_session(df1h[df1h.index >= start])
+            # Kova basi son mumlarin icindeyse yalniz onlara bak; degilse (veri boslugu) tum seri.
+            src = recent if recent.index[0] <= start else df1h
+            bars = fx_session.drop_dead_session(src[src.index >= start])
             if bars.empty:
                 continue
             row = {
@@ -279,7 +306,8 @@ class BingXMarketData:
         df1h = self.store.get_df(symbol, "1h")
         if df1h is None or df1h.empty:
             return
-        df_work = df1h.copy()
+        # Store sirali (upsert_candle sort_index); ayni UTC gunu en fazla 24 mum -> son _FORMING_TAIL yeter.
+        df_work = df1h.iloc[-_FORMING_TAIL:].copy()
         idx = df_work.index
         if getattr(idx, "tz", None) is None:
             df_work.index = idx.tz_localize("UTC")
