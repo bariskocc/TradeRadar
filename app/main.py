@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request, Form, Depends, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -715,15 +716,21 @@ async def _render_signals_page(
     date_from: str = "",
     date_to: str = "",
     page: int = 1,
-    tf: str = "4h",
+    tf: str = "all",
 ):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    tf = _parse_tf(tf)
+    # Tek sayfada uc strateji (TF sutunu); tf yalniz istege bagli filtre (14.09).
+    tf = (tf or "all").strip().lower()
+    tf = tf if tf in ("4h", "1d", "1h") else "all"
     arrival_date_col = Signal.created_at
-    base_query = select(Signal).where(_tf_filter(tf))
+
+    # Arrival date varsayilani: bu haftanin Pazartesi'si (TSI). Parametre HIC yoksa uygulanir;
+    # kullanici alani bosaltip gonderirse (date_from=) tarih filtresi yok.
+    if "date_from" not in request.query_params:
+        date_from = _period_range("week", 0)[0].astimezone(_TSI).strftime("%Y-%m-%d")
 
     raw_market_types = request.query_params.getlist("market_type") or (market_type or [])
     normalized_market_values: list[str] = []
@@ -739,40 +746,42 @@ async def _render_signals_page(
     if not selected_markets and segment:
         selected_markets = list(SIGNAL_SEGMENT_MARKETS[segment])
 
+    def _tsi_day_start(value: str) -> datetime | None:
+        # Tarih alanlari TSI gunu (tablodaki ARRIVAL da TSI gosteriliyor).
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=_TSI).astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    # Sekme DISINDAKI tum filtreler: liste ve sekme sayaclari ayni kosullarla sayilir.
+    conds = []
+    if tf != "all":
+        conds.append(_tf_filter(tf))
     if selected_markets:
-        base_query = base_query.where(Signal.market_type.in_(selected_markets))
-
-    query = base_query
-
-    if tab == "active":
-        query = query.where(Signal.status == "active")
-    elif tab == "waiting":
-        query = query.where(Signal.status.in_(["waiting_entry", "pending_cisd"]))
-    elif tab == "closed":
-        query = query.where(Signal.status.in_(["expired", "breakeven"]))
-
+        conds.append(Signal.market_type.in_(selected_markets))
     if symbol:
-        query = query.where(Signal.symbol.ilike(f"%{symbol}%"))
+        conds.append(Signal.symbol.ilike(f"%{symbol}%"))
     if direction:
-        query = query.where(Signal.direction == direction.upper())
+        conds.append(Signal.direction == direction.upper())
     if status:
-        query = query.where(Signal.status == status)
+        conds.append(Signal.status == status)
     if result_filter:
-        query = query.where(Signal.result == result_filter)
-    if date_from:
-        try:
-            dt_from = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            query = query.where(arrival_date_col >= dt_from)
-        except ValueError:
-            pass
-    if date_to:
-        try:
-            dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=timezone.utc
-            )
-            query = query.where(arrival_date_col <= dt_to)
-        except ValueError:
-            pass
+        conds.append(Signal.result == result_filter)
+    dt_from = _tsi_day_start(date_from) if date_from else None
+    if dt_from is not None:
+        conds.append(arrival_date_col >= dt_from)
+    dt_to = _tsi_day_start(date_to) if date_to else None
+    if dt_to is not None:
+        conds.append(arrival_date_col < dt_to + timedelta(days=1))
+
+    tab_statuses = {
+        "active": ["active"],
+        "waiting": ["waiting_entry", "pending_cisd"],
+        "closed": ["expired", "breakeven"],
+    }
+    query = select(Signal).where(*conds)
+    if tab in tab_statuses:
+        query = query.where(Signal.status.in_(tab_statuses[tab]))
 
     count_query = select(func.count()).select_from(query.subquery())
     count_result = await db.execute(count_query)
@@ -792,31 +801,26 @@ async def _render_signals_page(
     result = await db.execute(query)
     signals = result.scalars().all()
 
-    market_filter = [Signal.market_type.in_(selected_markets), _tf_filter(tf)] if selected_markets else [_tf_filter(tf)]
-
-    active_count_r = await db.execute(
-        select(func.count()).where(*market_filter, Signal.status == "active")
-    )
-    active_count = active_count_r.scalar()
-    waiting_count_r = await db.execute(
-        select(func.count()).where(
-            *market_filter, Signal.status.in_(["waiting_entry", "pending_cisd"]),
-        )
-    )
-    waiting_count = waiting_count_r.scalar()
-    closed_count_r = await db.execute(
-        select(func.count()).where(*market_filter, Signal.status.in_(["expired", "breakeven"]))
-    )
-    closed_count = closed_count_r.scalar()
+    tab_counts = {}
+    for key, statuses in tab_statuses.items():
+        cnt = await db.execute(select(func.count()).where(*conds, Signal.status.in_(statuses)))
+        tab_counts[key] = int(cnt.scalar() or 0)
+    active_count = tab_counts["active"]
+    waiting_count = tab_counts["waiting"]
+    closed_count = tab_counts["closed"]
     total_count = active_count + waiting_count + closed_count
 
-    tf_active_counts: dict[str, int] = {}
-    for tf_key in ("4h", "1d", "1h"):
-        tf_filters = [_tf_filter(tf_key), Signal.status == "active"]
-        if selected_markets:
-            tf_filters.append(Signal.market_type.in_(selected_markets))
-        cnt = await db.execute(select(func.count()).where(*tf_filters))
-        tf_active_counts[tf_key] = int(cnt.scalar() or 0)
+    # Sekme / sayfa linkleri filtreleri tasir (tarih bos da olsa: "tum tarihler" secimi korunur).
+    qs_items: list[tuple[str, str]] = []
+    if tf != "all":
+        qs_items.append(("tf", tf))
+    for key, value in (("symbol", symbol), ("direction", direction), ("status", status), ("result", result_filter)):
+        if value:
+            qs_items.append((key, value))
+    if request.query_params.getlist("market_type"):
+        qs_items.extend(("market_type", m) for m in selected_markets)
+    qs_items.extend((("date_from", date_from or ""), ("date_to", date_to or "")))
+    filter_qs = urlencode(qs_items)
 
     page_title = SIGNAL_SEGMENT_LABELS.get(segment, "All Signals") if segment else "All Signals"
     active_page = f"signals_{segment}" if segment else "signals"
@@ -837,8 +841,9 @@ async def _render_signals_page(
         "active_page": active_page,
         "signals_base_path": signals_base_path,
         "tf": tf,
-        "tf_label": _tf_label(tf),
-        "tf_active_counts": tf_active_counts,
+        "tf_labels": _OPEN_TF_LABELS,
+        "filter_qs": filter_qs,
+        "week_start": _period_range("week", 0)[0].astimezone(_TSI).strftime("%Y-%m-%d"),
         "filters": {
             "symbol": symbol,
             "direction": direction,
@@ -864,7 +869,7 @@ async def signals_crypto_page(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     page: int = Query(default=1, ge=1),
-    tf: str = Query(default="4h"),
+    tf: str = Query(default="all"),
 ):
     return await _render_signals_page(
         request,
@@ -897,7 +902,7 @@ async def signals_global_page(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     page: int = Query(default=1, ge=1),
-    tf: str = Query(default="4h"),
+    tf: str = Query(default="all"),
 ):
     return await _render_signals_page(
         request,
@@ -930,7 +935,7 @@ async def signals_page(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     page: int = Query(default=1, ge=1),
-    tf: str = Query(default="4h"),
+    tf: str = Query(default="all"),
 ):
     return await _render_signals_page(
         request,
