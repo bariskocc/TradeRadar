@@ -692,8 +692,9 @@ async def _notify_potential_1d(session: AsyncSession, sig: Signal, cfg: dict) ->
         mid = await send_signal_potential(sig, c2_close_at=c2_close_at, reply_to=sig.tg_potential_id)
         if not mid:
             return
-        if sig.tg_potential_id is None:
-            sig.tg_potential_id = mid
+        # En son potansiyel mesaj saklanir: C2 KAPALI ilkine reply olarak gider, ACTIVE / IPTAL
+        # ise zincirin sonuna (C2 KAPALI varsa ona) reply olur (15.09: ACTIVE eski C2 ACIK'a gidiyordu).
+        sig.tg_potential_id = mid
         sig.tg_potential_state = state
         await session.commit()
         log.info(

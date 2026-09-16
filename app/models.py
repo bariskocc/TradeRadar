@@ -84,7 +84,7 @@ class Signal(Base):
 
     # Telegram: aktif sinyal mesajinin message_id'si (sonucu buna reply atmak icin)
     tg_message_id = Column(Integer, nullable=True)
-    # Telegram: 1D "POTANSIYEL CRT" mesaji (C2 durumu / iptal / ACTIVE buna reply)
+    # Telegram: EN SON 1D "POTANSIYEL CRT" mesaji (sonraki C2 durumu / iptal / ACTIVE buna reply)
     # ve en son hangi C2 durumuyla bildirildigi ('open' | 'closed'); tekrar gondermez.
     tg_potential_id = Column(Integer, nullable=True)
     tg_potential_state = Column(String, nullable=True)
