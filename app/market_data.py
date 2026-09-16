@@ -61,6 +61,9 @@ _SUFFIX_TF = {v: k for k, v in _TF_SUFFIX.items()}
 # yalniz sonu gerekir (bir gun <= 24 1H mum). Eskiden tum seri (binlerce satir) kopyalanip
 # taraniyordu -- 15.09 sabah mum kapanislari 47-94 sn gecikti, CPU'nun buyuk kismi buradaydi.
 _FORMING_TAIL = 48
+# BingX her ~5 sn "Ping" gonderir ve kripto akisi 7/24 surer: bu kadar sure hic mesaj yoksa
+# baglanti olu sayilir ve yeniden kurulur (bekci).
+_WS_RECV_TIMEOUT_SEC = 60
 
 
 class MarketDataStore:
@@ -416,7 +419,15 @@ class BingXMarketData:
                     except Exception:
                         log.exception("post-reconnect reconcile failed")
                     while self._running:
-                        raw = await ws.recv()
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=_WS_RECV_TIMEOUT_SEC)
+                        except TimeoutError:
+                            # Yari acik baglanti: ag degisince (Wi-Fi -> Ethernet, bekleme) TCP
+                            # "Established" kalir ama veri gelmez; ping_interval=None oldugu icin
+                            # recv sonsuza kadar bekliyordu (15.09 09:59, 00:36). Kopar ve yeniden baglan.
+                            raise ConnectionError(
+                                f"{_WS_RECV_TIMEOUT_SEC} sn veri yok (yari acik baglanti)"
+                            ) from None
                         await self._handle_raw(ws, raw)
             except asyncio.CancelledError:
                 break
