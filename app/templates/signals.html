@@ -188,7 +188,8 @@
                                 <div class="text-sm font-medium text-white">{{ fmt_ui_symbol(signal.symbol, signal.market_type) }}</div>
                             </td>
                             <td class="px-2 py-2 whitespace-nowrap">
-                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-dark-700 text-gray-300">{{ tf_labels.get(stf, stf|upper) }}</span>
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
+                                    {% if stf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif stf == '1h' %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">{{ tf_labels.get(stf, stf|upper) }}</span>
                             </td>
                             <td class="px-2 py-2 whitespace-nowrap">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-dark-700 text-gray-300">
