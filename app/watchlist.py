@@ -40,6 +40,19 @@ STATUS_META = {
 }
 
 
+# Onem = maddenin cevabi motoru/parayi ne kadar degistirebilir (kullanici istegi 21.09:
+# "onemsizler alt siralarda olsun"). Tetige yakinlik ikincil anahtar oldu -- bir bilgi maddesi
+# tetigi dolu diye bir kural maddesinin ustune cikmasin.
+#   1 = bir KURALI degistirebilir (giris/stop/kapi/skor) ya da para dogrudan etkilenir
+#   2 = dogrulama: canliya alinmis bir degisiklik tuttu mu, kapi ne eliyor
+#   3 = bilgi / saglik / bildirim ergonomisi -- motor karari degismez
+ONEM_META: dict[int, tuple[str, str]] = {
+    1: ("Yüksek", "text-accent-red"),
+    2: ("Orta", "text-accent-blue"),
+    3: ("Düşük", "text-gray-500"),
+}
+
+
 @dataclass
 class Bar:
     """Tek bir ilerleme cubugu: 'LONG 15/30' gibi."""
@@ -90,6 +103,7 @@ class WatchItem:
     md: str                     # IZLEME.md'deki BASLIK METNI (## isareti olmadan)
     measure: str = ""           # calistirilacak komut / bakilacak sayfa
     result: str = ""            # status="done" ise tek cumle sonuc
+    onem: int = 2               # 1 yuksek / 2 orta / 3 dusuk -- ONEM_META, siralamanin BIRINCIL anahtari
     progress_fn: Optional[Callable[[AsyncSession], Awaitable[Progress]]] = None
 
 
@@ -461,7 +475,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_session_anchor,
     ),
     WatchItem(
-        key="retrace", status="open", started="18.09",
+        key="retrace", status="open", started="18.09", onem=1,
         title="Geri çekilme derinliği — limit emri nereden dolar",
         trigger="60 çözülmüş kazanan setup (ilk okuma 28.09.2026)",
         measure="python scripts/retrace_stat.py",
@@ -469,11 +483,15 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_retrace,
     ),
     WatchItem(
-        key="entry_models", status="open", started="18.09",
+        key="entry_models", status="done", started="18.09",
         title="Entry modeli karşılaştırması",
         trigger="Varyant başına 60 karar verilebilir setup (ilk okuma 28.09.2026)",
         measure="python scripts/entry_model_stat.py",
         md="Entry modeli karşılaştırması (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
+        result="Bugünkü entry modeli KALIYOR (21.09): 230 karar verilebilir setupta hiçbir varyant "
+               "chosen'ı 0.15R geçmedi (chosen -0.281, en iyisi ifvg_far -0.253 R/setup); H2 de "
+               "geçmedi (alt kenar dolum -4.5 puan, R/setup yalnız +0.025). DFVG modeli reddedildi. "
+               "Açık not: skor>=7 & RR>=2 diliminde ifvg_far +0.463 vs chosen -0.259 ama n=15.",
         progress_fn=_p_entry_models,
     ),
     WatchItem(
@@ -485,15 +503,18 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_pd_midnight,
     ),
     WatchItem(
-        key="bias_journal", status="open", started="18.09",
+        key="bias_journal", status="open", started="18.09", onem=1,
         title="1D bias tahmin karnesi",
-        trigger="Ufuk başına 500 yönlü satır (ilk okuma 28.09.2026)",
+        # 21.09 ara okumasi: H1 battı (0/3 ufuk) ama hard filtre YERINDE KALDI -- karne 1-5 gun
+        # olcuyor, setuplar medyan 1.2 saat yasiyor. Maddenin kalan isi iki alt soru.
+        trigger="05.10: htf +2 ödülü hak edilmiş mi (hizalı −0.461 vs NEUTRAL −0.406) · "
+                "STRUCTURE_STALE_DAYS düşsün mü (bayat dal %52.0 vs taze AND %46.1)",
         measure="python scripts/bias_stat.py",
         md="1D bias tahmin karnesi (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
         progress_fn=_p_bias_journal,
     ),
     WatchItem(
-        key="prefill", status="open", started="18.09",
+        key="prefill", status="open", started="18.09", onem=3,
         title="Dolum öncesi koşu",
         trigger="0-25% ve >=50% kovalarının her birinde 100 dolan setup (ilk okuma 28.09.2026)",
         measure="python scripts/prefill_stat.py",
@@ -501,7 +522,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_prefill,
     ),
     WatchItem(
-        key="gated_potential", status="open", started="18.09",
+        key="gated_potential", status="open", started="18.09", onem=3,
         title="Elenen 1D setup bildirimi",
         trigger="02.10.2026: kapsam daraltıldıktan sonra günlük mesaj ~4'e indi mi (8'i aşarsa RR tabanı 1.8)",
         measure="potential_notices — gate dolu satırlar",
@@ -525,7 +546,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_direction,
     ),
     WatchItem(
-        key="partial_vs_be", status="open", started="17.09",
+        key="partial_vs_be", status="open", started="17.09", onem=1,
         title="Kısmi kâr vs BE-only",
         trigger="25 kısmi kârlı kapalı işlem",
         measure="python scripts/partial_vs_be.py",
@@ -533,7 +554,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_partial,
     ),
     WatchItem(
-        key="tight_stop_gate", status="open", started="18.09",
+        key="tight_stop_gate", status="open", started="18.09", onem=1,
         title="Dar stop kapısı — elenen setup TP'ye gidiyor mu?",
         trigger="20 çözülmüş elenen setup (kapı haftada ~1–2 eliyor)",
         measure="python scripts/tight_stop_stat.py",
@@ -541,7 +562,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_tight_stop_gate,
     ),
     WatchItem(
-        key="missed_quality", status="open", started="21.09",
+        key="missed_quality", status="open", started="21.09", onem=1,
         title="Retest skor kapısı — kazanan mı eliyor?",
         trigger="20 çözülmüş elenen setup (H3 için ayrıca her zamanlama diliminde 10)",
         measure="python scripts/missed_quality_stat.py",
@@ -549,15 +570,19 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_missed_quality,
     ),
     WatchItem(
-        key="c1_stop", status="open", started="17.09",
+        key="c1_stop", status="done", started="17.09",
         title="C1 ucu stop — gölge izleme",
         trigger="28.09.2026 değerlendirmesi (kardeş madde “Dar stop” ile aynı oturumda)",
         measure="python scripts/c1_stop_stat.py",
         md="C1 ucu stop — gölge izleme (başladı 17.09.2026, ⏰ değerlendirme 28.09.2026)",
+        result="C1 ucu stop KULLANILMIYOR (21.09): H1 her dilimde battı (havuz -0.096, 4H -0.082, "
+               "1H -0.160 R/işlem). Bugünkü SL'le TP olan 136 setupun 45'i C1'le stop olurdu, C1'in "
+               "kurtardığı sıfır. Fikri açık tutan skor>=7 dilimi n=102'de -0.009'a oturdu; kural "
+               "setupların %52'sinde zaten uygulanamıyor.",
         progress_fn=_p_c1_stop,
     ),
     WatchItem(
-        key="deleted_gate", status="open", started="19.09",
+        key="deleted_gate", status="open", started="19.09", onem=1,
         title="Silinen waiting setup — kapı kazanan sinyal mi eliyor?",
         trigger="20 çözülmüş silinen setup (~7/gün siliniyor; skor kapıları ~1,3/gün)",
         measure="python scripts/deleted_gate_stat.py",
@@ -565,7 +590,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_deleted_gate,
     ),
     WatchItem(
-        key="bias_1h", status="open", started="20.09",
+        key="bias_1h", status="open", started="20.09", onem=1,
         title="1D bias 1H'te iki kez mi eliyor?",
         trigger="25 çözülmüş bias elemesi (1H, ~2/gün) — “Skor kalemleri” ile aynı oturumda",
         measure="python scripts/bias_1h_stat.py",
@@ -573,7 +598,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_1h,
     ),
     WatchItem(
-        key="score_parts", status="open", started="16.09",
+        key="score_parts", status="open", started="16.09", onem=1,
         title="Skor kalemleri — kırılım izleme",
         trigger="28.09.2026 tarihinde ilk okuma (skor bandı 0–6'dan)",
         measure="python scripts/score_parts_stat.py",
@@ -581,22 +606,27 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_parts,
     ),
     WatchItem(
-        key="ws_watchdog", status="open", started="16.09",
+        key="ws_watchdog", status="open", started="16.09", onem=3,
         title="WS bekçisi — 60 sn veri yoksa yeniden bağlan",
         trigger="Bekçi günde birkaç kez GEREKSİZ tetiklenirse (normal gün 0–1)",
         measure="Dashboard sağlık şeridi → WS kopma sayısı; log'da “60 sn veri yok”",
         md="WS bekçisi — 60 sn veri yoksa yeniden bağlan (canlıya alındı 16.09.2026, `658424e`)",
     ),
     WatchItem(
-        key="shadow_stop", status="open", started="14.09",
+        key="shadow_stop", status="done", started="14.09",
         title="Dar stop — gölge izleme (4H/1D/1H)",
         trigger="28.09.2026 değerlendirmesi",
         measure="python scripts/stop_width_stat.py · scripts/c1_stop_stat.py · /setup-journal → shadow",
         md="Dar stop — gölge izleme, 4H/1D/1H (başladı 14.09.2026, ⏰ değerlendirme 28.09.2026)",
+        result="SL purge ucunda KALIYOR (21.09): 162 çözülmüş kazananla eğri monoton düşüyor "
+               "(k=1 -0.472 → k=0.75 -0.567) ve tepe k=1.00, ızgaranın kenarında — kazanç varsa daha "
+               "GENİŞ stop tarafında. 18.09'un 'tepe 0.75-0.85' okuması (21 kazanan) yanlışlandı. "
+               "Gölge kollarında 4H B_0.5'in geçmesi daraltmadan değil eklenen low_rr setuplarından "
+               "geliyor; işlem başına R A'nın altında (+0.141 vs +0.168).",
         progress_fn=_p_shadow,
     ),
     WatchItem(
-        key="journal_live", status="open", started="14.09",
+        key="journal_live", status="open", started="14.09", onem=3,
         title="Setup Journal canlıda",
         trigger="2 hafta sonra kapı × sonuç özeti (özellikle “1D bias opposite” satırı)",
         measure="/setup-journal",
@@ -631,7 +661,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c2_penalty,
     ),
     WatchItem(
-        key="trail_90", status="open", started="09.09",
+        key="trail_90", status="open", started="09.09", onem=3,
         title="Trail arm eşiği %90 — kazananları kesiyor mu?",
         trigger="Trail çıkışlarının ortalama R'si < 1R olursa",
         measure="/logs → Engine Report → çıkış türü dağılımı",
@@ -667,7 +697,7 @@ ITEMS: list[WatchItem] = [
                "ölçüyor; toplu cevabı karara bağlanmış “Kapı hunisi” maddesi verdi (16.09).",
     ),
     WatchItem(
-        key="crt60_off", status="open", started="10.09",
+        key="crt60_off", status="open", started="10.09", onem=3,
         title="CRT %60 invalidation KAPATILDI",
         trigger="Breach sonrası fill'le açılan işlemlerin sonucu kötüyse kuralı geri açmayı tartış",
         measure="/logs → Engine Report → BACKFILL etkisi",
@@ -948,6 +978,8 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
             "detail": render_section(item.md),
             "status_label": STATUS_META[item.status][0],
             "closeness": closeness(prog),
+            "onem_label": ONEM_META[item.onem][0],
+            "onem_class": ONEM_META[item.onem][1],
         }
         if item.status == "done":
             done_items.append(row)
@@ -958,10 +990,13 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
         else:
             open_items.append(row)
 
-    # Once tetige en yakin; esitlikte en eski izleme. Aksiyon kumesi de en eskiden baslar.
-    open_items.sort(key=lambda r: (-r["closeness"], _started_key(r["item"].started)))
-    action.sort(key=lambda r: _started_key(r["item"].started))
-    passive.sort(key=lambda r: _started_key(r["item"].started))
+    # Siralama (21.09, kullanici istegi "onemsizler alt siralarda olsun"): BIRINCIL anahtar
+    # ONEM, ikincil tetige yakinlik, esitlikte en eski izleme. Eskiden yalniz yakinlik vardi ve
+    # bir bildirim maddesi sayaci doldu diye kural maddesinin ustune cikabiliyordu.
+    open_items.sort(key=lambda r: (r["item"].onem, -r["closeness"],
+                                   _started_key(r["item"].started)))
+    action.sort(key=lambda r: (r["item"].onem, _started_key(r["item"].started)))
+    passive.sort(key=lambda r: (r["item"].onem, _started_key(r["item"].started)))
 
     # "Ne bekliyor" ozeti: ayni tarihi bekleyen maddeler IZLEME.md'de zaten "ayni oturumda oku"
     # diye bagli (kardes maddeler ayni golge verisini okuyor). 18 satirlik listede bunu gormek
