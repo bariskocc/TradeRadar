@@ -113,12 +113,14 @@ SHADOW_C1 = "c1"
 # Varyantlar scanner tarafindan hesaplanip `note(entries=...)` ile dondurulur:
 #   cisd / mss                -> iki yapisal aday (motor yalnizca kazanani tutuyordu)
 #   ifvg_near / mid / far     -> IFVG bolgesinin ust-orta-alt noktasi (LONG'da near = ust)
+#   bpr_near / mid / far      -> BPR (iki FVG kesisimi) bolgesinin ayni uc noktasi (21.09)
 #   dfvg_near / mid / far     -> kirilim sonrasi birakilan FVG (yeni model)
 #   chosen                    -> motorun fiilen sectigi entry (temel cizgi)
 # Entry SL-TP arasinda degilse varyant "invalid" yazilir (izlenmez) -- ne siklikta
 # uygulanamadigi da olcumun parcasi. Karar kurali: IZLEME.md "Entry modeli karsilastirmasi".
 ENTRY_VARIANTS = ("chosen", "cisd", "mss",
                   "ifvg_near", "ifvg_mid", "ifvg_far",
+                  "bpr_near", "bpr_mid", "bpr_far",
                   "dfvg_near", "dfvg_mid", "dfvg_far")
 
 _CACHE: dict[tuple, dict] = {}

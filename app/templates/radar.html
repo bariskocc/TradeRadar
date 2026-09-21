@@ -142,9 +142,12 @@ function c2Badge(closed) {
     return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-red-400 bg-red-500/15" title="Purge (C2) ${htf} candle is still open">Not closed</span>`;
 }
 
-function ifvgBadge(ifvg) {
-    if (!ifvg) return '<span class="text-gray-600">-</span>';
+// BPR = IFVG + ayni yonlu FVG kesisimi (IFVG'nin guclu hali) -> ayri sutun yerine
+// ayni sutunda "BPR" yazilir.
+function ifvgBadge(ifvg, bpr) {
     const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : '15M');
+    if (bpr) return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-emerald-400 bg-emerald-500/10" title="${ltf} BPR: inverted FVG overlapping a same-side FVG">BPR</span>`;
+    if (!ifvg) return '<span class="text-gray-600">-</span>';
     return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-purple bg-accent-purple/10" title="${ltf} inverted FVG exists (may not be used as entry)">✓</span>`;
 }
 
@@ -155,6 +158,7 @@ function modelBadge(model) {
     if (!model) return '<span class="text-gray-600">-</span>';
     const meta = {
         ifvg: ['text-accent-purple bg-accent-purple/10', 'Entry at the near edge of the LTF IFVG'],
+        bpr:  ['text-emerald-400 bg-emerald-500/10',      'Entry at the near edge of the BPR (two overlapping FVGs)'],
         cisd: ['text-accent-blue bg-accent-blue/10',     'Entry at the CISD block open'],
         mss:  ['text-amber-400 bg-amber-500/10',         'Entry at the last swing before the purge (MSS)'],
     }[model] || ['text-gray-400 bg-gray-500/10', ''];
@@ -229,7 +233,7 @@ async function loadRadar() {
                     <td class="px-2 py-2 whitespace-nowrap">${pdBadge(s.pd)}</td>
                     <td class="px-2 py-2 whitespace-nowrap">${c2Badge(s.c2_closed)}</td>
                     <td class="px-2 py-2 text-gray-400 text-xs whitespace-nowrap"${s.crt_bar_time ? ` title="C1 mumu: ${s.crt_bar_time} TSİ"` : ''}>${s.purge_time || '<span class="text-gray-600">-</span>'}</td>
-                    <td class="px-2 py-2 whitespace-nowrap">${hideRr ? '<span class="text-gray-600">-</span>' : ifvgBadge(s.ifvg)}</td>
+                    <td class="px-2 py-2 whitespace-nowrap">${hideRr ? '<span class="text-gray-600">-</span>' : ifvgBadge(s.ifvg, s.bpr)}</td>
                     <td class="px-2 py-2 whitespace-nowrap">${hideRr ? '<span class="text-gray-600">-</span>' : modelBadge(s.model)}</td>
                     <td class="px-2 py-2 text-gray-300 whitespace-nowrap">${rr}</td>
                     <td class="px-2 py-2 whitespace-nowrap"><span class="px-2 py-0.5 rounded text-[11px] font-medium ${badge}">${s.label}</span></td>

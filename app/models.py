@@ -89,10 +89,15 @@ class Signal(Base):
     tg_potential_id = Column(Integer, nullable=True)
     tg_potential_state = Column(String, nullable=True)
 
-    # Entry modeli: cisd (MSS seviyesi) | ifvg (LTF IFVG %50)
+    # Entry modeli: cisd (MSS seviyesi) | mss | ifvg (LTF IFVG kenari) | bpr (iki FVG kesisimi)
     entry_model = Column(String, nullable=True)
     ifvg_low = Column(Float, nullable=True)
     ifvg_high = Column(Float, nullable=True)
+    # BPR bolgesi (21.09): invert olmus FVG ile donus hamlesinin FVG'sinin KESISIMI.
+    # IFVG kolonlari gibi "bolge var mi" bilgisidir; entry olarak kullanilip
+    # kullanilmadigini entry_model soyler.
+    bpr_low = Column(Float, nullable=True)
+    bpr_high = Column(Float, nullable=True)
 
     # Status: pending_cisd → waiting_entry → active → expired (win/loss) | breakeven
     status = Column(String, default="waiting_entry")

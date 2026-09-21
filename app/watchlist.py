@@ -208,6 +208,15 @@ async def _p_entry_models(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("entry varyantli setup", n, 60)], due=date(2026, 9, 28))
 
 
+async def _p_bpr(db: AsyncSession) -> Progress:
+    """BPR bolgesi olan setup sayisi (karar esigi 40 cozulmus setup)."""
+    t = _journal_table()
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(_journal_col("entries").like('%bpr_near%'))
+    ) or 0
+    return Progress(bars=[Bar("BPR'li setup", n, 40)])
+
+
 async def _p_pd_midnight(db: AsyncSession) -> Progress:
     """Duzeltmeden SONRA 00:00-00:30 UTC penceresinde dogan setup sayisi.
 
@@ -493,6 +502,14 @@ ITEMS: list[WatchItem] = [
                "geçmedi (alt kenar dolum -4.5 puan, R/setup yalnız +0.025). DFVG modeli reddedildi. "
                "Açık not: skor>=7 & RR>=2 diliminde ifvg_far +0.463 vs chosen -0.259 ama n=15.",
         progress_fn=_p_entry_models,
+    ),
+    WatchItem(
+        key="bpr", status="open", started="21.09", onem=1,
+        title="BPR entry modeli",
+        trigger="40 BPR'li çözülmüş setup: bpr_near, ifvg_near'ı 0,15 R/setup geçiyor mu",
+        measure="python scripts/entry_model_stat.py",
+        md="BPR entry modeli (canlıya alındı 21.09.2026, ⏰ tetik: 40 BPR'li çözülmüş setup)",
+        progress_fn=_p_bpr,
     ),
     WatchItem(
         key="pd_midnight", status="open", started="18.09",

@@ -25,6 +25,7 @@ _ENTRY_MODEL_LABELS = {
     "ifvg": "IFVG",
     "cisd": "CISD",
     "mss": "MSS",
+    "bpr": "BPR",
 }
 
 

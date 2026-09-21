@@ -42,6 +42,7 @@ from app.crt_engine import (
     compute_weekly_bias,
     detect_crt_setup,
     detect_displacement_fvg,
+    detect_ltf_bpr,
     detect_ltf_ifvg,
 )
 from app.database import async_session
@@ -279,6 +280,7 @@ def _set_radar(
     pd: str | None = None,
     c2_closed: bool | None = None,
     ifvg: bool | None = None,
+    bpr: bool | None = None,
     model: str | None = None,
     parts: dict | None = None,
     features: dict | None = None,
@@ -300,10 +302,10 @@ def _set_radar(
         stored_c2 = prev.get("c2_closed")
     if state in ("no_setup", "no_data"):
         stored_ifvg = ifvg
-    elif ifvg is not None:
-        stored_ifvg = bool(ifvg)
+        stored_bpr = bpr
     else:
-        stored_ifvg = prev.get("ifvg")
+        stored_ifvg = bool(ifvg) if ifvg is not None else prev.get("ifvg")
+        stored_bpr = bool(bpr) if bpr is not None else prev.get("bpr")
     _RADAR[key] = {
         "symbol": display_symbol,
         "market": market,
@@ -320,7 +322,9 @@ def _set_radar(
         "pd": pd,
         "c2_closed": stored_c2,
         "ifvg": stored_ifvg,
-        # Entry modeli: cisd | mss | ifvg. IFVG "var mi" (ifvg) ile "girisi
+        # BPR = IFVG ile ayni yonlu FVG'nin KESISIMI var mi (IFVG'nin guclu hali).
+        "bpr": stored_bpr,
+        # Entry modeli: cisd | mss | ifvg | bpr. Bolge "var mi" (ifvg/bpr) ile "girisi
         # hangi model verdi" (model) ayri sorular - IFVG-RR korumasindan sonra
         # gercekten ayrisiyorlar (IFVG var ama RR'yi kotulestirdigi icin CISD).
         "model": model if model is not None else (
@@ -981,6 +985,8 @@ def _apply_signal_levels(
     sig.entry_model = getattr(cisd, "entry_model", None) or "cisd"
     sig.ifvg_low = getattr(cisd, "ifvg_low", None)
     sig.ifvg_high = getattr(cisd, "ifvg_high", None)
+    sig.bpr_low = getattr(cisd, "bpr_low", None)
+    sig.bpr_high = getattr(cisd, "bpr_high", None)
     sig.status = status
 
 
@@ -1370,8 +1376,14 @@ def _maybe_ifvg_entry(
     (US100 08.09 1H: CISD 29485.74 -> RR 2.46 iken IFVG 29519.79 -> RR 1.31.)
     Mutlak RR esigi burada uygulanmaz (cagiran min_rr ile eler).
 
-    IFVG entry olarak kullanilmasa bile zone bilgisi (ifvg_low/high) cisd
-    uzerine yazilir; UI'daki IFVG rozeti bunu gosterir.
+    BPR (21.09, kullanici istegi) ayni ailenin daha guclu hali: invert olmus FVG
+    ile donus hamlesinin biraktigi AYNI YONLU FVG kesisiyorsa entry KESISIM
+    bolgesinden alinir (`entry_model = "bpr"`). Kesisim IFVG'nin icinde kaldigi
+    icin entry daha derin, RR daha iyi, dolum olasiligi bir miktar dusuktur --
+    bu yuzden once BPR denenir, olmazsa IFVG, o da olmazsa CISD/MSS kalir.
+
+    Zone bilgisi (ifvg_low/high, bpr_low/high) entry olarak kullanilmasa bile cisd
+    uzerine yazilir; UI'daki IFVG / BPR rozeti bunu gosterir.
     """
     planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     hours = c2_hours if c2_hours is not None else _c2_hours_for_setup(setup)
@@ -1386,25 +1398,35 @@ def _maybe_ifvg_entry(
         crt_bar_time=setup.crt_bar_time,
         c2_hours=hours,
     )
+    bpr = detect_ltf_bpr(df_ltf, setup.direction, zone)
     if zone is not None:
         cisd.ifvg_low = zone.low
         cisd.ifvg_high = zone.high
-    if not allow_ifvg or zone is None:
+    if bpr is not None:
+        cisd.bpr_low = bpr.low
+        cisd.bpr_high = bpr.high
+    if not allow_ifvg:
         return cisd, planned
-    ifvg_entry = zone.entry_for(setup.direction)
-    if not _entry_between_stops(
-        setup.direction, ifvg_entry, float(cisd.stop_loss), float(cisd.take_profit),
-    ):
-        return cisd, planned
-    ifvg_rr = _calc_planned_rr(ifvg_entry, cisd.stop_loss, cisd.take_profit)
-    if ifvg_rr is None or (planned is not None and ifvg_rr < planned):
-        return cisd, planned  # IFVG girisi RR'yi kotulestiriyor -> CISD/MSS kal
-    cisd.entry_price = ifvg_entry
-    cisd.entry_model = "ifvg"
-    return cisd, ifvg_rr
+    # Guclu olan once: BPR -> IFVG. Ikisi de ayni RR korumasina tabi.
+    for cand, model in ((bpr, "bpr"), (zone, "ifvg")):
+        if cand is None:
+            continue
+        cand_entry = cand.entry_for(setup.direction)
+        if not _entry_between_stops(
+            setup.direction, cand_entry, float(cisd.stop_loss), float(cisd.take_profit),
+        ):
+            continue
+        cand_rr = _calc_planned_rr(cand_entry, cisd.stop_loss, cisd.take_profit)
+        if cand_rr is None or (planned is not None and cand_rr < planned):
+            continue  # bolge girisi RR'yi kotulestiriyor -> bir sonraki adaya / CISD'ye kal
+        cisd.entry_price = cand_entry
+        cisd.entry_model = model
+        return cisd, cand_rr
+    return cisd, planned
 
 
 def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
+    """FVG bolgesinden (IFVG veya BPR) entry alinabilir mi?"""
     cfg = cfg or {}
     if cfg.get("ifvg_requires_c2_closed") and not setup.c2_closed:
         return False
@@ -1419,10 +1441,13 @@ def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
     C2 sarti stratejinin `require_c2_closed` ayarina baglidir; C2 kapanisini
     zorunlu tutmayan strateji (1H-5M) icin skor7 kapisi da C2 aramaz.
 
-    "Yapisal entry" = IFVG DISINDAKI adaylar. `entry_model` artik "cisd" ve
+    "Yapisal entry" = FVG BOLGESI DISINDAKI adaylar. `entry_model` artik "cisd" ve
     "mss"i ayirt ediyor (Entry Model sutunu icin); ikisi de yapisal seviye
     oldugundan bu kapi acisindan esdegerdir - eskiden ikisi de "cisd" yaziyordu,
     kontrol `== "cisd"` kalsaydi MSS girisleri sessizce elenirdi.
+    BPR de IFVG gibi bolge girisidir ve bu kapidan GECMEZ (kullanici karari 21.09:
+    BPR entry seviyesini degistirir, kapi sikiligini degistirmez; gevsetme karari
+    olcum birikince verilecek).
     """
     cfg = cfg or {}
     if not cfg.get("score7_requires_cisd_pd"):
@@ -1431,7 +1456,7 @@ def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
         return True
     model = getattr(cisd, "entry_model", None) or "cisd"
     c2_ok = bool(setup.c2_closed) or not cfg.get("require_c2_closed")
-    return c2_ok and model != "ifvg" and bool(setup.pd_array)
+    return c2_ok and model not in ("ifvg", "bpr") and bool(setup.pd_array)
 
 
 def _level_features(entry: float, stop_loss: float, df_ltf: pd.DataFrame | None) -> dict:
@@ -1454,7 +1479,7 @@ def _level_features(entry: float, stop_loss: float, df_ltf: pd.DataFrame | None)
     return out
 
 
-def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None) -> dict:
+def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None, bpr=None) -> dict:
     """AYNI setup icin butun aday entry seviyeleri (yalniz OLCUM -- Setup Journal `entries`).
 
     Motor tek bir entry secer ve digerleri kaybolur; bu yuzden "hangi model daha iyi" sorusu
@@ -1486,6 +1511,15 @@ def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None) -> dict:
             out["ifvg_near"] = float(z_hi if long else z_lo)     # entry_for: girise en yakin
             out["ifvg_mid"] = round((float(z_lo) + float(z_hi)) / 2, 8)
             out["ifvg_far"] = float(z_lo if long else z_hi)      # derin kenar (RR yuksek)
+        # BPR: IFVG ile ayni yonlu FVG'nin kesisimi (varsa). Motor artik near kenari
+        # kullaniyor; uc nokta da izlenir ki "BPR gercekten daha iyi mi" olculebilsin.
+        b_lo, b_hi = getattr(cisd, "bpr_low", None), getattr(cisd, "bpr_high", None)
+        if b_lo is None and bpr is not None:
+            b_lo, b_hi = bpr.low, bpr.high
+        if b_lo is not None and b_hi is not None:
+            out["bpr_near"] = float(b_hi if long else b_lo)
+            out["bpr_mid"] = round((float(b_lo) + float(b_hi)) / 2, 8)
+            out["bpr_far"] = float(b_lo if long else b_hi)
         # 3. model: kirilimi yapan hamlenin arkasinda biraktigi FVG
         if getattr(cisd, "cisd_time", None) is not None:
             d = detect_displacement_fvg(
@@ -1517,11 +1551,13 @@ def _preview_trade_levels(
         crt_bar_time=setup.crt_bar_time,
         c2_hours=c2_hours,
     )
+    bpr_zone = detect_ltf_bpr(df_ltf, setup.direction, zone)
     allow_ifvg = _ifvg_allowed(setup, cfg)
-    # `ifvg` = bolge VAR MI (varlik). Kullanilip kullanilmadigi ayri bir soru;
+    # `ifvg` / `bpr` = bolge VAR MI (varlik). Kullanilip kullanilmadigi ayri bir soru;
     # onu `model` cevaplar. Eskiden allow_ifvg ile AND'lendigi icin C2
     # formasyondayken IFVG fiilen var olsa bile "-" gorunuyordu.
     ifvg = zone is not None
+    bpr = bpr_zone is not None
     cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=c2_hours)
     if cisd is not None:
         cisd, planned = _maybe_ifvg_entry(
@@ -1534,9 +1570,10 @@ def _preview_trade_levels(
             "sl": cisd.stop_loss,
             "tp": cisd.take_profit,
             "ifvg": ifvg,
+            "bpr": bpr,
             "model": getattr(cisd, "entry_model", None) or "cisd",
             "features": _level_features(cisd.entry_price, cisd.stop_loss, df_ltf),
-            "entries": _entry_candidates(setup, cisd, df_ltf, zone=zone) or None,
+            "entries": _entry_candidates(setup, cisd, df_ltf, zone=zone, bpr=bpr_zone) or None,
             "cisd_confirmed": bool(getattr(cisd, "confirmed", False)),
             "cisd_time": getattr(cisd, "cisd_time", None),
         }
@@ -1545,8 +1582,13 @@ def _preview_trade_levels(
         tp = float(
             setup.key_level_high if setup.direction == "LONG" else setup.key_level_low
         )
-        z_entry = zone.entry_for(setup.direction)
-        if _entry_between_stops(setup.direction, z_entry, sl, tp):
+        # CISD onayi yokken de guclu olan once: BPR kesisimi, yoksa IFVG.
+        for cand, model in ((bpr_zone, "bpr"), (zone, "ifvg")):
+            if cand is None:
+                continue
+            z_entry = cand.entry_for(setup.direction)
+            if not _entry_between_stops(setup.direction, z_entry, sl, tp):
+                continue
             return {
                 "rr": _calc_planned_rr(z_entry, sl, tp),
                 "features": _level_features(z_entry, sl, df_ltf),
@@ -1554,10 +1596,11 @@ def _preview_trade_levels(
                 "sl": sl,
                 "tp": tp,
                 "ifvg": True,
-                "model": "ifvg",
+                "bpr": bpr,
+                "model": model,
             }
-        return {"ifvg": True}
-    return {"ifvg": ifvg}
+        return {"ifvg": True, "bpr": bpr}
+    return {"ifvg": ifvg, "bpr": bpr}
 
 
 def _hits_tp(direction: str, high: float, low: float, take_profit: float) -> bool:

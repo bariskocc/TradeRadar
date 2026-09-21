@@ -146,9 +146,12 @@
                 </td>
                 {# IFVG = bolge VAR MI (varlik); MODEL = giris hangi modelden geldi. IFVG-RR
                    korumasindan sonra ikisi ayrisabiliyor: IFVG var ama RR'yi kotulestirdigi
-                   icin CISD ile girilmis olabilir. #}
+                   icin CISD ile girilmis olabilir. Bolge BPR ise (iki FVG kesisiyor) ayni
+                   sutun "BPR" yazar -- BPR zaten IFVG'nin guclu halidir, ayri sutun gerekmez. #}
                 <td class="px-2 py-2 text-center whitespace-nowrap">
-                    {% if s.ifvg_low is not none or s.ifvg_high is not none or s.entry_model == 'ifvg' %}
+                    {% if s.bpr_low is not none or s.bpr_high is not none or s.entry_model == 'bpr' %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400" title="BPR: IFVG + ayni yonlu FVG kesisimi{% if s.bpr_low is not none and s.bpr_high is not none %} {{ s.bpr_low }}–{{ s.bpr_high }}{% endif %}">BPR</span>
+                    {% elif s.ifvg_low is not none or s.ifvg_high is not none or s.entry_model == 'ifvg' %}
                     <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="LTF IFVG{% if s.ifvg_low is not none and s.ifvg_high is not none %} {{ s.ifvg_low }}–{{ s.ifvg_high }}{% endif %}">✓</span>
                     {% else %}
                     <span class="text-gray-600 text-xs">-</span>
@@ -156,7 +159,9 @@
                 </td>
                 <td class="px-2 py-2 text-center whitespace-nowrap">
                     {% set em = s.entry_model or 'cisd' %}
-                    {% if em == 'ifvg' %}
+                    {% if em == 'bpr' %}
+                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400">BPR</span>
+                    {% elif em == 'ifvg' %}
                     <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple">IFVG</span>
                     {% elif em == 'mss' %}
                     <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400">MSS</span>

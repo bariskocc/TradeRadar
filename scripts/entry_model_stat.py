@@ -49,6 +49,7 @@ MIN_EDGE_R = 0.15      # chosen'i R/setup olarak bu kadar gecmeli
 
 VARIANTS = ("chosen", "cisd", "mss",
             "ifvg_near", "ifvg_mid", "ifvg_far",
+            "bpr_near", "bpr_mid", "bpr_far",
             "dfvg_near", "dfvg_mid", "dfvg_far")
 ZERO = ("tp_before_entry", "no_touch")
 SKIP = ("ambiguous", "open", "pending", "filled")

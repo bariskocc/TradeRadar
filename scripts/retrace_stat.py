@@ -42,6 +42,7 @@ MIN_WINNERS = 60       # cozulmus kazanan setup; altinda karar yok
 MIN_EDGE_R = 0.15      # optimum, bugunku entry derinligini bu kadar gecmeli
 GRID = [round(0.05 * i, 2) for i in range(0, 19)]      # 0.00 .. 0.90
 NAMED = ("chosen", "cisd", "mss", "ifvg_near", "ifvg_mid", "ifvg_far",
+         "bpr_near", "bpr_mid", "bpr_far",
          "dfvg_near", "dfvg_mid", "dfvg_far")
 
 

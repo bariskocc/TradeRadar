@@ -1515,6 +1515,7 @@ async def api_radar(request: Request):
             "pd": e.get("pd"),
             "c2_closed": e.get("c2_closed"),
             "ifvg": e.get("ifvg"),
+            "bpr": e.get("bpr"),
             "model": e.get("model"),
             # "same_color": bool(e.get("same_color")),  # eski bilgi alani; UI'da gosterilmiyor
             # Setup'i tanimlayan mumlarin acilis zamani (TSI, "16.09 15:00"): purge = C2,

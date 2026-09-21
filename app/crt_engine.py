@@ -67,6 +67,10 @@ C2_RECLAIM_PENALTY = 4
 # yalnizca gercek displacement iceren FVG'leri kabul etmek. Ayarlanabilir.
 MIN_IFVG_GAP_RANGE_FRAC = 0.15
 _IFVG_RANGE_LOOKBACK = 20
+# BPR (Balanced Price Range): invert olan ters yonlu FVG'ye ek olarak, inversiyonu yapan
+# hamlenin biraktigi AYNI YONLU FVG de varsa ve ikisi KESISIYORSA ortak alan BPR'dir.
+# Ikinci FVG'nin orta mumu inversiyon mumundan en fazla bu kadar sonra olabilir (LTF mumu).
+_BPR_BARS_AFTER = 3
 _PD_MAJOR_LABELS = frozenset({"PDH", "PDL", "PWH", "PWL"})
 _PD_MONTHLY_LABELS = frozenset({"PMH", "PML"})
 _PD_STRUCT_LABELS = frozenset({"FVG", "OB"})
@@ -121,9 +125,12 @@ class CISDConfirmation:
     cisd_price: float  # MSS / market kirilim seviyesi
     cisd_time: Optional[datetime] = None  # MSS onay mumunun acilis zamani
     mss_ref_time: Optional[datetime] = None  # Kirilan swing mumunun acilis zamani
-    entry_model: str = "cisd"  # cisd | mss | ifvg  (ifvg'yi scanner ezer)
+    entry_model: str = "cisd"  # cisd | mss | ifvg | bpr  (ifvg/bpr'yi scanner ezer)
     ifvg_low: Optional[float] = None
     ifvg_high: Optional[float] = None
+    # BPR (iki FVG'nin kesisimi) varsa bolgesi; IFVG bolgesinin ICINDE kalir.
+    bpr_low: Optional[float] = None
+    bpr_high: Optional[float] = None
     # Iki adayin HAM seviyeleri. `_pick_wider_stop` yalnizca kazanani dondurdugu icin
     # kaybeden aday kayboluyordu; entry modeli karsilastirmasi (Setup Journal `entries`)
     # ayni setupta ikisini de izlemek zorunda. YALNIZ OLCUM -- motor karari bunlari kullanmaz.
@@ -1150,7 +1157,7 @@ class IFVGZone:
     high: float
     mid: float
     inverted_time: datetime
-    kind: str  # "bull" | "bear"
+    kind: str  # "bull" | "bear" | "bpr" (BPR'de low/high iki FVG'nin KESISIMIDIR)
     # Bosluk / son 20 LTF mumunun ort. range'i. Yalniz OLCUM (MIN_IFVG_GAP_RANGE_FRAC
     # esiginin dogru yerde olup olmadigini sonradan veriyle sorabilmek icin).
     gap_frac: Optional[float] = None
@@ -1380,6 +1387,88 @@ def detect_ltf_ifvg(
             gap_frac=round((z_hi - z_lo) / _avg_range, 4) if _avg_range > 0 else None,
         )
     return picked
+
+
+def detect_ltf_bpr(
+    df_ltf: Optional[pd.DataFrame],
+    direction: str,
+    zone: Optional[IFVGZone],
+    *,
+    bars_after: int = _BPR_BARS_AFTER,
+) -> Optional[IFVGZone]:
+    """BPR: invert olmus IFVG ile, inversiyonu yapan hamlenin biraktigi AYNI YONLU
+    FVG'nin KESISIMI. Yoksa None.
+
+    IFVG'de reversal kaniti tek sarta baglidir: fiyat ters yonlu FVG'nin tamamen
+    otesinde kapanir. BPR'de buna ikinci bir kanit eklenir -- donus hamlesi kendi
+    yonunde bir imbalans birakir ve bu imbalans eski FVG ile ust uste biner. Ortak
+    alan hem "invert olmus arz/talep" hem "taze displacement boslugu" oldugu icin
+    daha guclu bir konfirmasyon sayilir; entry de oradan alinir.
+
+    LONG: invert olmus BEAR FVG + yeni BOGA FVG (high[i-1] < low[i+1]).
+    SHORT: simetrik. Ikinci FVG'nin orta mumu inversiyon mumunun bir oncesinden
+    `bars_after` sonrasina kadar aranir (tipik olarak inversiyon mumunun kendisi).
+
+    Donen bolge KESISIMDIR: LONG'da [max(lo), min(hi)] -- yani IFVG'nin ust kenarindan
+    daha asagida, daha derin bir entry (RR daha iyi, dolum olasiligi daha dusuk).
+    `kind` "bpr" yazilir; `entry_for` aynen calisir (LONG'da ust, SHORT'ta alt kenar).
+
+    Ikinci FVG'ye ayni gurultu filtresi (MIN_IFVG_GAP_RANGE_FRAC) uygulanir; kesisimin
+    kendisine asgari boyut sarti YOKTUR (kesisim tanim geregi daha kucuk). IFVG'nin
+    mitigasyon kontrolu zaten yapilmistir, kesisim onun icinde kaldigi icin tekrarlanmaz.
+    """
+    if df_ltf is None or df_ltf.empty or zone is None:
+        return None
+    work = _drop_forming_bar(df_ltf.sort_index())
+    if work is None or len(work) < 3:
+        return None
+    work = work.copy()
+    if work.index.tz is None:
+        work.index = work.index.tz_localize("UTC")
+    else:
+        work.index = work.index.tz_convert("UTC")
+    if zone.inverted_time is None:
+        return None
+    inv_ts = _as_utc_ts(zone.inverted_time)
+    inverted_k = int(work.index.searchsorted(inv_ts, side="left"))
+    n = len(work)
+    if inverted_k >= n:
+        return None
+    z_lo, z_hi = float(zone.low), float(zone.high)
+    if z_hi <= z_lo:
+        return None
+    _avg_range = float((work["high"] - work["low"]).tail(_IFVG_RANGE_LOOKBACK).mean())
+    min_gap = MIN_IFVG_GAP_RANGE_FRAC * _avg_range if _avg_range > 0 else 0.0
+    long = direction == "LONG"
+    lo_i = max(1, inverted_k - 1)
+    hi_i = min(n - 2, inverted_k + max(0, bars_after))
+    picked: Optional[tuple[float, float, object]] = None
+    for i in range(lo_i, hi_i + 1):
+        a = work.iloc[i - 1]
+        b = work.iloc[i + 1]
+        if long:
+            f_lo, f_hi = float(a["high"]), float(b["low"])
+        else:
+            f_lo, f_hi = float(b["high"]), float(a["low"])
+        if f_hi <= f_lo:
+            continue                                  # ayni yonlu FVG yok
+        if min_gap > 0 and (f_hi - f_lo) < min_gap:
+            continue                                  # gurultu: gercek displacement yok
+        ov_lo, ov_hi = max(z_lo, f_lo), min(z_hi, f_hi)
+        if ov_hi <= ov_lo:
+            continue                                  # kesismiyor -> BPR degil, sadece IFVG
+        picked = (ov_lo, ov_hi, work.index[i])        # en son aday kazanir (IFVG ile ayni kural)
+    if picked is None:
+        return None
+    ov_lo, ov_hi, ts = picked
+    return IFVGZone(
+        low=round(ov_lo, 8),
+        high=round(ov_hi, 8),
+        mid=round((ov_lo + ov_hi) / 2.0, 8),
+        inverted_time=ts.to_pydatetime(),
+        kind="bpr",
+        gap_frac=round((ov_hi - ov_lo) / _avg_range, 4) if _avg_range > 0 else None,
+    )
 
 
 def _build_crt_setup(

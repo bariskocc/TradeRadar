@@ -273,8 +273,11 @@
                                 </span>
                                 {% endif %}
                             </td>
+                            {# Bolge BPR ise (iki FVG kesisiyor) bu sutun "BPR" yazar. #}
                             <td class="px-2 py-2 text-center whitespace-nowrap">
-                                {% if signal.ifvg_low is not none or signal.ifvg_high is not none or signal.entry_model == 'ifvg' %}
+                                {% if signal.bpr_low is not none or signal.bpr_high is not none or signal.entry_model == 'bpr' %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400" title="BPR: IFVG + ayni yonlu FVG kesisimi{% if signal.bpr_low is not none and signal.bpr_high is not none %} {{ signal.bpr_low }}–{{ signal.bpr_high }}{% endif %}">BPR</span>
+                                {% elif signal.ifvg_low is not none or signal.ifvg_high is not none or signal.entry_model == 'ifvg' %}
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="LTF IFVG{% if signal.ifvg_low is not none and signal.ifvg_high is not none %} {{ signal.ifvg_low }}–{{ signal.ifvg_high }}{% endif %}">✓</span>
                                 {% else %}
                                 <span class="text-gray-600 text-xs">-</span>
@@ -283,7 +286,9 @@
                             {# Entry Model: IFVG sutunu "bolge var mi", bu "giris hangi modelden". #}
                             <td class="px-2 py-2 text-center whitespace-nowrap">
                                 {% set em = signal.entry_model or 'cisd' %}
-                                {% if em == 'ifvg' %}
+                                {% if em == 'bpr' %}
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400" title="Giris: BPR (iki FVG kesisimi) bolgesinin girise en yakin kenari">BPR</span>
+                                {% elif em == 'ifvg' %}
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="Giris: IFVG'nin girise en yakin kenari">IFVG</span>
                                 {% elif em == 'mss' %}
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-400" title="Giris: purge oncesi son swing (MSS)">MSS</span>
