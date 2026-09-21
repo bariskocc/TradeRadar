@@ -27,7 +27,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BOOTSTRAP_LIMITS, SESSION_1H_BARS
@@ -41,6 +41,7 @@ from app.crt_engine import (
     htf_bias_with_age,
     compute_weekly_bias,
     detect_crt_setup,
+    detect_displacement_fvg,
     detect_ltf_ifvg,
 )
 from app.database import async_session
@@ -58,7 +59,7 @@ from app.exchange import (
     market_of,
     to_display_symbol,
 )
-from app.models import Signal
+from app.models import PotentialNotice, Signal
 from app import setup_journal as journal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
@@ -256,6 +257,11 @@ _RADAR: dict[tuple[str, str], dict] = {}
 _RADAR_META: dict = {"last_update": None}
 
 
+def _near_c1(direction: str | None, key_low, key_high):
+    """Yakin C1 ucu: LONG'da C1 low, SHORT'ta C1 high (TP karsi uc). Golge izlemenin C1 varyanti icin."""
+    return key_low if direction == "LONG" else key_high
+
+
 def _set_radar(
     display_symbol: str,
     market: str | None,
@@ -274,6 +280,10 @@ def _set_radar(
     c2_closed: bool | None = None,
     ifvg: bool | None = None,
     model: str | None = None,
+    parts: dict | None = None,
+    features: dict | None = None,
+    c1: float | None = None,
+    entries: dict | None = None,
     purge_time=None,
     crt_bar_time=None,
     strategy: str = STRATEGY_4H,
@@ -334,7 +344,8 @@ def _set_radar(
         strategy, display_symbol, market, stage,
         direction=direction, purge_time=purge_time, crt_bar_time=crt_bar_time,
         score=score, bias=bias, weekly_bias=weekly_bias, rr=rr, entry=entry, sl=sl, tp=tp,
-        c2_closed=c2_closed, model=model, now=now,
+        c2_closed=c2_closed, model=model, parts=parts, features=features, c1=c1,
+        entries=entries, now=now,
     )
 
 
@@ -587,24 +598,37 @@ def _note_deleted(s: Signal, reason: str) -> None:
         log.exception("potential cancel queue failed for %s", getattr(s, "symbol", "?"))
 
 
-async def _flush_potential_outbox() -> None:
+async def _flush_potential_outbox(session: AsyncSession | None = None) -> None:
     if not _POTENTIAL_OUTBOX:
         return
     items = list(_POTENTIAL_OUTBOX)
     _POTENTIAL_OUTBOX.clear()
     if not tg_configured():
         return
+    sent: list[int] = []
     for it in items:
         try:
             await send_potential_cancel(it["symbol"], it["direction"], it["reason"], it["reply_to"])
+            sent.append(int(it["reply_to"]))
         except Exception:
             log.warning("telegram potential cancel failed for %s", it["symbol"])
+    if session is not None and sent:
+        # Zincir kapandi: ayni mesaja ikinci bir IPTAL gitmesin.
+        try:
+            await session.execute(
+                update(PotentialNotice)
+                .where(PotentialNotice.tg_message_id.in_(sent))
+                .values(cancelled=True, updated_at=datetime.now(timezone.utc))
+            )
+            await session.commit()
+        except Exception:
+            log.exception("potential notice cancel flag failed")
 
 
 async def _flush_journal_and_potential(session: AsyncSession) -> None:
     """Olay isleyicilerinin sonunda: Setup Journal yazimi + bekleyen iptal reply'lari."""
     await journal.flush(session)
-    await _flush_potential_outbox()
+    await _flush_potential_outbox(session)
 
 
 _REJECTED_RETRY = timedelta(minutes=30)
@@ -627,8 +651,14 @@ def _rejected_levels(todo, df_htf, df_1d, df_ltf, display_sym, market, htf_bias,
                 )
                 if cand is not None:
                     note["score"] = cand.bias_score
+                    note["parts"] = cand.score_parts
+                    note["c1"] = _near_c1(cand.direction, cand.key_level_low, cand.key_level_high)
                     preview = _preview_trade_levels(cand, df_ltf, cfg["c2_hours"], cfg)
-                    note.update({k: preview[k] for k in ("rr", "entry", "sl", "tp", "model") if k in preview})
+                    note.update({k: preview[k] for k in ("rr", "entry", "sl", "tp", "model", "entries")
+                                 if k in preview})
+                    feats = dict(cand.score_features or {})
+                    feats.update(preview.get("features") or {})
+                    note["features"] = feats or None
             except Exception:
                 log.exception("rejected CRT levels failed for %s %s", display_sym, r.get("reason"))
         out.append(note)
@@ -675,35 +705,231 @@ async def _journal_rejected(
             direction=n_["direction"], purge_time=n_["purge_time"], crt_bar_time=n_["crt_bar_time"],
             score=n_.get("score"), bias=htf_bias, weekly_bias=weekly_bias, rr=n_.get("rr"),
             entry=n_.get("entry"), sl=n_.get("sl"), tp=n_.get("tp"), c2_closed=True, model=n_.get("model"),
+            parts=n_.get("parts"), features=n_.get("features"), c1=n_.get("c1"),
+            entries=n_.get("entries"),
         )
     return notes
 
 
-async def _notify_potential_1d(session: AsyncSession, sig: Signal, cfg: dict) -> None:
-    """CISD onayli 1D setup icin POTANSIYEL bildirimi; C2 durumu degisince ilk mesaja reply."""
-    try:
-        state = "closed" if sig.c2_closed else "open"
-        if getattr(sig, "tg_potential_state", None) == state:
-            return
-        if not tg_configured():
-            return
-        purge = _as_utc(sig.purge_time)
-        c2_close_at = purge + timedelta(hours=float(cfg["c2_hours"])) if purge else None
-        mid = await send_signal_potential(sig, c2_close_at=c2_close_at, reply_to=sig.tg_potential_id)
-        if not mid:
-            return
-        # En son potansiyel mesaj saklanir: C2 KAPALI ilkine reply olarak gider, ACTIVE / IPTAL
-        # ise zincirin sonuna (C2 KAPALI varsa ona) reply olur (15.09: ACTIVE eski C2 ACIK'a gidiyordu).
+# Bildirim zincirinin kalici durumu `potential_notices` tablosunda: kapida elenen setup'in
+# Signal kaydi yoktur, tekrar gonderimi engelleyecek alan tasiyacak nesne de yok. Anahtar
+# (strategy, symbol, direction, purge_time) — Setup Journal ile ayni. Durum
+# "<open|closed>:<gated|pass>"; degistiginde zincire yeni bir reply gider, yani C2 kapanisi
+# VE "kapi acildi/kapandi" gecisleri birer mesaj uretir. Kapi ADI durumun parcasi DEGIL:
+# skor ve bias mum icinde salinip duruyor, her salinim mesaj olmamali.
+_PREVIEW_NON_RADAR = frozenset({"features", "cisd_confirmed", "cisd_time"})
+
+
+async def _get_potential_notice(
+    session: AsyncSession, strategy: str, symbol: str, direction: str, purge_time,
+) -> PotentialNotice | None:
+    res = await session.execute(
+        select(PotentialNotice).where(
+            PotentialNotice.strategy == strategy,
+            PotentialNotice.symbol == symbol,
+            PotentialNotice.direction == direction,
+            PotentialNotice.purge_time == _as_naive(purge_time),
+        )
+    )
+    return res.scalars().first()
+
+
+async def _send_potential(
+    session: AsyncSession,
+    sig: Signal,
+    cfg: dict,
+    *,
+    strategy: str,
+    gate: str | None,
+    crt_bar_time=None,
+    persist_on_signal: bool = True,
+) -> None:
+    """POTANSIYEL bildirimi gonder/guncelle. `gate` doluysa setup o kapida elendi.
+
+    Zincir durumu `potential_notices`'ta tutulur; `sig` DB'ye yazili olmayabilir.
+    """
+    state = f"{'closed' if sig.c2_closed else 'open'}:{'gated' if gate else 'pass'}"
+    notice = await _get_potential_notice(session, strategy, sig.symbol, sig.direction, sig.purge_time)
+    # Eski kayitlarda zincir durumu Signal uzerindeydi (sadece open/closed); notice yoksa
+    # onu da kabul et ki bu degisiklikten once bildirilmis setuplar bastan mesaj uretmesin.
+    legacy = getattr(sig, "tg_potential_state", None)
+    if notice is None and legacy in (state, state.split(":")[0]):
+        return
+    if notice is not None and (notice.state == state or notice.cancelled):
+        return
+    if not tg_configured():
+        return
+    purge = _as_utc(sig.purge_time)
+    c2_close_at = purge + timedelta(hours=float(cfg["c2_hours"])) if purge else None
+    reply_to = notice.tg_message_id if notice is not None else getattr(sig, "tg_potential_id", None)
+    mid = await send_signal_potential(sig, c2_close_at=c2_close_at, reply_to=reply_to, gate=gate)
+    if not mid:
+        return
+    if notice is None:
+        notice = PotentialNotice(
+            strategy=strategy, symbol=sig.symbol, direction=sig.direction,
+            purge_time=_as_naive(sig.purge_time),
+            crt_bar_time=_as_naive(crt_bar_time if crt_bar_time is not None else sig.crt_bar_time),
+        )
+        session.add(notice)
+    # Zincirin SON mesaji saklanir: sonraki reply (C2 KAPALI / IPTAL / ACTIVE) ona gider
+    # (15.09: ACTIVE eski C2 ACIK mesajina gidiyordu).
+    notice.tg_message_id = mid
+    notice.state = state
+    notice.gate = gate
+    notice.updated_at = datetime.now(timezone.utc)
+    if persist_on_signal:
+        # IPTAL ve ACTIVE mesajlari Signal.tg_potential_id'yi okuyor; aynada tut.
         sig.tg_potential_id = mid
         sig.tg_potential_state = state
-        await session.commit()
-        log.info(
-            "POTENTIAL 1D: %s %s C2 %s Entry:%s SL:%s TP:%s (mid=%s)",
-            sig.symbol, sig.direction, "KAPALI" if state == "closed" else "ACIK",
-            sig.entry_price, sig.stop_loss, sig.take_profit, mid,
+    await session.commit()
+    log.info(
+        "POTENTIAL 1D%s: %s %s C2 %s Entry:%s SL:%s TP:%s (mid=%s)",
+        f" GATED ({gate})" if gate else "",
+        sig.symbol, sig.direction, "KAPALI" if sig.c2_closed else "ACIK",
+        sig.entry_price, sig.stop_loss, sig.take_profit, mid,
+    )
+
+
+async def _notify_potential_1d(session: AsyncSession, sig: Signal, cfg: dict) -> None:
+    """CISD onayli, tum kapilardan gecmis 1D setup: POTANSIYEL bildirimi."""
+    try:
+        notice = await _get_potential_notice(
+            session, STRATEGY_1D, sig.symbol, sig.direction, sig.purge_time,
         )
+        # Setup daha once kapida elendigi icin bildirildiyse zincir devam etsin:
+        # C2 KAPALI / IPTAL / ACTIVE reply'lari o mesaja gitmeli.
+        if notice is not None and notice.tg_message_id and not sig.tg_potential_id:
+            sig.tg_potential_id = notice.tg_message_id
+        await _send_potential(session, sig, cfg, strategy=STRATEGY_1D, gate=None)
     except Exception:
         log.exception("potential notify failed for %s", getattr(sig, "symbol", "?"))
+
+
+# Kapida elenen setup icin mesaj YALNIZCA insanin motordan farkli karar verebilecegi
+# kapilarda gider (18.09 aksami daraltildi). Disarida kalanlar "firsat zaten bitti"
+# diyor: target_taken / past_tp (TP tarafi tuketilmis), past_sl (fiyat SL'yi gecmis),
+# invalidated, stale. tight_stop ve no_cisd de olcum; manuel karar degil.
+# Olculen sebep: ilk 2,5 saatte 16 zincirin 14'u bu kapilardandi (US100 LONG RR=0.19
+# dahil) ve her biri ayrica IPTAL reply'i uretiyordu.
+_GATED_NOTIFY_GATES = frozenset({
+    "bias_mismatch", "low_quality", "score7_gate",
+    "cluster_limit", "has_open", "corr_open", "duplicate",
+})
+
+# RR tabani: min RR'nin bu kesrinin altindaki setup manuel de alinmaz, mesaj gitmez.
+# 2.0 minimumda taban 1.5 olur — "kil payi kacirdi" ile "zaten alinmaz" ayrimi.
+_GATED_MIN_RR_FRAC = 0.75
+
+
+async def _notify_gated_potential(
+    session: AsyncSession,
+    setup: CRTSetup,
+    preview: dict,
+    gate: str,
+    *,
+    strategy: str,
+    cfg: dict,
+    htf_bias: str | None,
+    weekly_bias: str | None,
+) -> None:
+    """Kapida elenen 1D setup icin bilgi bildirimi (18.09 kullanici istegi).
+
+    Motor bu setup'i ALMAZ; mesaj yalnizca manuel karar icin gider. Sartlar: CRT yapisi tam
+    ve CISD/MSS onayli olsun (motorun CRT saymadigi adaylar — c2_breakout, c2_wrong_color,
+    sweep_small, not_selected — buraya hic gelmez, onlar `setup is None` dalinda kaliyor),
+    kapi `_GATED_NOTIFY_GATES` icinde olsun ve RR tabani gecsin.
+    """
+    if strategy != STRATEGY_1D:
+        return
+    try:
+        if not preview.get("cisd_confirmed"):
+            return
+        if preview.get("entry") is None or preview.get("sl") is None or preview.get("tp") is None:
+            return
+        if gate not in _GATED_NOTIFY_GATES:
+            return
+        rr = preview.get("rr")
+        if rr is None or float(rr) < _GATED_MIN_RR_FRAC * _min_rr_for_market(setup.market_type):
+            return
+        sig = Signal(
+            symbol=setup.symbol, direction=setup.direction, purge_type=setup.purge_type,
+            bias_score=setup.bias_score, c2_closed=bool(setup.c2_closed),
+            crt_bar_time=_as_naive(setup.crt_bar_time), purge_time=_as_naive(setup.purge_time),
+            entry_price=preview.get("entry"), stop_loss=preview.get("sl"),
+            take_profit=preview.get("tp"), planned_rr=preview.get("rr"),
+            htf_bias=htf_bias, weekly_bias=weekly_bias,
+            entry_model=preview.get("model") or "cisd",
+            cisd_time=_as_naive(preview.get("cisd_time")),
+            market_type=setup.market_type, timeframe=strategy,
+        )
+        # `sig` DB'ye YAZILMAZ (motor bu setup'i almiyor); durum notice satirinda tutulur.
+        await _send_potential(
+            session, sig, cfg, strategy=strategy, gate=gate,
+            crt_bar_time=setup.crt_bar_time, persist_on_signal=False,
+        )
+    except Exception:
+        log.exception("gated potential notify failed for %s", getattr(setup, "symbol", "?"))
+
+
+async def _cancel_gated_notices(
+    session: AsyncSession, strategy: str, symbol: str, reason: str, *, keep_purge_time=None,
+    keep_direction: str | None = None, keep_crt_bar_time=None,
+) -> None:
+    """Sinyale donusmeden olen "elenen setup" bildirimlerine IPTAL reply'i kuyruga.
+
+    Yalniz `:gated` durumundakiler; sinyale donusmus olanlarin iptalini `_note_deleted`
+    zaten yapiyor (Signal.tg_potential_id uzerinden).
+
+    **Ayni yonde yeni CRT = tasima, olum degil (18.09).** Motor ayni sembolde ayni yonde
+    baska bir CRT'ye gectiginde zincir IPTAL edilmez, anahtari yeni setup'a tasinir ve
+    **mesaj gitmez** — `state` degismedigi icin `_send_potential` de sessiz kalir. Yoksa
+    her gunluk CRT yenilemesi ve her restart "IPTAL + ayni setup icin yeni ELENDI" ikilisi
+    uretiyordu (18.09 anchor degisiminde XAU/XAG/US100/US500'de birebir goruldu).
+    Yon degistiyse ya da yeni anahtarda zaten zincir varsa eski davranis: IPTAL.
+    """
+    if strategy != STRATEGY_1D:
+        return
+    try:
+        keep = _as_naive(keep_purge_time)
+        res = await session.execute(
+            select(PotentialNotice).where(
+                PotentialNotice.strategy == strategy,
+                PotentialNotice.symbol == symbol,
+                PotentialNotice.cancelled.is_(False),
+                PotentialNotice.state.like("%:gated"),
+            )
+        )
+        stale = [n for n in res.scalars().all() if keep is None or n.purge_time != keep]
+        if not stale:
+            return
+        # Ayni yonde birden fazla acik zincir varsa **en yenisi** tasinir, eskiler iptal:
+        # en guncel CRT'ye en yakin olan odur (normalde tek zincir olur).
+        stale.sort(key=lambda n: (n.purge_time is None, n.purge_time), reverse=True)
+        changed = False
+        for n in stale:
+            if keep is not None and keep_direction and n.direction == keep_direction:
+                # Yeni anahtarda zincir varsa tasima cakisir (uq_potential_key) -> IPTAL.
+                clash = await _get_potential_notice(session, strategy, symbol, n.direction, keep)
+                if clash is None:
+                    n.purge_time = keep
+                    if keep_crt_bar_time is not None:
+                        n.crt_bar_time = _as_naive(keep_crt_bar_time)
+                    n.updated_at = datetime.now(timezone.utc)
+                    changed = True
+                    continue
+            n.cancelled = True
+            n.updated_at = datetime.now(timezone.utc)
+            changed = True
+            if n.tg_message_id:
+                _POTENTIAL_OUTBOX.append({
+                    "symbol": n.symbol, "direction": n.direction,
+                    "reason": reason, "reply_to": int(n.tg_message_id),
+                })
+        if changed:
+            await session.commit()
+    except Exception:
+        log.exception("gated potential cancel failed for %s", symbol)
 
 
 def _calc_planned_rr(entry: float | None, sl: float | None, tp: float | None) -> float | None:
@@ -786,6 +1012,12 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _as_naive(dt: datetime | None) -> datetime | None:
+    """DB kolonlari naive UTC tutuyor; store'dan gelen tz-aware damgayi ona cevir."""
+    utc = _as_utc(dt)
+    return utc.replace(tzinfo=None) if utc is not None else None
 
 
 def _is_post_cisd_candle(candle_ts: datetime | None, cisd_time: datetime | None) -> bool:
@@ -1202,6 +1434,73 @@ def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
     return c2_ok and model != "ifvg" and bool(setup.pd_array)
 
 
+def _level_features(entry: float, stop_loss: float, df_ltf: pd.DataFrame | None) -> dict:
+    """Seviyeye bagli olcumler (yalniz Setup Journal icin; kapi karari bunlari kullanmaz).
+
+    `stop_range_mult` dar stop kapisinin ta kendisidir (stop mesafesi / ort. LTF range);
+    esigin (min_stop_range_mult) dogru yerde olup olmadigini sonradan veriyle sorabilmek icin.
+    """
+    out: dict = {}
+    try:
+        avg = _avg_ltf_range(df_ltf)
+        dist = abs(float(entry) - float(stop_loss))
+        if avg:
+            out["stop_range_mult"] = round(dist / avg, 4)
+        pct = _stop_distance_pct(entry, stop_loss)
+        if pct is not None:
+            out["stop_pct"] = round(pct, 4)
+    except Exception:
+        return out
+    return out
+
+
+def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None) -> dict:
+    """AYNI setup icin butun aday entry seviyeleri (yalniz OLCUM -- Setup Journal `entries`).
+
+    Motor tek bir entry secer ve digerleri kaybolur; bu yuzden "hangi model daha iyi" sorusu
+    bugune kadar FARKLI setuplari kiyaslayarak sorulabiliyordu (IFVG yalniz CISD adayi kotuyken
+    seciliyor -- bolgenin EN KOTU RR'li noktasiyla yaristigi icin). Burada hepsi ayni setupta
+    dondurulur: SL/TP sabit, yalniz entry degisir.
+
+    IFVG uc noktaya bolunur (kullanici istegi 18.09): bolgenin ust / orta / alt noktasindan
+    limit emri dolar miydi? Bugun LONG'da UST kenar kullaniliyor (`IFVGZone.entry_for`).
+    """
+    out: dict = {}
+    try:
+        long = setup.direction == "LONG"
+        if cisd is None:
+            return out
+        # Seviye dondugu andaki fiyat: adayin fiyatin gerisinde kalip kalmadigini ayirmak icin
+        # (limit emri aninda dolardi -> "fiyat geri geldi mi" sorusuna cevap degil).
+        if df_ltf is not None and not df_ltf.empty:
+            out["_ref"] = float(df_ltf.sort_index().iloc[-1]["close"])
+        out["chosen"] = float(cisd.entry_price)
+        for name, val in (("cisd", getattr(cisd, "cisd_level", None)),
+                          ("mss", getattr(cisd, "mss_level", None))):
+            if val is not None:
+                out[name] = float(val)
+        z_lo, z_hi = getattr(cisd, "ifvg_low", None), getattr(cisd, "ifvg_high", None)
+        if z_lo is None and zone is not None:
+            z_lo, z_hi = zone.low, zone.high
+        if z_lo is not None and z_hi is not None:
+            out["ifvg_near"] = float(z_hi if long else z_lo)     # entry_for: girise en yakin
+            out["ifvg_mid"] = round((float(z_lo) + float(z_hi)) / 2, 8)
+            out["ifvg_far"] = float(z_lo if long else z_hi)      # derin kenar (RR yuksek)
+        # 3. model: kirilimi yapan hamlenin arkasinda biraktigi FVG
+        if getattr(cisd, "cisd_time", None) is not None:
+            d = detect_displacement_fvg(
+                df_ltf, setup.direction,
+                confirm_time=cisd.cisd_time, since_time=setup.purge_time,
+            )
+            if d is not None:
+                out["dfvg_near"] = float(d.high if long else d.low)
+                out["dfvg_mid"] = float(d.mid)
+                out["dfvg_far"] = float(d.low if long else d.high)
+    except Exception:
+        log.exception("entry candidates failed for %s", getattr(setup, "symbol", "?"))
+    return out
+
+
 def _preview_trade_levels(
     setup: CRTSetup,
     df_ltf: pd.DataFrame | None,
@@ -1236,6 +1535,10 @@ def _preview_trade_levels(
             "tp": cisd.take_profit,
             "ifvg": ifvg,
             "model": getattr(cisd, "entry_model", None) or "cisd",
+            "features": _level_features(cisd.entry_price, cisd.stop_loss, df_ltf),
+            "entries": _entry_candidates(setup, cisd, df_ltf, zone=zone) or None,
+            "cisd_confirmed": bool(getattr(cisd, "confirmed", False)),
+            "cisd_time": getattr(cisd, "cisd_time", None),
         }
     if allow_ifvg and zone is not None and setup.purge_extreme is not None:
         sl = float(setup.purge_extreme)
@@ -1246,6 +1549,7 @@ def _preview_trade_levels(
         if _entry_between_stops(setup.direction, z_entry, sl, tp):
             return {
                 "rr": _calc_planned_rr(z_entry, sl, tp),
+                "features": _level_features(z_entry, sl, df_ltf),
                 "entry": z_entry,
                 "sl": sl,
                 "tp": tp,
@@ -1429,14 +1733,16 @@ async def _load_frames(
         # Store yoksa da HTF'yi BingX'ten ham cekmeyiz: 4H/1D NY-hizali
         # sentezlenir, LTF'den olu seans barlari elenir (bkz. app/session.py).
         df1h = await fetch_ohlcv_deep(bingx_symbol, "1h", bars=SESSION_1H_BARS, client=client)
-        frames["1h"] = fx_session.drop_dead_session(df1h)
-        frames["4h"] = fx_session.resample_from_1h(df1h, "4h")
-        frames["1d"] = fx_session.resample_from_1h(df1h, "1d")
+        frames["1h"] = fx_session.drop_dead_session(df1h, bingx_symbol)
+        frames["4h"] = fx_session.resample_from_1h(df1h, "4h", bingx_symbol)
+        frames["1d"] = fx_session.resample_from_1h(df1h, "1d", bingx_symbol)
         frames["15m"] = fx_session.drop_dead_session(
-            await fetch_ohlcv(bingx_symbol, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client)
+            await fetch_ohlcv(bingx_symbol, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client),
+            bingx_symbol,
         )
         frames["5m"] = fx_session.drop_dead_session(
-            await fetch_ohlcv(bingx_symbol, "5m", limit=BOOTSTRAP_LIMITS["5m"], client=client)
+            await fetch_ohlcv(bingx_symbol, "5m", limit=BOOTSTRAP_LIMITS["5m"], client=client),
+            bingx_symbol,
         )
     else:
         frames["4h"] = await fetch_ohlcv(bingx_symbol, "4h", limit=BOOTSTRAP_LIMITS["4h"], client=client)
@@ -1481,10 +1787,11 @@ async def _apply_smt_bonus(
 
     SMT bulunursa setup.smt_pair'e korele paritenin gosterim adi yazilir.
     """
-    if df_ltf is None or df_ltf.empty:
-        return False
     corr = correlated_symbol(bingx_symbol)
-    if corr is None:
+    if isinstance(setup.score_features, dict):
+        # Olcum: SMT hic mumkun muydu? ("smt: 0" ile "korele paritesi yok" ayri seyler.)
+        setup.score_features["smt_possible"] = int(corr is not None)
+    if df_ltf is None or df_ltf.empty or corr is None:
         return False
     corr_ltf = await _load_corr_ltf(corr, store, client, ltf=ltf)
     if corr_ltf is None or corr_ltf.empty:
@@ -1499,6 +1806,11 @@ async def _apply_smt_bonus(
     setup.smt_pair = to_display_symbol(corr)
     new_score = min(MAX_QUALITY_SCORE, int(setup.bias_score or 0) + SMT_QUALITY_BONUS)
     setup.bias_score = new_score
+    if isinstance(setup.score_parts, dict):
+        # Olcum kirilimi: SMT motorda skora sonradan ekleniyor, kirilim da izlesin.
+        setup.score_parts["smt"] = SMT_QUALITY_BONUS
+        setup.score_parts["raw"] = int(setup.score_parts.get("raw") or 0) + SMT_QUALITY_BONUS
+        setup.score_parts["score"] = new_score
     if new_score >= 7:
         setup.bias = "BULLISH" if setup.direction == "LONG" else "BEARISH"
     elif new_score <= 3:
@@ -1584,6 +1896,9 @@ async def _detect_and_create_waiting_locked(
     if setup is None:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "crt_gone")
+        # Sinyale donusmeden bildirilmis setup varsa zinciri kapat (Signal'i olmadigi
+        # icin `_delete_pending` yolundan gecmiyor).
+        await _cancel_gated_notices(session, strategy, display_sym, "crt_gone")
         if rejected_notes:
             # Motorun CRT saymadigi en guncel aday: radar "no_setup" yerine elenme nedenini gostersin.
             r = max(rejected_notes, key=lambda x: _as_utc(x["purge_time"]))
@@ -1597,6 +1912,13 @@ async def _detect_and_create_waiting_locked(
             _radar("no_setup", bias=htf_bias, weekly_bias=weekly_bias)
         return None
 
+    # Motor artik baska bir CRT'yi izliyorsa, onceki anahtar icin gonderilmis "elenen
+    # setup" bildirimi olulmustur: zincire IPTAL reply'i.
+    await _cancel_gated_notices(
+        session, strategy, display_sym, "crt_replaced", keep_purge_time=setup.purge_time,
+        keep_direction=setup.direction, keep_crt_bar_time=setup.crt_bar_time,
+    )
+
     _radar_base = _radar
     preview = await _cpu(_preview_trade_levels, setup, df_ltf, cfg["c2_hours"], cfg)
 
@@ -1604,9 +1926,25 @@ async def _detect_and_create_waiting_locked(
         kwargs.setdefault("c2_closed", bool(setup.c2_closed))
         kwargs.setdefault("purge_time", setup.purge_time)
         kwargs.setdefault("crt_bar_time", setup.crt_bar_time)
+        # Golge izlemenin C1 varyanti icin yakin C1 ucu (TP zaten karsi uc).
+        kwargs.setdefault("c1", _near_c1(setup.direction, setup.key_level_low, setup.key_level_high))
+        # Skor kirilimi cagri aninda okunur: SMT bonusu bu satirdan sonra eklenebiliyor.
+        kwargs.setdefault("parts", setup.score_parts)
+        feats = dict(setup.score_features or {})
+        feats.update(preview.get("features") or {})
+        kwargs.setdefault("features", feats or None)
         for key, val in preview.items():
+            if key in _PREVIEW_NON_RADAR:   # features yukarida birlestirildi; digerleri
+                continue                     # potansiyel bildirimi icin, _set_radar bilmez
             kwargs.setdefault(key, val)
         _radar_base(state, **kwargs)
+
+    async def _gated(gate: str) -> None:
+        """Kapida elenen 1D setup'i Telegram'a bildir. Motor karari DEGISMEZ."""
+        await _notify_gated_potential(
+            session, setup, preview, gate,
+            strategy=strategy, cfg=cfg, htf_bias=htf_bias, weekly_bias=weekly_bias,
+        )
 
     # CRT/purge ayni renk hard filter DEGIL; skorda baz +2 yerine +1
     # (bkz. _calc_live_setup_bias). Eski hard filter (geri almak icin ac):
@@ -1630,6 +1968,7 @@ async def _detect_and_create_waiting_locked(
             setup.symbol, setup.direction, filter_bias, htf_bias,
             structure_bias, structure_age, ict_bias, weekly_bias,
         )
+        await _gated("bias_mismatch")
         return None
 
     await _apply_smt_bonus(
@@ -1651,6 +1990,7 @@ async def _detect_and_create_waiting_locked(
             "SKIPPED (TARGET TAKEN): %s %s C1 hedef tarafı C2 sonrasi tuketildi.",
             setup.symbol, setup.direction,
         )
+        await _gated("target_taken")
         return None
 
     if int(setup.bias_score or 0) < MIN_QUALITY_SCORE:
@@ -1660,6 +2000,7 @@ async def _detect_and_create_waiting_locked(
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info("SKIPPED (LOW QUALITY): %s %s score=%s", setup.symbol, setup.direction, setup.bias_score)
+        await _gated("low_quality")
         return None
 
     same_pending = (
@@ -1715,6 +2056,7 @@ async def _detect_and_create_waiting_locked(
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info("SKIPPED (OPEN EXISTS): %s already has waiting/active signal.", setup.symbol)
+        await _gated("has_open")
         return None
 
     corr = correlated_symbol(bingx_symbol)
@@ -1725,12 +2067,14 @@ async def _detect_and_create_waiting_locked(
                        score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
             log.info("SKIPPED (CORR OPEN): %s korele parite %s zaten acik.", setup.symbol, corr_disp)
+            await _gated("corr_open")
             return None
 
     if existing_pending is None and await _is_duplicate_setup(session, setup):
         _radar("duplicate", direction=setup.direction,
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
+        await _gated("duplicate")
         return None
 
     if (
@@ -1756,6 +2100,7 @@ async def _detect_and_create_waiting_locked(
                 recent_n, recent_max,
                 cluster_window,
             )
+            await _gated("cluster_limit")
             return None
 
     if df_ltf is None or df_ltf.empty:
@@ -1772,6 +2117,7 @@ async def _detect_and_create_waiting_locked(
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info("SKIPPED (NO LEVELS): %s %s entry/MSS seviyeleri henuz yok.", setup.symbol, setup.direction)
+        await _gated("no_cisd")
         return None
 
     min_rr = _min_rr_for_market(setup.market_type)
@@ -1788,6 +2134,7 @@ async def _detect_and_create_waiting_locked(
                    entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
                    smt=setup.smt_pair, pd=setup.pd_array)
         log.info("SKIPPED (LOW RR): %s %s RR=%s (< %.2f)", setup.symbol, setup.direction, planned_rr, min_rr)
+        await _gated("low_rr")
         return None
 
     if not _score7_strict_ok(setup, cisd, cfg):
@@ -1802,6 +2149,7 @@ async def _detect_and_create_waiting_locked(
             setup.symbol, setup.direction, setup.c2_closed,
             getattr(cisd, "entry_model", "cisd"), setup.pd_array,
         )
+        await _gated("score7_gate")
         return None
 
     min_pct = _min_stop_pct(setup.market_type)
@@ -1831,6 +2179,7 @@ async def _detect_and_create_waiting_locked(
                 "SKIPPED (TIGHT STOP): %s %s stop=%.3f%% < min %.2f%%",
                 setup.symbol, setup.direction, stop_pct or 0.0, min_pct,
             )
+        await _gated("tight_stop")
         return None
 
     tp_after = cisd.cisd_time if cisd.confirmed else setup.purge_time
@@ -1845,6 +2194,7 @@ async def _detect_and_create_waiting_locked(
             "SKIPPED (PAST TP): %s %s entry oncesi TP %s gecildi.",
             setup.symbol, setup.direction, cisd.take_profit,
         )
+        await _gated("past_tp")
         return None
 
     if cisd.confirmed and _price_hit_sl_after(
@@ -1860,6 +2210,7 @@ async def _detect_and_create_waiting_locked(
             "SKIPPED (PAST SL): %s %s CISD sonrasi SL %s gecildi, waiting yok.",
             setup.symbol, setup.direction, cisd.stop_loss,
         )
+        await _gated("past_sl")
         return None
 
     # Kronoloji: limit emri entry'de bekliyordu. CISD sonrasi ilk gecerli retest
@@ -1904,6 +2255,7 @@ async def _detect_and_create_waiting_locked(
             " (breach=%s fill=%s).",
             setup.symbol, setup.direction, cisd.invalidation_level, breach_ts, fill_ts,
         )
+        await _gated("invalidated")
         return None
 
     if cisd.confirmed:
@@ -1956,6 +2308,7 @@ async def _detect_and_create_waiting_locked(
                 "SKIPPED (STALE FILL): %s %s entry %s zaten %s tarihinde test edilmis (pencere disi).",
                 setup.symbol, setup.direction, cisd.entry_price, fill_ts,
             )
+            await _gated("stale")
             return None
 
     can_wait = bool(cisd.confirmed) and (
@@ -2158,6 +2511,7 @@ async def manage_symbol_on_price(
                         bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                         entry=sig.entry_price,
                         sl=sig.stop_loss, tp=sig.take_profit,
+                        c1=_near_c1(sig.direction, sig.key_level_low, sig.key_level_high),
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
@@ -2187,6 +2541,7 @@ async def manage_symbol_on_price(
                         bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                         entry=sig.entry_price,
                         sl=sig.stop_loss, tp=sig.take_profit,
+                        c1=_near_c1(sig.direction, sig.key_level_low, sig.key_level_high),
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
@@ -2223,6 +2578,7 @@ async def manage_symbol_on_price(
                         bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                         entry=sig.entry_price,
                         sl=sig.stop_loss, tp=sig.take_profit,
+                        c1=_near_c1(sig.direction, sig.key_level_low, sig.key_level_high),
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
@@ -2260,6 +2616,7 @@ async def manage_symbol_on_price(
                         bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                         entry=sig.entry_price,
                         sl=sig.stop_loss, tp=sig.take_profit,
+                        c1=_near_c1(sig.direction, sig.key_level_low, sig.key_level_high),
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
@@ -2288,6 +2645,7 @@ async def manage_symbol_on_price(
                         bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                         entry=sig.entry_price,
                         sl=sig.stop_loss, tp=sig.take_profit,
+                        c1=_near_c1(sig.direction, sig.key_level_low, sig.key_level_high),
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
@@ -2741,6 +3099,7 @@ async def close_session_positions(
                 direction=sig.direction, score=sig.bias_score,
                 bias=sig.htf_bias, weekly_bias=sig.weekly_bias,
                 entry=sig.entry_price, sl=sig.stop_loss, tp=sig.take_profit,
+                c1=_near_c1(sig.direction, sig.key_level_low, sig.key_level_high),
                 smt=sig.smt_pair, pd=sig.pd_array, c2_closed=sig.c2_closed,
                 purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
                 strategy=tf,
@@ -2870,7 +3229,7 @@ async def reconcile_open_signals(
                         # seans barlari geri sizmasin (hafta sonu wick'i acik
                         # islemi yanlis kapatir).
                         if is_session_symbol(bingx_symbol):
-                            rest_df = fx_session.drop_dead_session(rest_df)
+                            rest_df = fx_session.drop_dead_session(rest_df, bingx_symbol)
                         if not rest_df.empty:
                             df = rest_df
                     if df is None or df.empty:

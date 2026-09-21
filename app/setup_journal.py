@@ -90,7 +90,36 @@ _TOUCH_EVERY = timedelta(minutes=30)
 # burada tutulur). Duz TP/SL: 4H/1D'deki kismi kar + BE yok. Degerlendirme ve karar kurali:
 # IZLEME.md "Dar stop — golge izleme".
 SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5)}
+# JSON'a yazilirken/okunurken datetime'a cevrilecek alanlar. Golgede "e" dolum ani; entry
+# varyantlarinda "e" ENTRY FIYATI olduğu icin dolum ani ayri alanda ("t") tutulur.
 _SHADOW_TS = ("e", "at", "until")
+_ENTRY_TS = ("t", "at", "until")
+
+# C1 varyanti (17.09): sabit kesir degil, setup'in KENDI C1 ucu (LONG'da C1 low, SHORT'ta C1 high).
+# Soru: "SL purge ucu yerine C1 ucu olsa?" TP zaten karsi C1 ucu oldugu icin bu, islemi saf range
+# trade'ine cevirir; k setup basina degisir (olculen medyan ~0.64). Her zaman izlenmez:
+#   wrong_side  -> entry C1'in disinda kalmis (CISD/MSS seviyesi purge bolgesinde), stop gecersiz
+#   not_tighter -> C1 ucu purge ucundan uzak; daraltma degil, genisletme olurdu
+# Bu iki durumda varyant "invalid" olarak yazilir (izlenmez) -- kuralin ne siklikta uygulanamadigi
+# da olcumun parcasi. Asiri dar C1 stopu (dar stop kapisinin elecegi) izlenir ama `mult` ile
+# isaretlenir: k x stop_range_mult < 1.0 ise motor bu setup'i zaten "tight_stop" diye elerdi.
+# Degerlendirme ve karar kurali: IZLEME.md "C1 ucu stop — golge izleme".
+SHADOW_C1 = "c1"
+
+# Entry modeli karsilastirmasi (18.09). AYNI setupta butun aday entry'ler ayri izlenir:
+# SL (purge ucu) ve TP (karsi C1 ucu) SABIT, yalniz entry degisir. Boylece "hangi model daha
+# iyi" sorusu secilim etkisinden arinir -- bugunku olcum farkli setuplari kiyasliyordu
+# (IFVG yalniz CISD adayi kotuyken seciliyor, cunku bolgenin EN KOTU RR'li noktasiyla yarisiyor).
+# Varyantlar scanner tarafindan hesaplanip `note(entries=...)` ile dondurulur:
+#   cisd / mss                -> iki yapisal aday (motor yalnizca kazanani tutuyordu)
+#   ifvg_near / mid / far     -> IFVG bolgesinin ust-orta-alt noktasi (LONG'da near = ust)
+#   dfvg_near / mid / far     -> kirilim sonrasi birakilan FVG (yeni model)
+#   chosen                    -> motorun fiilen sectigi entry (temel cizgi)
+# Entry SL-TP arasinda degilse varyant "invalid" yazilir (izlenmez) -- ne siklikta
+# uygulanamadigi da olcumun parcasi. Karar kurali: IZLEME.md "Entry modeli karsilastirmasi".
+ENTRY_VARIANTS = ("chosen", "cisd", "mss",
+                  "ifvg_near", "ifvg_mid", "ifvg_far",
+                  "dfvg_near", "dfvg_mid", "dfvg_far")
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -103,33 +132,362 @@ def _shadow_init(rec: dict) -> dict | None:
     if not fractions or None in (e, sl, tp) or e == sl:
         return None
     risk = abs(e - sl)
-    return {
+    out = {
         f"{k:g}": {"k": k, "sl": e + k * (sl - e), "rr": round(abs(tp - e) / (k * risk), 4),
                    "o": "pending", "e": None, "at": None, "until": None}
         for k in fractions
     }
+    c1 = _shadow_c1(rec, e, sl, tp, risk)
+    if c1 is not None:
+        out[SHADOW_C1] = c1
+    return out
 
 
-def _shadow_dump(shadow: dict | None) -> str | None:
-    if not shadow:
+def _shadow_c1(rec: dict, e: float, sl: float, tp: float, risk: float) -> dict | None:
+    """C1 ucu stop varyanti: sabit kesir yerine setup'in kendi C1 seviyesi (yukaridaki nota bkz.)."""
+    c1 = rec.get("c1")
+    if c1 is None or not risk:
+        return None
+    c1 = float(c1)
+    base = {"k": None, "sl": c1, "rr": None, "o": "invalid", "e": None, "at": None, "until": None}
+    long = rec.get("direction") == "LONG"
+    if (c1 >= e) if long else (c1 <= e):
+        base["why"] = "wrong_side"     # entry C1'in disinda: C1 stop entry'nin yanlis tarafinda
+        return base
+    if (c1 <= sl) if long else (c1 >= sl):
+        base["why"] = "not_tighter"    # C1 ucu purge ucundan uzak: daraltmiyor
+        return base
+    k = abs(e - c1) / risk
+    base.update(k=round(k, 4), rr=round(abs(tp - e) / abs(e - c1), 4), o="pending")
+    mult = ((rec.get("features_at_levels") or rec.get("features") or {}) or {}).get("stop_range_mult")
+    if mult:
+        # Dar stop kapisinin bu varyanttaki karsiligi: motor 1.0'in altini "tight_stop" diye eler.
+        base["mult"] = round(k * float(mult), 4)
+    return base
+
+
+def _entries_init(rec: dict) -> dict | None:
+    """Aday entry'leri dondur: her biri kendi RR'siyle, SL/TP ortak."""
+    cands = dict(rec.get("entry_cands") or {})
+    ref = cands.pop("_ref", None)          # seviye dondugu andaki fiyat (son LTF kapanisi)
+    sl, tp = rec.get("sl"), rec.get("tp")
+    if not cands or sl is None or tp is None:
+        return None
+    long = rec.get("direction") == "LONG"
+    out: dict = {}
+    for name in ENTRY_VARIANTS:
+        e = cands.get(name)
+        if e is None:
+            continue
+        e = float(e)
+        v = {"e": e, "rr": None, "o": "invalid", "t": None, "at": None, "until": None}
+        if not ((sl < e < tp) if long else (tp < e < sl)):
+            v["why"] = "out_of_range"      # entry SL-TP disinda: limit emri anlamsiz
+        else:
+            v["rr"] = round(abs(tp - e) / abs(e - sl), 4)
+            v["o"] = "pending"
+            # Fiyat seviyeyi ZATEN gecmisse limit emri aninda dolardi -- "fiyat geri geldi mi"
+            # sorusunun cevabi degildir ve sig varyantlari haksiz yere avantajli gosterir.
+            # Izlemeye devam edilir (islem gerceklesirdi) ama isaretlenir; rapor ayirir.
+            if ref is not None and ((e >= float(ref)) if long else (e <= float(ref))):
+                v["imm"] = True
+        out[name] = v
+    return out or None
+
+
+def _retrace_init(rec: dict) -> dict | None:
+    """Geri cekilme olcegi: 0.0 = seviye dondugu andaki fiyat (ref), 1.0 = SL.
+
+    Aday entry'ler de bu olcege tasinir (`d_of`) -- "IFVG ust kenari genelde d=0.35'te" gibi
+    okunabilsin ve sonradan akla gelen seviyeler de ayni egriden cevap alsin.
+    """
+    cands = rec.get("entry_cands") or {}
+    ref, sl = cands.get("_ref"), rec.get("sl")
+    if ref is None or sl is None:
+        return None
+    ref, sl = float(ref), float(sl)
+    span = (ref - sl) if rec.get("direction") == "LONG" else (sl - ref)
+    if span <= 0:
+        return None                      # fiyat zaten SL'nin otesinde: olcek tanimsiz
+    d_of = {}
+    for name in ENTRY_VARIANTS:
+        e = cands.get(name)
+        if e is None:
+            continue
+        d_of[name] = round(
+            ((ref - float(e)) if rec.get("direction") == "LONG" else (float(e) - ref)) / span, 4)
+    return {"ref": round(ref, 8), "span": round(span, 8), "d_max": 0.0, "d_tp": 0.0,
+            "d_tp_bar": None, "tp_first": None, "d_of": d_of, "done": False, "until": None}
+
+
+def _retrace_active(rec: dict, bar_ts=None) -> bool:
+    r = rec.get("retrace")
+    if not r or r.get("done") or rec.get("levels_at") is None:
+        return False
+    if bar_ts is not None:
+        if bar_ts < rec["levels_at"]:
+            return False
+        if r.get("until") is not None and bar_ts <= r["until"]:
+            return False
+    return True
+
+
+def _apply_retrace(rec: dict, bar_ts, high: float, low: float) -> None:
+    """Mum basina derinlik guncellemesi; TP/SL ile sonuclanir."""
+    r = rec["retrace"]
+    long = rec["direction"] == "LONG"
+    sl, tp, ref, span = rec["sl"], rec["tp"], r["ref"], r["span"]
+    r["until"] = bar_ts
+    ext = low if long else high                       # aleyhte ucta ne kadar geri gelindi
+    d_bar = ((ref - ext) if long else (ext - ref)) / span
+    d_bar = max(0.0, d_bar)
+    if d_bar > r["d_max"]:
+        r["d_max"] = round(d_bar, 4)
+    hit_tp = high >= tp if long else low <= tp
+    hit_sl = low <= sl if long else high >= sl
+    if hit_tp and hit_sl:
+        # Ayni mumda ikisi birden: sira bilinmiyor, sonuc yazilmaz (rapor disarida birakir).
+        r["done"], r["amb"] = True, True
+        return
+    if hit_tp:
+        # TP mumunun dibi d_tp'ye KATILMAZ: mum ici sira bilinmedigi icin o derinlikteki bir
+        # emrin TP'den once dolup dolmadigi belirsiz. Duyarlilik icin ayri alanda saklanir.
+        r["d_tp_bar"] = round(d_bar, 4)
+        r["tp_first"], r["done"] = True, True
+        return
+    if d_bar > r["d_tp"]:
+        r["d_tp"] = round(d_bar, 4)
+    if hit_sl:
+        r["tp_first"], r["done"] = False, True
+        return
+    horizon = HORIZON.get(rec["strategy"], timedelta(hours=48))
+    if bar_ts >= rec["levels_at"] + horizon:
+        r["done"] = True                              # tp_first None: sonuclanmadi
+
+
+# ──────────────────── Dolum oncesi kosu (18.09) ────────────────────
+# Soru: emir dolmadan ONCE fiyat TP yolunun ne kadarini yurumustu, ve bu oran
+# sonucla ilgili mi? Hipotez (ENA 4H #71, 17.09): hareket emir girilmeden once
+# olursa geri donen fiyat entry'yi doldurur ama kalan yol tukendigi icin SL'e
+# gider. `target_taken` kapisi bunu YAKALAMAZ -- o kapi tam TP'nin tuketilmesine
+# bakar; %50-%100 arasinda duran hareket kapidan gecer.
+#
+# Olcek: 0.0 = entry, 1.0 = TP. Kaydedilen `f_max` dolum mumundan ONCEKI mumlarin
+# en iyisi; dolum mumunun kendi kar yonu AYRI alanda (`f_bar`), cunku mum ici sira
+# bilinmiyor -- o hareket dolumdan once mi sonra mi belirsiz (scanner'in
+# `on_fill_bar` disiplininin aynisi).
+#
+# ⚠️ Journal seviyeleri ILK gorulen halleriyle dondurur; motor entry'yi sonradan
+# tasidiysa `f_max` o ilk seviyelere gore olculur. Istatistik icin tanim tutarli,
+# ama tek bir gercek islemin sayisini birebir vermez.
+
+def _prefill_init(rec: dict) -> dict | None:
+    e, tp = rec.get("entry"), rec.get("tp")
+    if e is None or tp is None:
+        return None
+    e, tp = float(e), float(tp)
+    path = (tp - e) if rec.get("direction") == "LONG" else (e - tp)
+    if path <= 0:
+        return None
+    return {"path": round(path, 8), "f_max": 0.0, "f_bar": None, "bars": 0,
+            "hit": None, "done": False, "until": None}
+
+
+def _prefill_active(rec: dict, bar_ts=None) -> bool:
+    """Sinyale donusen setupta da surer: outcome 'signal' olunca durmamali."""
+    p = rec.get("prefill")
+    if not p or p.get("done") or rec.get("levels_at") is None:
+        return False
+    if bar_ts is not None:
+        if bar_ts < rec["levels_at"]:
+            return False
+        if p.get("until") is not None and bar_ts <= p["until"]:
+            return False
+    return True
+
+
+def _apply_prefill(rec: dict, bar_ts, high: float, low: float) -> None:
+    p = rec["prefill"]
+    long = rec["direction"] == "LONG"
+    e, path = float(rec["entry"]), p["path"]
+    p["until"] = bar_ts
+    ext = high if long else low                      # kar yonundeki uc
+    f_bar = max(0.0, ((ext - e) if long else (e - ext)) / path)
+    hit_e = low <= e if long else high >= e
+    if hit_e:
+        # Dolum mumu f_max'a KATILMAZ (mum ici sira bilinmiyor); ayri alanda saklanir.
+        p["f_bar"] = round(f_bar, 4)
+        p["hit"] = bar_ts
+        p["done"] = True
+        return
+    if f_bar > p["f_max"]:
+        p["f_max"] = round(f_bar, 4)
+    p["bars"] += 1
+    horizon = HORIZON.get(rec["strategy"], timedelta(hours=48))
+    if bar_ts >= rec["levels_at"] + horizon:
+        p["done"] = True                             # hit None: emir hic dolmadi
+
+
+def _prefill_dump(p: dict | None) -> str | None:
+    if not p:
+        return None
+    out = dict(p)
+    for k in ("until", "hit"):
+        if out.get(k) is not None:
+            out[k] = out[k].isoformat()
+    return json.dumps(out, separators=(",", ":"))
+
+
+def _prefill_load(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+        for k in ("until", "hit"):
+            if d.get(k):
+                d[k] = datetime.fromisoformat(d[k])
+        return d
+    except Exception:
+        return None
+
+
+def _entries_active(rec: dict, bar_ts=None) -> bool:
+    ents = rec.get("entries")
+    if not ents or rec.get("levels_at") is None:
+        return False
+    if bar_ts is not None and bar_ts < rec["levels_at"]:
+        return False
+    return any(
+        v["o"] in TRACKING and (bar_ts is None or v.get("until") is None or bar_ts > v["until"])
+        for v in ents.values()
+    )
+
+
+def _apply_entries(rec: dict, bar_ts, high: float, low: float) -> None:
+    """_apply_bar'in ayni kurallari, her ENTRY varyanti icin ayri (SL/TP ortak).
+
+    Sorunun ta kendisi: "bu seviyeye limit emri koysaydik dolar miydi, sonra ne olurdu?"
+    """
+    long = rec["direction"] == "LONG"
+    sl, tp = rec["sl"], rec["tp"]
+    hit_tp = high >= tp if long else low <= tp
+    hit_sl = low <= sl if long else high >= sl
+    horizon = HORIZON.get(rec["strategy"], timedelta(hours=48))
+    for v in rec["entries"].values():
+        if v["o"] not in TRACKING or (v.get("until") is not None and bar_ts <= v["until"]):
+            continue
+        e = v["e"]
+        hit_e = low <= e if long else high >= e
+        v["until"] = bar_ts
+        if v["o"] == "pending":
+            if hit_tp and not hit_e:
+                v["o"], v["at"] = "tp_before_entry", bar_ts
+            elif hit_e:
+                v["t"] = bar_ts                      # emir doldu
+                if hit_tp:
+                    v["o"], v["at"] = "ambiguous", bar_ts
+                elif hit_sl:
+                    v["o"], v["at"] = "loss", bar_ts
+                else:
+                    v["o"] = "filled"
+        elif v["o"] == "filled":
+            if hit_tp and hit_sl:
+                v["o"], v["at"] = "ambiguous", bar_ts
+            elif hit_tp:
+                v["o"], v["at"] = "win", bar_ts
+            elif hit_sl:
+                v["o"], v["at"] = "loss", bar_ts
+        if v["o"] in TRACKING and bar_ts >= rec["levels_at"] + horizon:
+            v["o"], v["at"] = ("no_touch" if v["o"] == "pending" else "open"), bar_ts
+
+
+def _variants_dump(data: dict | None, ts_fields: tuple) -> str | None:
+    if not data:
         return None
     out = {
-        name: {f: (v[f].isoformat() if f in _SHADOW_TS and v.get(f) is not None else v.get(f)) for f in v}
-        for name, v in shadow.items()
+        name: {f: (v[f].isoformat() if f in ts_fields and v.get(f) is not None else v.get(f)) for f in v}
+        for name, v in data.items()
     }
     return json.dumps(out, separators=(",", ":"))
 
 
-def _shadow_load(raw: str | None) -> dict | None:
+def _variants_load(raw: str | None, ts_fields: tuple) -> dict | None:
     if not raw:
         return None
     try:
         data = json.loads(raw)
         for v in data.values():
-            for f in _SHADOW_TS:
+            for f in ts_fields:
                 if v.get(f):
                     v[f] = datetime.fromisoformat(v[f])
         return data
+    except Exception:
+        return None
+
+
+def _shadow_dump(shadow: dict | None) -> str | None:
+    return _variants_dump(shadow, _SHADOW_TS)
+
+
+def _retrace_dump(r: dict | None) -> str | None:
+    if not r:
+        return None
+    out = dict(r)
+    if out.get("until") is not None:
+        out["until"] = out["until"].isoformat()
+    return json.dumps(out, separators=(",", ":"))
+
+
+def _retrace_load(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+        if d.get("until"):
+            d["until"] = datetime.fromisoformat(d["until"])
+        return d
+    except Exception:
+        return None
+
+
+def _entries_dump(entries: dict | None) -> str | None:
+    return _variants_dump(entries, _ENTRY_TS)
+
+
+def _entries_load(raw: str | None) -> dict | None:
+    return _variants_load(raw, _ENTRY_TS)
+
+
+def _shadow_load(raw: str | None) -> dict | None:
+    return _variants_load(raw, _SHADOW_TS)
+
+
+def _parts_dump(parts: dict | None) -> str | None:
+    """Skor kirilimini JSON'a cevir (kalemleri int tut, dosya kucuk kalsin)."""
+    if not parts:
+        return None
+    try:
+        return json.dumps({k: int(v) for k, v in parts.items()}, separators=(",", ":"))
+    except Exception:
+        return None
+
+
+def _json_dump(data: dict | None) -> str | None:
+    """Olcum sozlugunu JSON'a cevir (float oranlar oldugu gibi kalir)."""
+    if not data:
+        return None
+    try:
+        return json.dumps(data, separators=(",", ":"))
+    except Exception:
+        return None
+
+
+def _parts_load(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
     except Exception:
         return None
 
@@ -241,9 +599,18 @@ def note(
     tp=None,
     c2_closed: bool | None = None,
     model: str | None = None,
+    parts: dict | None = None,
+    features: dict | None = None,
+    c1=None,
+    entries: dict | None = None,
     now=None,
 ) -> None:
-    """Bir degerlendirmenin sonucunu kayda isle (yalnizca bellek)."""
+    """Bir degerlendirmenin sonucunu kayda isle (yalnizca bellek).
+
+    `c1`: setup'in yakin C1 ucu (LONG'da key_level_low, SHORT'ta key_level_high) -- yalniz
+    golge izlemenin C1 varyanti icin; motor karari kullanmaz, DB'de ayri kolonu yok
+    (shadow JSON'undaki varyantin `sl`'i olarak durur).
+    """
     try:
         if direction is None or purge_time is None or stage not in _RANK:
             return
@@ -266,7 +633,8 @@ def note(
             # Ayni anahtar (yon + C2) once elenen aday olarak -- belki farkli C1 ile -- kaydedildi;
             # artik motorun setup'i: izleme onun seviyeleriyle yeniden baslar.
             for k in ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
-                      "entry_touched_at", "tracked_until", "shadow"):
+                      "entry_touched_at", "tracked_until", "shadow", "entries", "entry_cands",
+                      "retrace", "prefill", "parts_at_levels", "features_at_levels"):
                 rec[k] = None
             changed = True
         if market:
@@ -284,11 +652,32 @@ def note(
             if v is not None and rec.get(k) != v:
                 rec[k] = v
                 changed = True
+        # Skor kirilimi (olcum): en guncel hali tutulur -- C2 kapanisi / SMT skoru degistirebilir.
+        if parts and rec.get("score_parts") != parts:
+            rec["score_parts"] = dict(parts)
+            changed = True
+        if features:
+            # Olcumler birikimli: motor tarafi (wick/IFVG/ATR) ile seviye tarafi (dar stop)
+            # ayri cagrilardan gelebiliyor; gelen deger eskisini ezer, eksikler korunur.
+            merged = dict(rec.get("features") or {})
+            merged.update({k: v for k, v in features.items() if v is not None})
+            if merged != rec.get("features"):
+                rec["features"] = merged
+                changed = True
         if entry is not None and sl is not None and tp is not None and rec.get("levels_at") is None:
             # Ilk gorulen seviyeler dondurulur: sonuc izleme bunlarla yapilir.
             rec.update(entry=float(entry), sl=float(sl), tp=float(tp),
-                       rr=float(rr) if rr is not None else None, levels_at=now)
+                       rr=float(rr) if rr is not None else None, levels_at=now,
+                       c1=float(c1) if c1 is not None else None,
+                       entry_cands=dict(entries) if entries else None)
             rec["shadow"] = _shadow_init(rec)
+            rec["entries"] = _entries_init(rec)
+            rec["retrace"] = _retrace_init(rec)
+            rec["prefill"] = _prefill_init(rec)
+            # Skor ve olcumler de AYNI AN dondurulur: sonuc bu seviyelerden izlendigi icin,
+            # sonradan degisen skor (C2 kapanisi, SMT) ile sonucu eslestirmek yaniltici olur.
+            rec["parts_at_levels"] = dict(rec.get("score_parts") or {}) or None
+            rec["features_at_levels"] = dict(rec.get("features") or {}) or None
             changed = True
         detail = _detail(score, rr, bias, weekly_bias, c2_closed)
         # Skor/RR tasimayan bir degerlendirme (or. seviyesi bir kez hesaplanan elenen aday)
@@ -322,14 +711,39 @@ def note_deleted(sig, reason: str, now=None) -> None:
             note(strategy, sig.symbol, sig.market_type, stage, direction=sig.direction, purge_time=sig.purge_time,
                  crt_bar_time=sig.crt_bar_time, score=sig.bias_score, bias=sig.htf_bias,
                  weekly_bias=sig.weekly_bias, rr=sig.planned_rr, entry=sig.entry_price, sl=sig.stop_loss,
-                 tp=sig.take_profit, c2_closed=sig.c2_closed, model=sig.entry_model, now=now)
+                 tp=sig.take_profit, c2_closed=sig.c2_closed, model=sig.entry_model,
+                 c1=(sig.key_level_low if sig.direction == "LONG" else sig.key_level_high), now=now)
         rec = _CACHE.get(key)
         if rec is None:
             return
         rec["deleted_reason"], rec["deleted_at"] = reason, now
+        _resume_tracking(rec, now)
         _DIRTY.add(key)
     except Exception:
         log.exception("setup_journal.note_deleted failed for %s", getattr(sig, "symbol", "?"))
+
+
+def _resume_tracking(rec: dict, now) -> None:
+    """Silinen `waiting` setup'in SONRASINI olcmeye devam et (19.09, kullanici sorusu).
+
+    `waiting`e ulasan setupta `note` outcome'u "signal" yapip izlemeyi durduruyordu; setup
+    sonradan silinince (`missed_quality`, `low_rr`, `stale`, `crt_gone`...) izleme geri
+    acilmiyor ve o kapinin maliyeti olculemiyordu -- diger butun kapilarda tutulan defter
+    (entry'ye deldi mi -> TP mi SL mi) yalniz burada eksikti. Ilk olcum: 6 vakanin 4'u RR >= 2.
+
+    Silme ani limit emrinin kalktigi andir. Aktif sinyal silinmez (bkz. scanner._note_deleted
+    cagri noktalari; hafta kapanisinda `sig.status != "active"` suzgeci var), yani emir hic
+    dolmamistir -> izleme "pending"den devam eder ve dolum bilgisi sifirlanir.
+    Ufuk DEGISMEZ (`levels_at` + HORIZON) ki sonuc diger kapilarla ayni cetvelde okunsun.
+    Ayri bir outcome degerine gerek yok: bu satirlar `best_stage='waiting'` + dolu
+    `deleted_reason` ile ayirt edilir (sinyale donusup yasayanlarda `deleted_reason` NULL).
+    """
+    if rec.get("outcome") != "signal" or rec.get("levels_at") is None or now is None:
+        return
+    rec["outcome"], rec["outcome_at"], rec["entry_touched_at"] = "pending", None, None
+    # Silme anindan ONCE acilmis mum sayilmaz: mum ici sira bilinmedigi icin emrin hala canli
+    # oldugu bolumu yeni olcume katmak yanlis olur (scanner'daki `on_fill_bar` disiplini).
+    rec["tracked_until"] = now
 
 
 def has_levels(strategy: str, symbol: str, direction: str, purge_time) -> bool:
@@ -399,6 +813,15 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float) -> No
             if _shadow_active(rec, bar_ts):
                 _apply_shadow(rec, bar_ts, float(high), float(low))
                 touched = True
+            if _entries_active(rec, bar_ts):
+                _apply_entries(rec, bar_ts, float(high), float(low))
+                touched = True
+            if _retrace_active(rec, bar_ts):
+                _apply_retrace(rec, bar_ts, float(high), float(low))
+                touched = True
+            if _prefill_active(rec, bar_ts):
+                _apply_prefill(rec, bar_ts, float(high), float(low))
+                touched = True
             if touched:
                 _DIRTY.add(key)
     except Exception:
@@ -417,11 +840,25 @@ def _merge_row(rec: dict, row: SetupJournal) -> None:
                   "tracked_until"):
             rec[k] = getattr(row, k)
         rec["shadow"] = _shadow_load(row.shadow) or _shadow_init(rec)
+        rec["entries"] = _entries_load(row.entries) or rec.get("entries")
+        rec["retrace"] = _retrace_load(row.retrace) or rec.get("retrace")
+        rec["prefill"] = _prefill_load(row.prefill) or rec.get("prefill")
     for k in ("deleted_reason", "deleted_at", "crt_bar_time", "market_type"):
         if rec.get(k) is None and getattr(row, k) is not None:
             rec[k] = getattr(row, k)
+    for k, raw in (("score_parts", row.score_parts), ("features", row.features),
+                   ("parts_at_levels", row.parts_at_levels),
+                   ("features_at_levels", row.features_at_levels)):
+        if rec.get(k) is None:
+            rec[k] = _parts_load(raw)
     if rec.get("outcome") != "signal" and row.outcome == "signal":
         rec["outcome"] = "signal"
+    # Silinmis satirda izleme geri acilir (`_resume_tracking`). Yukaridaki iki dal da DB'deki
+    # eski "signal" damgasini geri yazabiliyor (seviye dali outcome'u oldugu gibi kopyalar),
+    # bu da restart'ta izlemeyi sessizce ikinci kez durdururdu; silme bilgisi kopyalandiktan
+    # SONRA yeniden uygulanir. Cozulmus satira dokunmaz (yalniz outcome == "signal" iken calisir).
+    if rec.get("deleted_reason") is not None:
+        _resume_tracking(rec, rec.get("deleted_at"))
 
 
 async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
@@ -440,6 +877,13 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                 rec.update(id=row.id, strategy=row.strategy, symbol=row.symbol, direction=row.direction,
                            purge_time=row.purge_time, _flushed_seen=row.last_seen)
                 rec["shadow"] = _shadow_load(row.shadow)
+                rec["entries"] = _entries_load(row.entries)
+                rec["retrace"] = _retrace_load(row.retrace)
+                rec["prefill"] = _prefill_load(row.prefill)
+                rec["score_parts"] = _parts_load(row.score_parts)
+                rec["features"] = _parts_load(row.features)
+                rec["parts_at_levels"] = _parts_load(row.parts_at_levels)
+                rec["features_at_levels"] = _parts_load(row.features_at_levels)
                 _CACHE[key] = rec
             else:
                 _merge_row(rec, row)
@@ -448,7 +892,9 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
         if store is not None and symbol_resolver is not None:
             for key, rec in _CACHE.items():
                 if rec.get("levels_at") is None or (
-                    rec.get("outcome") not in TRACKING and not _shadow_active(rec)
+                    rec.get("outcome") not in TRACKING
+                    and not _shadow_active(rec) and not _entries_active(rec)
+                    and not _retrace_active(rec) and not _prefill_active(rec)
                 ):
                     continue
                 try:
@@ -466,6 +912,15 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                         hit = True
                     if _shadow_active(rec, bar_ts):
                         _apply_shadow(rec, bar_ts, float(bar["high"]), float(bar["low"]))
+                        hit = True
+                    if _entries_active(rec, bar_ts):
+                        _apply_entries(rec, bar_ts, float(bar["high"]), float(bar["low"]))
+                        hit = True
+                    if _retrace_active(rec, bar_ts):
+                        _apply_retrace(rec, bar_ts, float(bar["high"]), float(bar["low"]))
+                        hit = True
+                    if _prefill_active(rec, bar_ts):
+                        _apply_prefill(rec, bar_ts, float(bar["high"]), float(bar["low"]))
                         hit = True
                     if hit:
                         _DIRTY.add(key)
@@ -500,6 +955,13 @@ async def flush(session) -> None:
             for c in _COLUMNS:
                 setattr(row, c, rec.get(c))
             row.shadow = _shadow_dump(rec.get("shadow"))
+            row.entries = _entries_dump(rec.get("entries"))
+            row.retrace = _retrace_dump(rec.get("retrace"))
+            row.prefill = _prefill_dump(rec.get("prefill"))
+            row.score_parts = _parts_dump(rec.get("score_parts"))
+            row.features = _json_dump(rec.get("features"))
+            row.parts_at_levels = _parts_dump(rec.get("parts_at_levels"))
+            row.features_at_levels = _json_dump(rec.get("features_at_levels"))
             rec["_flushed_seen"] = rec.get("last_seen")
         await session.commit()
         for key in keys:
@@ -524,5 +986,5 @@ def _prune() -> None:
     cutoff = _now() - KEEP
     for key in [k for k, r in _CACHE.items()
                 if r.get("last_seen") and r["last_seen"] < cutoff and r.get("outcome") not in TRACKING
-                and not _shadow_active(r) and k not in _DIRTY]:
+                and not _shadow_active(r) and not _prefill_active(r) and k not in _DIRTY]:
         _CACHE.pop(key, None)

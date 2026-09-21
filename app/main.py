@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from collections import Counter
@@ -6,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Request, Form, Depends, Query
+from fastapi import FastAPI, Request, Form, Depends, Query, File, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -17,7 +18,10 @@ from app.config import BASE_DIR
 from app.log_report import build_report
 from app.logging_config import recent_issues, setup_logging
 from app.database import init_db, get_db
-from app.models import Signal, EventLog, SetupJournal
+from app.models import Signal, EventLog, SetupJournal, PaperTrade
+from app.watchlist import build_watchlist
+from app import paper_trades as paper
+from app import tv_import as tv
 from app.setup_journal import PRE_SETUP_STAGES
 from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR
 from app.telegram import is_configured as tg_is_configured
@@ -170,6 +174,24 @@ templates.env.globals["calc_rr_ratio"] = _calc_rr_ratio
 templates.env.globals["signal_planned_rr"] = _signal_planned_rr
 templates.env.globals["signal_realized_rr"] = _signal_realized_rr
 templates.env.globals["fmt_ui_symbol"] = _fmt_ui_symbol
+templates.env.globals["fmt_money"] = paper.fmt_money
+
+
+def _static_version(name: str = "css/app.css") -> str:
+    """Statik dosyanin mtime damgasi -- sablonlarda `?v=` olarak kullanilir.
+
+    Tailwind'i yeniden derlemek yetmiyordu: StaticFiles `cache-control` yazmadigi icin tarayici
+    sezgisel onbellekle eski app.css'i gunlerce kullanabiliyor ve YENI siniflar uygulanmiyor
+    (20.09: takvimde `grid-cols-7` gelmedigi icin hucreler tam genislikte alt alta dizildi --
+    `display:grid` var, `grid-template-columns` yok). Damga degisince tarayici yeniden indirir.
+    """
+    try:
+        return str(int((BASE_DIR / "app" / "static" / name).stat().st_mtime))
+    except OSError:
+        return "0"
+
+
+templates.env.globals["static_v"] = _static_version
 
 
 # ──────────────────── Auth Routes ────────────────────
@@ -316,6 +338,17 @@ def _build_dashboard_stats(signals: list[Signal]) -> dict:
 # Canli parcalar /dashboard/live ile 30 sn'de bir yenilenir; istatistikler sayfa acilisinda.
 
 _TSI = timezone(TSI_OFFSET)
+
+# Kismi kar (%50'de yari + BE) vs sadece BE karsilastirmasi: bu kadar kismi karli islem birikince
+# Dashboard "Dikkat" panosu olcumu hatirlatir (scripts/partial_vs_be.py). Karar kurali ve sinirlar:
+# IZLEME.md -> "Kismi kar vs BE-only". Olcum yapilinca esigi yukselt ya da hatirlatmayi kaldir.
+PARTIAL_REVIEW_MIN_TRADES = 25
+# LONG/SHORT ayrismasi: her YONDE bu kadar kapali islem birikince Dikkat panosu olcumu hatirlatir
+# (scripts/direction_stat.py). Pencere 08.09.2026'da basliyor -- ilk kapali islem, izlemenin basi.
+# Karar kurali ve sinirlar: IZLEME.md -> "LONG/SHORT ayrismasi". Karar verilince esigi yukselt
+# ya da hatirlatmayi kaldir, yoksa surekli bagirir.
+DIRECTION_REVIEW_MIN_TRADES = 30
+DIRECTION_REVIEW_SINCE = datetime(2026, 9, 8)
 _DASH_TFS = ("4h", "1d", "1h")
 # "FX" = kripto disi tum seans sembolleri (fx/metal/endeks/petrol).
 _DASH_MARKETS = (
@@ -494,7 +527,12 @@ def _strategy_cards(all_signals, closed, open_tf_counts, now: datetime) -> list[
 
 
 def _fx_week_state(now: datetime) -> dict:
-    """Seans sembolleri haftasi: Cuma 17:00 NY kapanis, Pazar 17:00 NY acilis (app.session)."""
+    """Seans sembolleri haftasi: Cuma 17:00 NY kapanis, Pazar 17:00 NY acilis (app.session).
+
+    Kapanis her sembolde ayni an. Acilis **spot FX'in** acilisidir: CME grubu
+    (XAU/XAG/US100/US500/petrol) 18:00 NY'de, yani bir saat sonra acilir - serit
+    FX evrenini gosterdigi icin tek geri sayim birakildi (bkz. session.session_hour).
+    """
     ny = now.astimezone(FX_NY)
     wd, hour = ny.weekday(), ny.hour
     closed = (wd == 4 and hour >= FX_SESSION_HOUR) or wd == 5 or (wd == 6 and hour < FX_SESSION_HOUR)
@@ -615,6 +653,37 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
              "dolum ve sonrası gerçek mi kontrol et.")
     for item in issues["items"][-6:]:
         _add("error" if item["level"] == "ERROR" else "warn", item["ts"], f"{item['logger']}: {item['msg']}")
+    # Kismi kar vs sadece BE olcumu: esik dolunca KENDILIGINDEN hatirlat (kimse takvim tutmasin).
+    # Olcum yapilip IZLEME.md'ye yazildiginda bu esik yukseltilir ya da blok kaldirilir.
+    partial_done = await db.scalar(
+        select(func.count(Signal.id)).where(
+            Signal.status == "expired",
+            Signal.rr_value.is_not(None),
+            Signal.partial_size.is_not(None),
+            Signal.partial_rr.is_not(None),
+        )
+    )
+    if (partial_done or 0) >= PARTIAL_REVIEW_MIN_TRADES:
+        _add("info", None,
+             f"Kısmi kâr vs sadece BE: {partial_done} işlem birikti — "
+             "`python scripts/partial_vs_be.py` ile ölç, sonucu IZLEME.md'ye yaz.")
+    # LONG/SHORT ayrismasi olcumu: iki yon de esigi doldurunca hatirlat. Betik esigin altinda
+    # zaten "KARAR YOK" basar; buradaki sayac yalnizca "artik bakilabilir" demek.
+    dir_rows = await db.execute(
+        select(Signal.direction, func.count(Signal.id))
+        .where(
+            Signal.closed_at.is_not(None),
+            Signal.closed_at >= DIRECTION_REVIEW_SINCE,
+            Signal.rr_value.is_not(None),
+        )
+        .group_by(Signal.direction)
+    )
+    dir_counts = {d: n for d, n in dir_rows.all()}
+    n_long, n_short = dir_counts.get("LONG", 0), dir_counts.get("SHORT", 0)
+    if min(n_long, n_short) >= DIRECTION_REVIEW_MIN_TRADES:
+        _add("info", None,
+             f"LONG/SHORT ayrışması: {n_long} LONG / {n_short} SHORT işlem birikti — "
+             "`python scripts/direction_stat.py` ile ölç, sonucu IZLEME.md'ye yaz.")
     attention.sort(key=lambda a: a["ts"], reverse=True)
 
     return {
@@ -1046,6 +1115,15 @@ async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
             round(float(s.partial_size) * float(s.partial_rr), 2)
             if s.partial_size and s.partial_rr is not None else None
         )
+        # MFE: islem lehine gorulen EN IYI nokta. Live R ile ayni cetvelde olsun diye kismi kar
+        # agirligi burada da uygulanir (yani "o an kasada ne olurdu"). mfe_price yalniz aktifken
+        # guncelleniyor; bekleyen sinyalde anlamsiz.
+        mfe_r = None
+        if s.status == "active" and s.mfe_price is not None and entry is not None and risk > 0:
+            mfe_move = (float(s.mfe_price) - entry) if s.direction == "LONG" else (entry - float(s.mfe_price))
+            mfe_rest = mfe_move / risk
+            size = float(s.partial_size or 0.0)
+            mfe_r = size * float(s.partial_rr or 0.0) + (1.0 - size) * mfe_rest if size > 0 else mfe_rest
         sl_be = (
             s.status == "active" and entry is not None and s.stop_loss is not None
             and abs(float(s.stop_loss) - entry) <= abs(entry) * 1e-9
@@ -1065,6 +1143,7 @@ async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
             "live_r": live_r,
             "to_entry_r": to_entry_r,
             "banked_r": banked_r,
+            "mfe_r": mfe_r,
             "sl_be": sl_be,
             "c2_close_at": c2_close_at,
             "c2_open": c2_open,
@@ -1125,7 +1204,27 @@ async def open_signals_table(
 # Motorun gordugu her setup (strateji+sembol+yon+C2): nereye kadar gitti, neden durdu,
 # sonra fiyat ne yapti. Yazan: app/setup_journal.py.
 
-_JOURNAL_MAX_ROWS = 400
+# Ozet (ustteki tablo) asil is; satir listesi katlanmis durur ve sayfalanir. Eskiden pencere
+# icindeki TUM satirlar (gunde ~400) belege yukleniyor, ozet Python'da sayiliyordu; artik ozet
+# SQL'de gruplaniyor, satirlar yalniz acildiginda sayfa sayfa cekiliyor. Veri kaybi yok --
+# degisen sadece gosterim.
+_JOURNAL_PAGE_SIZE = 50
+
+
+@app.get("/izleme", response_class=HTMLResponse)
+async def watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
+    """Izleme konulari: statu + tetige kalan + sonuc. Veri kaynagi app/watchlist.py,
+    detay metinleri IZLEME.md'den okunur (bkz. modul basligi)."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    # Karara baglanmis maddeler varsayilan olarak gizli (sayfa karisiyordu); ?done=1 geri getirir.
+    data = await build_watchlist(db, show_done=request.query_params.get("done") == "1")
+    return templates.TemplateResponse(request=request, name="watchlist.html", context={
+        "user": user,
+        "active_page": "watchlist",
+        **data,
+    })
 
 
 @app.get("/setup-journal", response_class=HTMLResponse)
@@ -1136,6 +1235,8 @@ async def setup_journal_page(
     stage: str = Query(default="all"),
     symbol: str = Query(default=""),
     days: int = Query(default=7),
+    page: int = Query(default=1),
+    rows_open: int = Query(default=0),
 ):
     user = get_current_user(request)
     if not user:
@@ -1147,35 +1248,74 @@ async def setup_journal_page(
     stage = stage if stage in journal.STAGE_LABELS else "all"
     days = days if days in (1, 3, 7, 30, 90) else 7
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
-    query = select(SetupJournal).where(SetupJournal.last_seen >= since)
+    filters = [SetupJournal.last_seen >= since]
     if tf != "all":
-        query = query.where(SetupJournal.strategy == tf)
+        filters.append(SetupJournal.strategy == tf)
     if symbol:
-        query = query.where(SetupJournal.symbol.ilike(f"%{symbol}%"))
-    rows = (await db.execute(query.order_by(desc(SetupJournal.last_seen)))).scalars().all()
+        filters.append(SetupJournal.symbol.ilike(f"%{symbol}%"))
 
-    # Ozet asama filtresinden ONCE: hangi kapi kac kazanci engelledi / kac kaybi onledi.
-    summary = []
-    for code, label in journal.STAGES:
-        sub = [r for r in rows if r.best_stage == code]
-        if not sub:
-            continue
-        outcomes = Counter(r.outcome or "-" for r in sub)
-        r_if = sum(
-            (r.rr or 0.0) if r.outcome == "win" else (-1.0 if r.outcome == "loss" else 0.0)
-            for r in sub
+    # Ozet asama filtresinden ONCE ve SQL'de: hangi kapi kac kazanci engelledi / kac kaybi onledi.
+    grouped = (await db.execute(
+        select(
+            SetupJournal.best_stage,
+            SetupJournal.outcome,
+            func.count(SetupJournal.id),
+            func.sum(case((SetupJournal.outcome == "win", SetupJournal.rr), else_=0.0)),
         )
-        summary.append({"code": code, "label": label, "n": len(sub), "oc": outcomes, "r_if": round(r_if, 2)})
+        .where(*filters)
+        .group_by(SetupJournal.best_stage, SetupJournal.outcome)
+    )).all()
+    per_stage: dict[str, dict] = {}
+    for best_stage, outcome, n, win_rr in grouped:
+        acc = per_stage.setdefault(best_stage, {"oc": Counter(), "n": 0, "r_if": 0.0})
+        acc["oc"][outcome or "-"] += n
+        acc["n"] += n
+        if outcome == "win":
+            acc["r_if"] += float(win_rr or 0.0)
+        elif outcome == "loss":
+            acc["r_if"] -= n
+    summary = [
+        {"code": code, "label": label, "n": acc["n"], "oc": acc["oc"], "r_if": round(acc["r_if"], 2)}
+        for code, label in journal.STAGES
+        if (acc := per_stage.get(code))
+    ]
+    totals = {
+        "setups": sum(a["n"] for a in per_stage.values()),
+        "win": sum(a["oc"].get("win", 0) for a in per_stage.values()),
+        "loss": sum(a["oc"].get("loss", 0) for a in per_stage.values()),
+        "tp_before_entry": sum(a["oc"].get("tp_before_entry", 0) for a in per_stage.values()),
+        "no_touch": sum(a["oc"].get("no_touch", 0) for a in per_stage.values()),
+        "tracking": sum(a["oc"].get("pending", 0) + a["oc"].get("filled", 0) for a in per_stage.values()),
+        "signal": sum(a["oc"].get("signal", 0) for a in per_stage.values()),
+        "r_if": round(sum(a["r_if"] for a in per_stage.values()), 2),
+    }
 
+    # Satir listesi: katlanmis durur; yalniz acikken (veya kapi linkiyle gelindiginde) cekilir.
     if stage != "all":
-        rows = [r for r in rows if r.best_stage == stage]
-    truncated = len(rows) > _JOURNAL_MAX_ROWS
+        filters.append(SetupJournal.best_stage == stage)
+    total = (await db.execute(select(func.count(SetupJournal.id)).where(*filters))).scalar() or 0
+    total_pages = max(1, (total + _JOURNAL_PAGE_SIZE - 1) // _JOURNAL_PAGE_SIZE)
+    page = min(max(1, page), total_pages)
+    show_rows = bool(rows_open) or stage != "all"
+    rows = []
+    if show_rows:
+        rows = (await db.execute(
+            select(SetupJournal).where(*filters)
+            .order_by(desc(SetupJournal.last_seen))
+            .offset((page - 1) * _JOURNAL_PAGE_SIZE).limit(_JOURNAL_PAGE_SIZE)
+        )).scalars().all()
+    filter_qs = urlencode({"tf": tf, "stage": stage, "symbol": symbol, "days": days, "rows_open": 1})
     return templates.TemplateResponse(request=request, name="setup_journal.html", context={
         "user": user,
         "active_page": "setup_journal",
-        "rows": rows[:_JOURNAL_MAX_ROWS],
-        "truncated": truncated,
+        "rows": rows,
+        "show_rows": show_rows,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+        "filter_qs": filter_qs,
         "summary": summary,
+        "totals": totals,
         "tf": tf,
         "stage": stage,
         "symbol": symbol,
@@ -1377,6 +1517,10 @@ async def api_radar(request: Request):
             "ifvg": e.get("ifvg"),
             "model": e.get("model"),
             # "same_color": bool(e.get("same_color")),  # eski bilgi alani; UI'da gosterilmiyor
+            # Setup'i tanimlayan mumlarin acilis zamani (TSI, "16.09 15:00"): purge = C2,
+            # crt = C1. Radar'da "bu setup hangi muma ait" sorusu ancak boyle cevaplanıyordu.
+            "purge_time": _fmt_date_tsi(e["purge_time"]) if e.get("purge_time") else None,
+            "crt_bar_time": _fmt_date_tsi(e["crt_bar_time"]) if e.get("crt_bar_time") else None,
             "updated_at": _fmt_date_tsi(e["updated_at"]) if e.get("updated_at") else None,
         })
     symbols.sort(key=lambda x: (x["rank"], x["symbol"]))
@@ -1653,3 +1797,474 @@ async def telegram_test(request: Request):
         "success": ok,
         "error": None if ok else "Message could not be sent. Check your token and chat ID.",
     })
+
+
+# ──────────────────── Paper Trades (deneme islem gunlugu) ────────────────────
+# Elle tutulan islem kaydi: motorun karnesi Signal'da, burasi INSAN kararini olcer.
+# Mantik app/paper_trades.py'de; burada yalniz route + sablon baglami.
+
+_PAPER_VIEWS = ("overview", "trades", "calendar", "import")
+_PAPER_TABS = ("all", "open", "closed")
+_PAPER_MARKET_KEYS = {key for key, _ in paper.MARKET_OPTIONS}
+
+
+def _paper_num_str(value) -> str:
+    """Form alani icin sade sayi metni (bilimsel notasyon ve virgul olmadan)."""
+    if value is None:
+        return ""
+    text = f"{float(value):.10f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _paper_filters(request: Request) -> dict:
+    q = request.query_params
+    f = {key: (q.get(key) or "").strip()
+         for key in ("symbol", "direction", "strategy", "source", "result",
+                     "date_from", "date_to", "date_basis")}
+    markets: list[str] = []
+    for value in q.getlist("market_type"):
+        markets.extend([v for v in value.split(",") if v])
+    f["markets"] = [mk for mk in markets if mk in _PAPER_MARKET_KEYS]
+    # Varsayilan giris tarihi: bu haftanin Pazartesi'si (TSI) -- Signals sayfasiyla ayni sozlesme.
+    # Parametre HIC yoksa uygulanir; kullanici alani bosaltip gonderirse tarih filtresi kalkar.
+    if "date_from" not in q:
+        f["date_from"] = _period_range("week", 0)[0].astimezone(_TSI).strftime("%Y-%m-%d")
+    return f
+
+
+def _paper_qs(f: dict, view: str, tab: str, kind: str, offset: int) -> tuple[str, str]:
+    """(qs, filter_qs). qs = her sey (form gonderimi / satir islemleri geri donerken);
+    filter_qs = YALNIZ filtreler -- sekme ve donem linkleri view/tab/period'i kendileri yazar
+    (tekrarlanan parametrede Starlette ilkini aldigi icin ikisini birlestirmek kirilgan)."""
+    items: list[tuple[str, str]] = [
+        (key, f[key]) for key in ("symbol", "direction", "strategy", "source", "result") if f.get(key)
+    ]
+    items.extend(("market_type", mk) for mk in f["markets"])
+    items.extend((("date_from", f.get("date_from") or ""), ("date_to", f.get("date_to") or "")))
+    if f.get("date_basis") == "closed":
+        items.append(("date_basis", "closed"))
+    head = [("view", view), ("tab", tab), ("period", kind), ("offset", str(offset))]
+    return urlencode(head + items), urlencode(items)
+
+
+def _paper_form_ctx(request: Request, trade, form_data: dict | None) -> dict:
+    """Form'un dolu degerleri: POST hatasi > duzenlenen kayit > URL onyuklemesi > bos."""
+    if form_data is not None:
+        ctx = {key: (form_data.get(key) or "") for key in (
+            "symbol", "direction", "strategy", "source", "entry_price", "stop_loss", "take_profit",
+            "entered_at", "confidence", "gate", "signal_id", "chart_url", "note",
+            "partial_price", "partial_fraction", "qty", "currency")}
+        ctx["id"] = form_data.get("id") or (trade.id if trade else "")
+        return ctx
+    if trade is not None:
+        return {
+            "id": trade.id,
+            "symbol": trade.symbol or "",
+            "direction": trade.direction or "LONG",
+            "strategy": trade.strategy or "other",
+            "source": trade.source or "manual",
+            "entry_price": _paper_num_str(trade.entry_price),
+            "stop_loss": _paper_num_str(trade.stop_loss),
+            "take_profit": _paper_num_str(trade.take_profit),
+            "entered_at": paper.to_input_dt(trade.entered_at),
+            "confidence": str(trade.confidence) if trade.confidence else "",
+            "gate": trade.gate or "",
+            "signal_id": str(trade.signal_id) if trade.signal_id else "",
+            "chart_url": trade.chart_url or "",
+            "note": trade.note or "",
+            "partial_price": _paper_num_str(trade.partial_price),
+            "partial_fraction": _paper_num_str(trade.partial_fraction),
+            "qty": _paper_num_str(trade.qty),
+            "currency": trade.currency or paper.DEFAULT_CURRENCY,
+        }
+    # URL onyuklemesi: Open Signals / Signals sayfasindaki "Günlüğe ekle" butonu boyle gelir.
+    q = request.query_params
+    return {
+        "id": "",
+        "symbol": q.get("symbol") or "",
+        "direction": q.get("direction") or "LONG",
+        "strategy": q.get("strategy") or "other",
+        "source": q.get("source") or ("bot" if q.get("signal_id") else "manual"),
+        "entry_price": q.get("entry") or "",
+        "stop_loss": q.get("sl") or "",
+        "take_profit": q.get("tp") or "",
+        "entered_at": "",
+        "confidence": "",
+        "gate": q.get("gate") or "",
+        "signal_id": q.get("signal_id") or "",
+        "chart_url": "",
+        "note": "",
+        "partial_price": "",
+        "partial_fraction": "",
+        "qty": "",
+        "currency": paper.DEFAULT_CURRENCY,
+    }
+
+
+async def _paper_context(
+    request: Request, db: AsyncSession, *, errors: list[str] | None = None,
+    form_data: dict | None = None, edit_id: int | None = None, full: bool = True,
+) -> dict:
+    """Sayfa baglami. `full=False` yalnizca tablo parcasi icin: 30 sn'de bir yenilenen
+    istek panolari (donem ozeti / ben vs motor / disiplin / sinyal onerileri) hesaplamaz."""
+    q = request.query_params
+    view = (q.get("view") or "overview").lower()
+    view = view if view in _PAPER_VIEWS else "overview"
+    tab = (q.get("tab") or "all").lower()
+    tab = tab if tab in _PAPER_TABS else "all"
+    # Takvim her zaman aylik; donem secicisi o sekmede gizlenir.
+    kind = "month" if (q.get("period") == "month" or view == "calendar") else "week"
+    try:
+        offset = max(-520, min(0, int(q.get("offset") or 0)))
+    except ValueError:
+        offset = 0
+    try:
+        page = max(1, int(q.get("page") or 1))
+    except ValueError:
+        page = 1
+
+    f = _paper_filters(request)
+    qs, filter_qs = _paper_qs(f, view, tab, kind, offset)
+
+    now = datetime.now(timezone.utc)
+    start, end, label = _period_range(kind, offset, now)
+    prev_start, prev_end, _ = _period_range(kind, offset - 1, now)
+    naive = lambda dt: dt.replace(tzinfo=None)  # noqa: E731  (DB'nin her yeri naive UTC)
+
+    listing = await paper.list_page(db, f, tab, page)
+    # Her sekme yalniz kendi panosunu hesaplar (tablo parcasi hicbirini).
+    panels: dict = {"summary": {}, "vs": {}, "disc": {}, "suggestions": [], "calendar": None}
+    if full:
+        panels["suggestions"] = await paper.signal_suggestions(db)
+    if full and view == "calendar":
+        panels["calendar"] = paper.calendar_month(
+            await paper.closed_trades(db, naive(start), naive(end)),
+            start.astimezone(_TSI).date(),
+            (end - timedelta(days=1)).astimezone(_TSI).date(),
+            await paper.open_trades_between(db, naive(start), naive(end)))
+    elif full and view == "overview":
+        summary = paper.period_summary(await paper.closed_trades(db, naive(start), naive(end)))
+        prev = paper.period_summary(await paper.closed_trades(db, naive(prev_start), naive(prev_end)))
+        summary["delta_r"] = round(summary["total_r"] - prev["total_r"], 2) if prev["n"] else None
+        all_closed = await paper.closed_trades(db)
+        panels["summary"] = summary
+        panels["vs"] = await paper.vs_engine(db, all_closed)
+        panels["disc"] = paper.discipline(all_closed)
+
+    # Duzenlenen / kapatilan kayit
+    trade = None
+    edit_raw = edit_id if edit_id is not None else q.get("edit")
+    if edit_raw:
+        try:
+            trade = await db.get(PaperTrade, int(edit_raw))
+        except (ValueError, TypeError):
+            trade = None
+    close_target = None
+    if q.get("close"):
+        try:
+            target = await db.get(PaperTrade, int(q.get("close")))
+        except (ValueError, TypeError):
+            target = None
+        if target is not None and target.status == "open":
+            close_target = paper.row_view(target)
+            close_target["price"] = _paper_num_str(close_target["price"])
+
+    # "Tabloyu bu doneme getir": ozet donem seciciye, tablo kendi tarih filtresine bagli.
+    table_link = "/paper-trades?" + urlencode([
+        ("view", "trades"), ("tab", tab), ("period", kind), ("offset", str(offset)),
+        ("date_basis", "closed"),
+        ("date_from", start.astimezone(_TSI).strftime("%Y-%m-%d")),
+        ("date_to", (end - timedelta(days=1)).astimezone(_TSI).strftime("%Y-%m-%d")),
+    ])
+
+    return {
+        "user": get_current_user(request),
+        "active_page": "paper_trades",
+        "view": view,
+        "errors": errors or [],
+        "form": _paper_form_ctx(request, trade, form_data),
+        "form_open": bool(q.get("new") or edit_raw or errors or form_data),
+        "close_target": close_target,
+        "symbols": paper.symbol_choices(),
+        "sources": paper.SOURCES,
+        "strategies": paper.STRATEGIES,
+        "exit_reasons": paper.EXIT_REASONS,
+        "mistake_tags": paper.MISTAKE_TAGS,
+        "markets": paper.MARKET_OPTIONS,
+        "period": {"kind": kind, "offset": offset, "label": label, "table_link": table_link},
+        **panels,
+        "listing": listing,
+        "rows": listing["rows"],
+        "total": listing["total"],
+        "page": listing["page"],
+        "total_pages": listing["total_pages"],
+        "tab": tab,
+        "filters": f,
+        "qs": qs,
+        "filter_qs": filter_qs,
+        "week_start": _period_range("week", 0)[0].astimezone(_TSI).strftime("%Y-%m-%d"),
+        "now_input": paper.to_input_dt(paper.now_utc()),
+        "imported": q.get("imported"),
+        "import_result": None,
+    }
+
+
+async def _paper_form_data(request: Request) -> dict:
+    raw = await request.form()
+    data = {key: raw.get(key) for key in raw.keys()}
+    data["mistakes"] = raw.getlist("mistakes")
+    return data
+
+
+def _paper_redirect(data: dict) -> RedirectResponse:
+    qs = (data.get("qs") or "").strip()
+    return RedirectResponse(url=f"/paper-trades?{qs}" if qs else "/paper-trades", status_code=303)
+
+
+@app.get("/paper-trades", response_class=HTMLResponse)
+async def paper_trades_page(request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    ctx = await _paper_context(request, db)
+    return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
+
+
+@app.get("/paper-trades/table", response_class=HTMLResponse)
+async def paper_trades_table(request: Request, db: AsyncSession = Depends(get_db)):
+    """Tablonun 30 sn'lik yenilemesi (acik islemlerde canli fiyat + canli R)."""
+    if not get_current_user(request):
+        return HTMLResponse(status_code=401, content="")
+    ctx = await _paper_context(request, db, full=False)
+    return templates.TemplateResponse(request=request, name="paper_trades_table.html", context=ctx)
+
+
+@app.post("/paper-trades/new")
+async def paper_trade_new(request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    data = await _paper_form_data(request)
+    trade = PaperTrade()
+    errors = paper.apply_plan(trade, data)
+    # Hizli kayit: cikis da girildiyse islem dogrudan kapali dogar (gecmis islemleri toplu girmek icin).
+    if not errors and (data.get("exit_price") or "").strip():
+        errors = paper.apply_close(trade, data)
+    if errors:
+        ctx = await _paper_context(request, db, errors=errors, form_data=data)
+        return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
+    db.add(trade)
+    await db.commit()
+    return _paper_redirect(data)
+
+
+@app.post("/paper-trades/{trade_id}/edit")
+async def paper_trade_edit(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    trade = await db.get(PaperTrade, trade_id)
+    if trade is None:
+        return RedirectResponse(url="/paper-trades", status_code=303)
+    data = await _paper_form_data(request)
+    errors = paper.apply_plan(trade, data) + paper.apply_partial(trade, data)
+    if errors:
+        data["id"] = trade_id
+        ctx = await _paper_context(request, db, errors=errors, form_data=data, edit_id=trade_id)
+        return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
+    # Seviyeler degistiyse kapanmis islemin R'si de yeniden hesaplanir (elle girilmez).
+    if trade.status == "closed" and trade.exit_price is not None:
+        trade.rr_value = round(paper.rr_at(trade, trade.exit_price) or 0.0, 4)
+        trade.result = paper.result_of(trade.rr_value)
+    await db.commit()
+    return _paper_redirect(data)
+
+
+@app.post("/paper-trades/{trade_id}/close")
+async def paper_trade_close(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    trade = await db.get(PaperTrade, trade_id)
+    if trade is None:
+        return RedirectResponse(url="/paper-trades", status_code=303)
+    data = await _paper_form_data(request)
+    errors = paper.apply_close(trade, data)
+    if errors:
+        ctx = await _paper_context(request, db, errors=errors)
+        return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
+    await db.commit()
+    return _paper_redirect(data)
+
+
+@app.post("/paper-trades/{trade_id}/reopen")
+async def paper_trade_reopen(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    trade = await db.get(PaperTrade, trade_id)
+    if trade is not None:
+        paper.reopen(trade)
+        await db.commit()
+    return _paper_redirect(await _paper_form_data(request))
+
+
+@app.post("/paper-trades/{trade_id}/delete")
+async def paper_trade_delete(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    trade = await db.get(PaperTrade, trade_id)
+    if trade is not None:
+        await db.delete(trade)
+        await db.commit()
+    return _paper_redirect(await _paper_form_data(request))
+
+
+# ──────────────────── TradingView içe aktarma ────────────────────
+# Iki CSV (islem gecmisi + emirler) okunur, birlestirilir, ONIZLEME gosterilir; yazma ayri
+# bir onaydan gecer. Dogrudan yazmiyoruz cunku: SL emir dosyasi yoksa eksik kalir (elle
+# girilir), sembol eslesmeyebilir ve ayni dosya iki kez yuklenebilir.
+
+
+def _decode_upload(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1254", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _import_payload(rows: list[dict]) -> str:
+    """Onizleme satirlarini gizli alanda tasiyacak JSON (datetime -> ISO)."""
+    def _clean(row: dict) -> dict:
+        out = {}
+        for key, value in row.items():
+            out[key] = value.isoformat() if isinstance(value, datetime) else value
+        return out
+    return json.dumps([_clean(r) for r in rows], ensure_ascii=False)
+
+
+def _payload_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.post("/paper-trades/import/preview", response_class=HTMLResponse)
+async def paper_import_preview(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    trades_file: UploadFile = File(...),
+    orders_file: UploadFile | None = File(None),
+    link_signals: str = Form(default=""),
+):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+
+    errors: list[str] = []
+    rows: list[dict] = []
+    warnings: list[str] = []
+    orders_n = 0
+    try:
+        trades, warnings = tv.parse_trades(_decode_upload(await trades_file.read()))
+        orders = []
+        if orders_file is not None and orders_file.filename:
+            orders = tv.parse_orders(_decode_upload(await orders_file.read()))
+            orders_n = len(orders)
+        rows = tv.merge(trades, orders)
+    except ValueError as exc:
+        errors.append(str(exc))
+    except Exception as exc:                                  # noqa: BLE001
+        log.exception("paper import: dosya okunamadi")
+        errors.append(f"Dosya okunamadı: {exc}")
+
+    if rows:
+        # Mukerrer koruma: ayni emir no daha once aktarildiysa satir kilitli gelir.
+        seen = set((await db.execute(
+            select(PaperTrade.ext_id).where(PaperTrade.ext_id.in_([r["ext_id"] for r in rows]))
+        )).scalars().all())
+        for row in rows:
+            row["exists"] = row["ext_id"] in seen
+            row["sl_side_ok"] = tv.sl_side_ok(row)
+            row["signal_id"] = None
+            if link_signals and not row["exists"]:
+                row["signal_id"] = await paper.match_signal(
+                    db, row["symbol"], row["direction"], row["entered_at"])
+        if not orders_n:
+            warnings.append("Emir dosyası verilmedi — SL/TP gelmedi, R hesaplanamaz. "
+                            "Aşağıdaki SL alanlarını elle doldurabilirsin.")
+
+    ctx = await _paper_context(request, db)
+    ctx.update({
+        "view": "import",
+        "import_result": {
+            "rows": rows,
+            "warnings": warnings,
+            "orders_n": orders_n,
+            "new_n": sum(1 for r in rows if not r["exists"]),
+            "exists_n": sum(1 for r in rows if r["exists"]),
+            "no_sl_n": sum(1 for r in rows if not r["exists"] and r["sl"] is None),
+            "linked_n": sum(1 for r in rows if r.get("signal_id")),
+            "payload": _import_payload(rows),
+            "link_signals": bool(link_signals),
+        },
+        "errors": errors,
+    })
+    return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
+
+
+@app.post("/paper-trades/import/commit")
+async def paper_import_commit(request: Request, db: AsyncSession = Depends(get_db)):
+    if not get_current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+    data = await _paper_form_data(request)
+    try:
+        rows = json.loads(data.get("payload") or "[]")
+    except json.JSONDecodeError:
+        rows = []
+    picked = {v for v in (await request.form()).getlist("pick") if v}
+    source = (data.get("source") or "manual").lower()
+    source = source if source in paper.SOURCE_LABELS else "manual"
+
+    seen = set((await db.execute(
+        select(PaperTrade.ext_id).where(PaperTrade.ext_id.in_([r.get("ext_id") for r in rows]))
+    )).scalars().all()) if rows else set()
+
+    created = 0
+    for row in rows:
+        ext_id = row.get("ext_id")
+        if ext_id in seen or (picked and ext_id not in picked):
+            continue
+        sl = paper.parse_num(data.get(f"sl_{ext_id}")) or row.get("sl")
+        entry = row.get("entry")
+        trade = PaperTrade(
+            symbol=row.get("symbol"), market_type=row.get("market_type"),
+            direction=row.get("direction"), strategy="other",
+            source="bot" if row.get("signal_id") else source,
+            signal_id=row.get("signal_id"),
+            entry_price=entry, stop_loss=sl, take_profit=row.get("tp"),
+            planned_rr=paper.calc_planned_rr(entry, sl, row.get("tp")),
+            entered_at=_payload_dt(row.get("entered_at")) or paper.now_utc(),
+            partial_price=row.get("partial_price"), partial_fraction=row.get("partial_fraction"),
+            exit_price=row.get("exit"), closed_at=_payload_dt(row.get("closed_at")),
+            exit_reason="manual" if row.get("exit") is not None else None,
+            status=row.get("status") or "open",
+            currency=row.get("currency") or paper.DEFAULT_CURRENCY,
+            qty=row.get("qty"), notional=row.get("notional"), fees=row.get("fees"),
+            pnl_amount=row.get("pnl"), return_pct=row.get("return_pct"),
+            leverage=row.get("leverage"), margin=row.get("margin"),
+            ext_source="tv", ext_id=ext_id,
+            note=f"TradingView içe aktarma · trade #{row.get('trade_no')}",
+        )
+        if trade.status == "closed":
+            rr = paper.rr_at(trade, trade.exit_price)
+            trade.rr_value = round(rr, 4) if rr is not None else None
+            trade.result = paper.result_of(trade.rr_value, paper.pnl_of(trade))
+            if trade.entered_at and trade.closed_at:
+                trade.duration_hours = round(
+                    max(0.0, (trade.closed_at - trade.entered_at).total_seconds() / 3600.0), 2)
+        db.add(trade)
+        created += 1
+    if created:
+        await db.commit()
+    return RedirectResponse(
+        url=f"/paper-trades?view=trades&tab=all&date_from=&imported={created}", status_code=303)

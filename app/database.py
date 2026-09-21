@@ -47,6 +47,13 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "setup_journal": [
         ("shadow", "ALTER TABLE setup_journal ADD COLUMN shadow VARCHAR"),
+        ("score_parts", "ALTER TABLE setup_journal ADD COLUMN score_parts VARCHAR"),
+        ("features", "ALTER TABLE setup_journal ADD COLUMN features VARCHAR"),
+        ("parts_at_levels", "ALTER TABLE setup_journal ADD COLUMN parts_at_levels VARCHAR"),
+        ("features_at_levels", "ALTER TABLE setup_journal ADD COLUMN features_at_levels VARCHAR"),
+        ("entries", "ALTER TABLE setup_journal ADD COLUMN entries VARCHAR"),
+        ("retrace", "ALTER TABLE setup_journal ADD COLUMN retrace VARCHAR"),
+        ("prefill", "ALTER TABLE setup_journal ADD COLUMN prefill VARCHAR"),
     ],
 }
 

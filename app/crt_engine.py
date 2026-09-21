@@ -54,8 +54,14 @@ PURGE_WICK_SCORE_PCT = 0.10
 # geri donen bir C2'den zayiftir; kod eskiden yalnizca "iceri kapandi mi"
 # (yani %0 bile yeterli) bakiyordu. Esigin altinda skordan C2_RECLAIM_PENALTY
 # dusulur -- HARD FILTRE DEGIL (ARB 09.09 %15 ile +3.16R yapti).
+#
+# 19.09: ceza 2 -> 4. 09.09'da "bu metrik kazananla kaybedeni ayirt etmiyor" diye not
+# edilmisti; gercek setuplarla olculunce bu YANLISLANDI -- geri donus yuzdesi ile sonuc
+# monoton iliskili cikti (olcum tablosu ve orneklem: IZLEME.md -> "C2 geri donus cezasi").
+# Hard filtre yerine ceza buyutuldu -- SMT'li (+2) guclu setup hala absorbe edebilsin.
+# Olcum ve karar kurali: IZLEME.md "5. C2 geri donus cezasi".
 C2_RECLAIM_WEAK_PCT = 25.0
-C2_RECLAIM_PENALTY = 2
+C2_RECLAIM_PENALTY = 4
 # LTF IFVG asgari bosluk boyutu: gap >= bu oran * son 20 LTF mumunun ort. range'i.
 # Amac: bir 5M mumunun kucuk bir kesridi kadar olan "bosluklari" (gurultu) eleyip
 # yalnizca gercek displacement iceren FVG'leri kabul etmek. Ayarlanabilir.
@@ -89,7 +95,17 @@ class CRTSetup:
     c2_closed: bool = False  # Purge (C2) mumu KAPANMIS mi? (forming/kapanmamis ise False)
     color_opposite: bool = True  # CRT/purge farkli renk; ayni renk skorda baz -1 (hard filter degil)
     target_consumed: bool = False  # C1 hedef tarafi sonradan supuruldu; sinyal yok, radar gosterir
+    # Purge (SL) tarafi C2'den SONRA da alindi: fiyat purge_extreme'i gecti, yani bu setup'in
+    # stopu fiilen yenmis. Hedef tarafinin aynasi (target_consumed) ve onun gibi aday secimini
+    # etkiler (18.09): olu aday, canli aday varken slotu tutmaz. Tek adaysa yine donulur --
+    # kapiyi scanner'in kendi past_sl kontrolu kapatir.
+    stop_breached: bool = False
     c2_reclaim: Optional[float] = None  # C2 kapanisi C1 araliginin %kacina dondu
+    # bias_score'un kalem kalem kirilimi (SCORE_PART_KEYS). Yalniz olcum icin: Setup
+    # Journal'a yazilir, motor karari sadece bias_score'a bakar.
+    score_parts: Optional[dict] = None
+    # Kalemlerin arkasindaki surekli olcumler (SCORE_FEATURE_KEYS) -- yine yalniz olcum.
+    score_features: Optional[dict] = None
 
 
 @dataclass
@@ -108,6 +124,11 @@ class CISDConfirmation:
     entry_model: str = "cisd"  # cisd | mss | ifvg  (ifvg'yi scanner ezer)
     ifvg_low: Optional[float] = None
     ifvg_high: Optional[float] = None
+    # Iki adayin HAM seviyeleri. `_pick_wider_stop` yalnizca kazanani dondurdugu icin
+    # kaybeden aday kayboluyordu; entry modeli karsilastirmasi (Setup Journal `entries`)
+    # ayni setupta ikisini de izlemek zorunda. YALNIZ OLCUM -- motor karari bunlari kullanmaz.
+    cisd_level: Optional[float] = None
+    mss_level: Optional[float] = None
 
     @property
     def confirmed(self) -> bool:
@@ -451,6 +472,31 @@ def _calc_bias(
     return bias, score
 
 
+# Kalite skorunun kalem kalem kirilimi (olcum icin; motor karari yalnizca "score"u kullanir).
+# Setup Journal'a JSON olarak yazilir -> hangi +1/+2 gercekten kazandiriyor sorusu olculebilsin.
+SCORE_PART_KEYS = (
+    "base", "htf", "weekly", "c2_closed", "pd_major", "pd_monthly", "pd_struct",
+    "wick", "ifvg", "reclaim", "smt", "raw", "score",
+)
+
+
+# Kalemlerin arkasindaki SUREKLI olcumler + uygunluk bayraklari. Puan degil: skor tablosunun
+# ESIKLERINI (wick %, IFVG bosluk, doji orani, ATR bandi, dar stop) sonradan birikmis veriyle
+# sorgulamak icin saklanir. "0 puan" ile "bakilamadi" ayrimi da burada (*_checked / *_possible).
+SCORE_FEATURE_KEYS = (
+    "wick_frac", "c2_body_frac", "reclaim_pct", "ifvg_gap_frac", "c2_range_frac",
+    "range_atr", "stop_range_mult", "stop_pct",
+    "ifvg_checked", "bias_checked", "smt_possible",
+)
+
+
+def _empty_score_parts() -> dict:
+    """Skor hesaplanamadigi erken donuslerde (gecersiz C1/C2) notr kirilim."""
+    parts = {k: 0 for k in SCORE_PART_KEYS}
+    parts["raw"] = parts["score"] = 1
+    return parts
+
+
 def _pd_array_score(pd_labels: Optional[list[str]]) -> int:
     """Kademeli PD skoru (ham; SMT'siz tavan 9'da kesilir).
 
@@ -491,14 +537,14 @@ def c2_reclaim_pct(
     return inside / rng * 100.0
 
 
-def _purge_wick_score(
+def _purge_wick_ratio(
     crt_range: float,
     purge_row: pd.Series,
     direction: str,
-) -> int:
-    """Purge rejection wick: fitil / CRT range >= PURGE_WICK_SCORE_PCT -> +1."""
+) -> float:
+    """Purge rejection fitilinin CRT range'ine orani (skor bundan turetilir; olcum icin ayri)."""
     if crt_range <= 0:
-        return 0
+        return 0.0
     o = float(purge_row["open"])
     c = float(purge_row["close"])
     h = float(purge_row["high"])
@@ -507,9 +553,16 @@ def _purge_wick_score(
         wick = h - max(o, c)
     else:
         wick = min(o, c) - l
-    if wick <= 0:
-        return 0
-    return 1 if (wick / crt_range) >= PURGE_WICK_SCORE_PCT else 0
+    return max(0.0, wick / crt_range)
+
+
+def _purge_wick_score(
+    crt_range: float,
+    purge_row: pd.Series,
+    direction: str,
+) -> int:
+    """Purge rejection wick: fitil / CRT range >= PURGE_WICK_SCORE_PCT -> +1."""
+    return 1 if _purge_wick_ratio(crt_range, purge_row, direction) >= PURGE_WICK_SCORE_PCT else 0
 
 
 def _calc_live_setup_bias(
@@ -524,7 +577,8 @@ def _calc_live_setup_bias(
     pd_hit: bool = False,  # legacy; pd_labels yoksa bool(pd_hit) -> tek yapisal puan yok
     df_ltf: Optional[pd.DataFrame] = None,
     timeframe: str = "4h",
-) -> tuple[str, int]:
+    with_parts: bool = False,
+) -> tuple[str, int] | tuple[str, int, dict, dict]:
     """Canli CRT setup icin zengin kalite skoru.
 
     Kriterler:
@@ -539,16 +593,24 @@ def _calc_live_setup_bias(
       - LTF IFVG (CRT ici invert, acik bolge)   : +1
 
     Ham toplam 13'e cikabilir; SMT'siz tavan 9. SMT +2 ile max 11 (premium).
+
+    `with_parts=True` ise kalem kalem kirilim (SCORE_PART_KEYS) VE kalemlerin arkasindaki
+    SUREKLI olcumler (SCORE_FEATURE_KEYS: wick orani, C2 gövde orani, geri donus %, IFVG bosluk
+    orani + uygunluk bayraklari) doner. Sureklileri saklamanin sebebi: bir kalemin esigini
+    (ör. PURGE_WICK_SCORE_PCT) yeni veri beklemeden, birikmis olcumle sorgulayabilmek.
+    Amac olcum: hangi +1/+2 gercekten kazandiriyor? Toplam skor Journal'da vardi ama
+    kirilim hicbir yere yazilmiyordu, bu yuzden kalem bazli hicbir sey olculemiyordu.
+    Kirilim MOTOR KARARINI DEGISTIRMEZ -- yalnizca ayni hesabin raporudur.
     """
     if purge_idx is None:
         purge_idx = crt_idx + 1
     if purge_idx >= len(df_4h):
-        return "NEUTRAL", 1
+        return ("NEUTRAL", 1, _empty_score_parts(), {}) if with_parts else ("NEUTRAL", 1)
     crt = df_4h.iloc[crt_idx]
     rev = df_4h.iloc[purge_idx]
     crt_range = float(crt["high"] - crt["low"])
     if crt_range <= 0:
-        return "NEUTRAL", 1
+        return ("NEUTRAL", 1, _empty_score_parts(), {}) if with_parts else ("NEUTRAL", 1)
 
     c2_state = _candle_state(rev)
     correct_c2 = (
@@ -560,6 +622,10 @@ def _calc_live_setup_bias(
 
     labels = list(pd_labels) if pd_labels is not None else ([] if not pd_hit else ["FVG"])
     pd_score = _pd_array_score(labels)
+    label_set = {str(x).upper() for x in labels}
+    pd_major_score = 1 if label_set & _PD_MAJOR_LABELS else 0
+    pd_monthly_score = 1 if label_set & _PD_MONTHLY_LABELS else 0
+    pd_struct_score = 1 if label_set & _PD_STRUCT_LABELS else 0
 
     try:
         daily_bias = (
@@ -625,17 +691,20 @@ def _calc_live_setup_bias(
     )
 
     ifvg_score = 0
-    if df_ltf is not None and not df_ltf.empty:
+    ifvg_zone = None
+    ifvg_checked = df_ltf is not None and not df_ltf.empty
+    if ifvg_checked:
         purge_ts = df_4h.index[purge_idx]
         tf = (timeframe or "4h").lower()
         c2_h = 24.0 if tf == "1d" else (1.0 if tf == "1h" else 4.0)
-        if detect_ltf_ifvg(
+        ifvg_zone = detect_ltf_ifvg(
             df_ltf, direction, purge_ts,
             crt_low=float(crt["low"]),
             crt_high=float(crt["high"]),
             crt_bar_time=df_4h.index[crt_idx],
             c2_hours=c2_h,
-        ) is not None:
+        )
+        if ifvg_zone is not None:
             ifvg_score = 1
 
     raw = (
@@ -652,7 +721,37 @@ def _calc_live_setup_bias(
         bias = "BEARISH" if direction == "LONG" else "BULLISH"
     else:
         bias = "NEUTRAL"
-    return bias, score
+    if not with_parts:
+        return bias, score
+    parts = {
+        "base": base_score,
+        "htf": htf_score,
+        "weekly": weekly_score,
+        "c2_closed": c2_closed_score,
+        "pd_major": pd_major_score,
+        "pd_monthly": pd_monthly_score,
+        "pd_struct": pd_struct_score,
+        "wick": wick_score,
+        "ifvg": ifvg_score,
+        "reclaim": reclaim_score,
+        "smt": 0,          # scanner._apply_smt_bonus doldurur
+        "raw": raw,        # tavan uygulanmadan onceki toplam
+        "score": score,    # tavanli (motorun kullandigi)
+    }
+    rev_range = float(rev["high"] - rev["low"])
+    features = {
+        # Kalemlerin arkasindaki ham olcumler: esikleri sonradan veriyle sorgulamak icin.
+        "wick_frac": round(_purge_wick_ratio(crt_range, rev, direction), 4),
+        "c2_body_frac": round(abs(float(rev["close"]) - float(rev["open"])) / rev_range, 4)
+        if rev_range > 0 else None,
+        "reclaim_pct": round(reclaim, 2) if reclaim is not None else None,
+        "ifvg_gap_frac": ifvg_zone.gap_frac if ifvg_zone is not None else None,
+        "c2_range_frac": round(rev_range / crt_range, 4),
+        # "0 puan" ile "bakilamadi"yi ayirmak icin uygunluk bayraklari (bkz. score_parts).
+        "ifvg_checked": int(ifvg_checked),
+        "bias_checked": int(df_1d is not None and not df_1d.empty),
+    }
+    return bias, score, parts, features
 
 
 def _candle_state(row: pd.Series) -> str:
@@ -819,24 +918,57 @@ def _bar_date(ts) -> object:
     return t.date()
 
 
-def _previous_day_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float], Optional[float]]:
-    """Onceki KAPANAN gunun (PDH/PDL) high/low'u. Forming gun = as-of son bar."""
+def _previous_day_levels(
+    df_1d: Optional[pd.DataFrame], now: pd.Timestamp | None = None,
+) -> tuple[Optional[float], Optional[float]]:
+    """Onceki KAPANAN gunun (PDH/PDL) high/low'u = serinin son KAPANMIS 1D bari.
+
+    Eskiden "dun" serinin SON SATIRINDAN turetiliyordu (`_as_of_ts` + takvim gunu
+    karsilastirmasi) ve son satirin bugunun olusan bari oldugu varsayiliyordu. Altcoinlerin
+    1D'si yalnizca bakim dongusunde (1800 sn) yenilendigi icin 00:00 UTC'den sonra 30 dk'ya
+    varan bir pencerede son satir hala DUNDU; kod onu "bugun" sanip PDH/PDL'yi EVVELSI GUNE
+    kaydiriyordu. 00:00 UTC ayni zamanda bir 4H kapanisi oldugundan gunun alti tam-evren
+    taramasindan biri bu bayat pencereye denk geliyordu. Olculen etkiye gore hata cogunlukla
+    HAK EDILEN puani yedirtiyordu (pencere ici `pd_major` orani pencere disinin cok altinda;
+    oranlar IZLEME.md -> "Gece yarisi PDH/PDL kaymasi duzeltildi"); skor tam 7 ise
+    `_score7_strict_ok` bos olmayan `pd_array` aradigi icin setup busbutun elenebiliyordu.
+
+    Cozum: "dun"u takvimden tahmin etmek yerine olusan gunu `_drop_forming_daily` ile dusup
+    kalan son bari almak. Store'da bugunun bari VARSA da YOKSA da sonuc ayni (degismezlik).
+    Ayni primitif 1D bias'ta da kullaniliyor (11.09) ve seans kovalarinda dogru calisir --
+    takvim gunu karsilastirmasi NY 17:00 kovasinda yaniltici olurdu.
+
+    `now` yalnizca test/replay icin; verilmezse duvar saati (bias tarafiyla ayni kural).
+    """
     if df_1d is None or df_1d.empty or len(df_1d) < 2:
         return None, None
-    d = df_1d.sort_index()
-    as_of = _as_of_ts(d)
-    prior = d[[_bar_date(t) < as_of.date() for t in d.index]]
-    if prior.empty:
+    closed = _drop_forming_daily(df_1d.sort_index(), now)
+    if closed is None or closed.empty:
         return None, None
-    last = prior.iloc[-1]
+    last = closed.iloc[-1]
     return float(last["high"]), float(last["low"])
 
 
-def _previous_week_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float], Optional[float]]:
+def _pd_as_of(d: pd.DataFrame, now: pd.Timestamp | None) -> pd.Timestamp:
+    """PD seviyeleri icin "simdi": verilmisse `now`, yoksa duvar saati; en az son bar.
+
+    Son bara guvenmek bayat store'da (bkz. `_previous_day_levels`) hafta/ay sinirinda ayni
+    bir-gun-kaymasini uretiyordu. Gecmis dilimlerde (replay/test) `now` verilir; verilmezse
+    son bardan geri gitmemek icin ikisinin buyugu alinir.
+    """
+    last = _as_of_ts(d)
+    cur = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+    if cur.tzinfo is None:
+        cur = cur.tz_localize("UTC")
+    return max(last, cur)
+
+
+def _previous_week_levels(
+    df_1d: Optional[pd.DataFrame], now: pd.Timestamp | None = None,
+) -> tuple[Optional[float], Optional[float]]:
     """Onceki KAPANAN haftanin (PWH/PWL) high/low'u.
 
-    1D verisini ISO hafta bazinda gruplar, as-of barin haftasini
-    disarida birakir (utcnow yok).
+    1D verisini ISO hafta bazinda gruplar, icinde bulunulan haftayi disarida birakir.
     """
     if df_1d is None or df_1d.empty or len(df_1d) < 7:
         return None, None
@@ -854,7 +986,7 @@ def _previous_week_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float
         else:
             ph, pl = weeks[key]
             weeks[key] = (max(ph, hi), min(pl, lo))
-    as_iso = (_as_of_ts(d) + shift).isocalendar()
+    as_iso = (_pd_as_of(d, now) + shift).isocalendar()
     cur_key = (int(as_iso[0]), int(as_iso[1]))
     completed = [k for k in order if k != cur_key]
     if not completed:
@@ -863,8 +995,10 @@ def _previous_week_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float
     return weeks[last_wk]
 
 
-def _previous_month_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[float], Optional[float]]:
-    """Onceki KAPANAN takvim ayinin (PMH/PML) high/low'u. As-of = son bar."""
+def _previous_month_levels(
+    df_1d: Optional[pd.DataFrame], now: pd.Timestamp | None = None,
+) -> tuple[Optional[float], Optional[float]]:
+    """Onceki KAPANAN takvim ayinin (PMH/PML) high/low'u."""
     if df_1d is None or df_1d.empty or len(df_1d) < 20:
         return None, None
     d = df_1d.sort_index()
@@ -884,7 +1018,7 @@ def _previous_month_levels(df_1d: Optional[pd.DataFrame]) -> tuple[Optional[floa
         else:
             ph, pl = months[key]
             months[key] = (max(ph, hi), min(pl, lo))
-    as_of = _as_of_ts(d) + shift
+    as_of = _pd_as_of(d, now) + shift
     cur_key = (int(as_of.year), int(as_of.month))
     completed = [k for k in order if k != cur_key]
     if not completed:
@@ -899,6 +1033,7 @@ def detect_pd_arrays(
     crt_idx: int,
     direction: str,
     purge_idx: Optional[int] = None,
+    now: pd.Timestamp | None = None,
 ) -> list[str]:
     """Purge yapan C2 (4H) mumunun bir PD array'e dokunup dokunmadigini tespit et.
 
@@ -932,9 +1067,9 @@ def detect_pd_arrays(
         return not (c2_high < z_lo or c2_low > z_hi)
 
     # 1) PDH/PDL & PWH/PWL (1D turevli — bias verisiyle ayni kaynak)
-    pdh, pdl = _previous_day_levels(df_1d)
-    pwh, pwl = _previous_week_levels(df_1d)
-    pmh, pml = _previous_month_levels(df_1d)
+    pdh, pdl = _previous_day_levels(df_1d, now)
+    pwh, pwl = _previous_week_levels(df_1d, now)
+    pmh, pml = _previous_month_levels(df_1d, now)
     if is_short:
         if pdh is not None and touches_level(pdh):
             labels.append("PDH")
@@ -1016,6 +1151,9 @@ class IFVGZone:
     mid: float
     inverted_time: datetime
     kind: str  # "bull" | "bear"
+    # Bosluk / son 20 LTF mumunun ort. range'i. Yalniz OLCUM (MIN_IFVG_GAP_RANGE_FRAC
+    # esiginin dogru yerde olup olmadigini sonradan veriyle sorabilmek icin).
+    gap_frac: Optional[float] = None
 
     def entry_for(self, direction: str) -> float:
         """Girise EN YAKIN kenar: LONG'da ust, SHORT'ta alt.
@@ -1049,6 +1187,88 @@ def _ifvg_mid_inside_crt(
         lo, hi = hi, lo
     mid = (float(z_lo) + float(z_hi)) / 2.0
     return lo <= mid <= hi
+
+
+def detect_displacement_fvg(
+    df_ltf: Optional[pd.DataFrame],
+    direction: str,
+    *,
+    confirm_time,
+    since_time=None,
+    lookback: int = 12,
+    bars_after: int = 1,
+) -> Optional[IFVGZone]:
+    """Karakter degisimini yapan hamlenin ARKASINDA biraktigi FVG (yalniz OLCUM).
+
+    Kullanici onerisi (18.09), Setup Journal `entries` karsilastirmasinin 3. modeli:
+    CISD/MSS kirildiktan sonra fiyat genelde geri cekilir; kirilimi yapan ivmeli bacak
+    bir imbalans (FVG) birakir ve giris oradan alinabilir. Bu seviye tipik olarak CISD
+    seviyesinden DAHA SIG'dir (LONG'da daha yukarida): dolum olasiligi yuksek, RR dusuk.
+    Olcum tam bu takasi tartacak.
+
+    LONG icin bogа FVG: high[i-1] < low[i+1] -> bosluk [high[i-1], low[i+1]].
+    Geri cekilmede fiyatin ILK dokundugu kenar ust siniridir (low[i+1]) -> zone.high,
+    yani `entry_for("LONG")` yine "girise en yakin kenar"i verir (IFVG ile ayni anlam).
+    SHORT simetrik: low[i-1] > high[i+1] -> bosluk [high[i+1], low[i-1]].
+
+    Pencere: `since_time` (verilirse purge ekstremi) ile onay mumu + `bars_after` arasi;
+    birden fazla aday varsa kirilima EN YAKIN (en son) olan secilir. Gurultu filtresi
+    UYGULANMAZ -- `gap_frac` kaydedilir, elemeyi rapor yapar (esik sorusu da olculsun).
+
+    MOTOR KARARI BUNU KULLANMAZ; yalnizca Journal'a aday entry olarak yazilir.
+    """
+    if df_ltf is None or df_ltf.empty or confirm_time is None:
+        return None
+    work = _drop_forming_bar(df_ltf.sort_index())
+    if work is None or len(work) < 3:
+        return None
+    work = work.copy()
+    if work.index.tz is None:
+        work.index = work.index.tz_localize("UTC")
+    else:
+        work.index = work.index.tz_convert("UTC")
+    n = len(work)
+    confirm_ts = _as_utc_ts(confirm_time)
+    idx = [t for t in work.index if t <= confirm_ts]
+    if not idx:
+        return None
+    confirm_i = len(idx) - 1
+    lo_i = 1
+    if since_time is not None:
+        since_ts = _as_utc_ts(since_time)
+        for k, t in enumerate(work.index):
+            if t >= since_ts:
+                lo_i = max(1, k)
+                break
+    lo_i = max(lo_i, confirm_i - lookback, 1)
+    hi_i = min(n - 2, confirm_i + max(0, bars_after))
+    if hi_i < lo_i:
+        return None
+
+    _avg_range = float((work["high"] - work["low"]).tail(_IFVG_RANGE_LOOKBACK).mean())
+    bull = direction == "LONG"
+    best: Optional[tuple[float, float, object]] = None
+    for i in range(lo_i, hi_i + 1):
+        a = work.iloc[i - 1]
+        b = work.iloc[i + 1]
+        if bull:
+            z_lo, z_hi = float(a["high"]), float(b["low"])
+        else:
+            z_lo, z_hi = float(b["high"]), float(a["low"])
+        if z_hi <= z_lo:
+            continue                      # bosluk yok
+        best = (z_lo, z_hi, work.index[i])  # en son aday kazanir (kirilima en yakin)
+    if best is None:
+        return None
+    z_lo, z_hi, ts = best
+    return IFVGZone(
+        low=round(z_lo, 8),
+        high=round(z_hi, 8),
+        mid=round((z_lo + z_hi) / 2, 8),
+        inverted_time=ts.to_pydatetime(),
+        kind="bull" if bull else "bear",
+        gap_frac=round((z_hi - z_lo) / _avg_range, 4) if _avg_range > 0 else None,
+    )
 
 
 def detect_ltf_ifvg(
@@ -1157,6 +1377,7 @@ def detect_ltf_ifvg(
             mid=round((z_lo + z_hi) / 2.0, 8),
             inverted_time=inv_ts.to_pydatetime(),
             kind=kind,
+            gap_frac=round((z_hi - z_lo) / _avg_range, 4) if _avg_range > 0 else None,
         )
     return picked
 
@@ -1173,6 +1394,7 @@ def _build_crt_setup(
     df_1d: Optional[pd.DataFrame] = None,
     timeframe: str = "4h",
     df_ltf: Optional[pd.DataFrame] = None,
+    range_atr: Optional[float] = None,   # yalniz olcum: C1 range / ATR (cagiran zaten hesapliyor)
 ) -> CRTSetup:
     """C1 (live_i) + C2 (purge_j) cifti icin CRTSetup: skor, PD array, hedef tarafi.
 
@@ -1193,12 +1415,23 @@ def _build_crt_setup(
         or (direction == "LONG" and float(after["high"].max()) > crt_high)
     )
 
+    # C2'den SONRAKI mumlar (forming dahil) — purge/SL tarafi da alinmis mi?
+    # Esitlik dahil: scanner'in _hits_sl'i de degmeyi vurus sayar.
+    after_c2 = df_4h.iloc[purge_j + 1:]
+    purge_ext = float(purge_row["high"]) if direction == "SHORT" else float(purge_row["low"])
+    stop_breached = not after_c2.empty and (
+        (direction == "SHORT" and float(after_c2["high"].max()) >= purge_ext)
+        or (direction == "LONG" and float(after_c2["low"].min()) <= purge_ext)
+    )
+
     pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j)
-    bias, score = _calc_live_setup_bias(
+    bias, score, score_parts, score_features = _calc_live_setup_bias(
         df_4h, live_i, direction, htf_bias,
         pd_labels=pd_labels, purge_idx=purge_j, df_1d=df_1d,
-        df_ltf=df_ltf, timeframe=timeframe,
+        df_ltf=df_ltf, timeframe=timeframe, with_parts=True,
     )
+    if range_atr is not None:
+        score_features["range_atr"] = round(float(range_atr), 4)
     purge_extreme = float(purge_row["high"]) if direction == "SHORT" else float(purge_row["low"])
     crt_bull = float(live_crt["close"]) > float(live_crt["open"])
     crt_bear = float(live_crt["close"]) < float(live_crt["open"])
@@ -1229,7 +1462,10 @@ def _build_crt_setup(
         color_opposite=not same_color,
         timeframe=timeframe,
         target_consumed=target_consumed,
+        stop_breached=stop_breached,
         c2_reclaim=c2_reclaim_pct(live_crt, purge_row, direction),
+        score_parts=score_parts,
+        score_features=score_features,
     )
 
 
@@ -1299,8 +1535,13 @@ def detect_crt_setup(
       - SHORT (purge HIGH, TP = C1 low): C1'den sonra bir mumun low'u C1 low altina inmisse -> gecersiz.
       - LONG  (purge LOW,  TP = C1 high): C1'den sonra bir mumun high'i C1 high ustune cikmisse -> gecersiz.
 
-    Birden fazla gecerli aday varsa high-low mesafesi (range) EN BUYUK olan secilir
-    (esitlikte hacimce buyuk, sonra en guncel).
+    Birden fazla gecerli aday varsa once YASAYAN adaylar gelir -- hedefi tuketilmis
+    (`target_consumed`) ya da purge/SL tarafi sonradan alinmis (`stop_breached`) aday, canli
+    bir aday varken secilmez (18.09; oncesinde yalniz `target_consumed` boyle davraniyordu ve
+    stopu yenmis eski bir C1 genis range'i sayesinde slotu saatlerce tutabiliyordu). Yasayanlar
+    arasinda high-low mesafesi (range) EN BUYUK olan secilir (esitlikte hacimce buyuk, sonra
+    en guncel). Hicbiri canli degilse yine en iyi olu aday donulur: kapiyi scanner kapatir,
+    radar/Journal nedeni gosterir.
     `rejected` (liste verilirse): setup'a cevrilmeden elenen adaylar -- yalniz KAPANMIS C2 ve
     C1 ucu gercekten delinmisse -- {reason, direction, crt_bar_time, purge_time, setup} olarak
     eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small /
@@ -1426,16 +1667,19 @@ def detect_crt_setup(
 
         candidates.append((live_range, crt_vol, live_i, _build_crt_setup(
             df_4h, live_i, purge_j, direction, symbol, market_type, htf_bias,
-            df_1d=df_1d, timeframe=timeframe, df_ltf=df_ltf,
+            df_1d=df_1d, timeframe=timeframe, df_ltf=df_ltf, range_atr=live_ratio,
         )))
 
     if not candidates:
         return None
 
-    # Once hedefi duran aday; sonra en buyuk range, hacim, en guncel.
+    # Once hedefi duran aday (eski kural, degismedi); esitse stopu yenmemis olan; sonra en buyuk
+    # range, hacim, en guncel. Iki elemeyi AYRI kademede tutmak sart: tek kademeye katlamak,
+    # hedefi tuketilmis genis adayin stopu yenmis dar adayin onune gecmesine yol aciyordu.
     best = max(
         candidates,
-        key=lambda c: (0 if c[3].target_consumed else 1, c[0], c[1], c[2]),
+        key=lambda c: (0 if c[3].target_consumed else 1, 0 if c[3].stop_breached else 1,
+                       c[0], c[1], c[2]),
     )
     if rejected is not None:
         for c in candidates:
@@ -1796,6 +2040,8 @@ def _check_bullish_cisd(
         cisd_time=confirm_time,
         mss_ref_time=mss_ref_time,
         entry_model=entry_model,
+        cisd_level=round(float(cisd_level), 8),
+        mss_level=round(float(mss_level), 8),
     )
 
 
@@ -1886,6 +2132,8 @@ def _check_bearish_cisd(
         cisd_time=confirm_time,
         mss_ref_time=mss_ref_time,
         entry_model=entry_model,
+        cisd_level=round(float(cisd_level), 8),
+        mss_level=round(float(mss_level), 8),
     )
 
 

@@ -77,6 +77,7 @@
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">SMT</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">PD Array</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">C2</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Setup mumunun (purge / C2) açılış zamanı — TSİ">Setup</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">IFVG</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Entry</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">RR</th>
@@ -85,7 +86,7 @@
                             </tr>
                         </thead>
                         <tbody id="radar-body">
-                            <tr><td colspan="14" class="px-2 py-8 text-center text-gray-600">Loading...</td></tr>
+                            <tr><td colspan="15" class="px-2 py-8 text-center text-gray-600">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -205,7 +206,7 @@ async function loadRadar() {
         // Table
         const body = document.getElementById('radar-body');
         if (!data.symbols.length) {
-            body.innerHTML = '<tr><td colspan="14" class="px-2 py-8 text-center text-gray-600">No scan yet (first scan starts ~15s after startup).</td></tr>';
+            body.innerHTML = '<tr><td colspan="15" class="px-2 py-8 text-center text-gray-600">No scan yet (first scan starts ~15s after startup).</td></tr>';
         } else {
             body.innerHTML = data.symbols.map(s => {
                 const badge = COLOR_CLASSES[s.color] || COLOR_CLASSES.gray;
@@ -215,7 +216,7 @@ async function loadRadar() {
                 const score = scoreNum === null || Number.isNaN(scoreNum)
                     ? '-'
                     : (scoreNum >= 11
-                        ? `<span class="text-accent-purple font-semibold">${scoreNum}/10</span> <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide text-accent-purple bg-accent-purple/10" title="Full confluence + SMT">Premium</span>`
+                        ? `<span class="text-accent-purple font-semibold">${scoreNum}/11</span> <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide text-accent-purple bg-accent-purple/10" title="Full confluence + SMT">Premium</span>`
                         : `${scoreNum}`);
                 return `<tr class="border-b border-dark-700/50 hover:bg-dark-700/30 transition">
                     <td class="px-2 py-2 font-medium text-white whitespace-nowrap">${s.symbol}</td>
@@ -227,6 +228,7 @@ async function loadRadar() {
                     <td class="px-2 py-2 whitespace-nowrap">${smtBadge(s.smt)}</td>
                     <td class="px-2 py-2 whitespace-nowrap">${pdBadge(s.pd)}</td>
                     <td class="px-2 py-2 whitespace-nowrap">${c2Badge(s.c2_closed)}</td>
+                    <td class="px-2 py-2 text-gray-400 text-xs whitespace-nowrap"${s.crt_bar_time ? ` title="C1 mumu: ${s.crt_bar_time} TSİ"` : ''}>${s.purge_time || '<span class="text-gray-600">-</span>'}</td>
                     <td class="px-2 py-2 whitespace-nowrap">${hideRr ? '<span class="text-gray-600">-</span>' : ifvgBadge(s.ifvg)}</td>
                     <td class="px-2 py-2 whitespace-nowrap">${hideRr ? '<span class="text-gray-600">-</span>' : modelBadge(s.model)}</td>
                     <td class="px-2 py-2 text-gray-300 whitespace-nowrap">${rr}</td>

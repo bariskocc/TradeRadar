@@ -13,9 +13,14 @@ traderadar.db-shm
 .cursor/
 *.log
 server.log
+# Donen log yedekleri (traderadar.log.1 ...) *.log kalibina UYMAZ; repo public,
+# log her motor kararini (sembol/entry/SL/TP/skor) iceriyor.
+logs/
+*.log.*
+# Gecici analiz/dogrulama betikleri ve ciktilari: hepsi tmp/ altinda (17.09).
+# Kokteki tmp_* desenleri, eski yerde unutulan dosya olursa diye duruyor.
+tmp/
 tmp_*
-tmp_*.py
-tmp_*.json
 tools/
 
 # Ozel calisma notlari: strateji esikleri, skor agirliklari ve islem kayitlari

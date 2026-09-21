@@ -97,7 +97,7 @@ def _format_active_signal(sig: Signal) -> str:
         f"\n"
         f"{bias_emoji} <b>1D Bias:</b> {htf_bias}\n"
         f"{weekly_emoji} <b>1W Bias:</b> {weekly_bias}\n"
-        f"\U00002b50 <b>Kalite:</b> {int(sig.bias_score or 0)}/10"
+        f"\U00002b50 <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
         f"{'  ·  <b>Premium</b>' if int(sig.bias_score or 0) >= 11 else ''}\n"
         f"{smt_line}"
         f"\U0001f552 <b>CISD:</b> {cisd_txt}"
@@ -276,6 +276,29 @@ _POTENTIAL_CANCEL_REASONS = {
     "week_close": "Hafta kapanışı",
 }
 
+# Kapida elenen setup'in POTANSIYEL bildiriminde gosterilen kapi adi (radar state /
+# silme nedeni kodlari). Iptal metinleri "artik gecersiz" der; bunlar "motor su an
+# neden almiyor" der, setup hala yasiyor olabilir.
+_POTENTIAL_GATE_LABELS = {
+    "bias_mismatch": "1D bias ters",
+    "low_quality": "Kalite skoru 7'nin altında",
+    "score7_gate": "Skor-7 kapısı (yapısal entry / PD array şartı)",
+    "low_rr": "R:R 2'nin altında",
+    "tight_stop": "Stop çok dar",
+    "missed": "Fiyat entry'ye gelmeden hedefe gitti",
+    "past_tp": "Fiyat entry'ye gelmeden hedefe gitti",
+    "target_taken": "C1 hedef tarafı C2 sonrası tüketildi",
+    "past_sl": "Fiyat entry'ye gelmeden SL'i geçti",
+    "invalidated": "CRT %60 geçildi",
+    "missed_quality": "Retest anında skor 7'nin altındaydı",
+    "stale": "Entry daha önce test edilmişti (bayat retest)",
+    "has_open": "Bu sembolde zaten açık işlem var",
+    "corr_open": "Korele paritede zaten açık işlem var",
+    "duplicate": "Aynı setup zaten kayıtlı",
+    "cluster_limit": "Aynı yönde küme limiti dolu",
+    "no_cisd": "Entry/MSS seviyeleri henüz yok",
+}
+
 
 def _fmt_tsi(dt) -> str:
     if dt is None:
@@ -285,8 +308,13 @@ def _fmt_tsi(dt) -> str:
     return dt.astimezone(_TSI).strftime("%d.%m.%Y %H:%M") + " UTC+3"
 
 
-def _format_signal_potential(sig: Signal, c2_close_at=None) -> str:
-    """1D CISD/MSS onayli, tum kapilardan gecmis setup: bilgi mesaji (C2 acik veya kapali)."""
+def _format_signal_potential(sig: Signal, c2_close_at=None, gate: str | None = None) -> str:
+    """1D CISD/MSS onayli setup: bilgi mesaji (C2 acik veya kapali).
+
+    `gate` doluysa setup bir kapida elenmistir: motor bu setup'i ALMAZ, mesaj yalnizca
+    manuel karar icin gider (18.09 kullanici istegi). `gate` None ise setup tum
+    kapilardan gecmistir ve motor onu izliyordur.
+    """
     c2_open = not bool(sig.c2_closed)
     direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
     rr = (
@@ -306,10 +334,19 @@ def _format_signal_potential(sig: Signal, c2_close_at=None) -> str:
             f"\n"
             f"ℹ️ Motor limit emri entry'de bekliyor; dolarsa ACTIVE mesajı buna yanıt olarak gelir."
         )
+    if gate:
+        tail = (
+            f"\n"
+            f"⛔️ <b>Motor almıyor:</b> {_POTENTIAL_GATE_LABELS.get(gate, gate)}\n"
+            f"Seviyeler bilgi amaçlı; bu setup için emir girilmeyecek. Kapı sonradan "
+            f"açılırsa bu mesaja yanıt olarak haber verilir."
+        )
+    icon = "\U0001f6ab" if gate else "\U0001f440"
+    tag = " – ELENDİ" if gate else ""
     return (
-        f"\U0001f440 <b>POTANSİYEL 1D CRT ({'C2 AÇIK' if c2_open else 'C2 KAPALI'}) – {sig.symbol}</b>\n"
+        f"{icon} <b>POTANSİYEL 1D CRT{tag} ({'C2 AÇIK' if c2_open else 'C2 KAPALI'}) – {sig.symbol}</b>\n"
         f"\n"
-        f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/10"
+        f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
         f" | <b>R:R:</b> {rr}\n"
         f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>  ·  {model}\n"
         f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
@@ -320,13 +357,27 @@ def _format_signal_potential(sig: Signal, c2_close_at=None) -> str:
     )
 
 
-async def send_signal_potential(sig: Signal, *, c2_close_at=None, reply_to: Optional[int] = None) -> Optional[int]:
-    """Potansiyel 1D bildirimi; C2 kapaninca ilk mesaja reply olarak tekrar gonderilir."""
+async def send_signal_potential(
+    sig: Signal,
+    *,
+    c2_close_at=None,
+    reply_to: Optional[int] = None,
+    gate: str | None = None,
+) -> Optional[int]:
+    """Potansiyel 1D bildirimi; C2 kapaninca ilk mesaja reply olarak tekrar gonderilir.
+
+    `gate` doluysa setup o kapida elenmistir (motor almaz, bilgi mesaji).
+    """
     if not is_configured():
         return None
-    mid = await _send_message(_format_signal_potential(sig, c2_close_at), reply_to_message_id=reply_to)
+    mid = await _send_message(
+        _format_signal_potential(sig, c2_close_at, gate=gate), reply_to_message_id=reply_to,
+    )
     if mid:
-        log.info("Telegram: potential sent for %s %s (mid=%s reply_to=%s)", sig.symbol, sig.direction, mid, reply_to)
+        log.info(
+            "Telegram: potential sent for %s %s (mid=%s reply_to=%s gate=%s)",
+            sig.symbol, sig.direction, mid, reply_to, gate or "-",
+        )
     return mid
 
 

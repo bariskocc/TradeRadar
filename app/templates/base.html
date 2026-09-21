@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}TradeRadar{% endblock %}</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    {# ?v=mtime: CSS yeniden derlenince tarayici eski kopyayi kullanmasin (bkz. main._static_version).
+       `is defined` korumasi: eski backend calisirken sayfa yine acilsin. #}
+    <link rel="stylesheet" href="/static/css/app.css{% if static_v is defined %}?v={{ static_v() }}{% endif %}">
     {% block head %}{% endblock %}
 </head>
 <body class="h-full bg-dark-900 text-gray-200">

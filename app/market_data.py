@@ -36,8 +36,10 @@ from app.exchange import (
     get_d1h_symbols_flat,
     get_h1_5m_symbols,
     is_session_symbol,
+    market_of,
     to_display_symbol,
 )
+from app import bias_journal
 from app import scanner
 from app import session as fx_session
 
@@ -224,7 +226,7 @@ class BingXMarketData:
                         if not df5m.empty:
                             last_ms = int(df5m.index[-1].value // 1_000_000)
                             if is_session_symbol(sym):
-                                df5m = fx_session.drop_dead_session(df5m)
+                                df5m = fx_session.drop_dead_session(df5m, sym)
                             self.store.set_df(sym, "5m", df5m)
                             self._last_ts[(sym, "5m")] = last_ms
                     except Exception as e:
@@ -246,7 +248,7 @@ class BingXMarketData:
                 if not df15.empty:
                     # _last_ts WS surekliligini takip eder: filtreden ONCEKI son bar.
                     self._last_ts[(sym, "15m")] = int(df15.index[-1].value // 1_000_000)
-                    self.store.set_df(sym, "15m", fx_session.drop_dead_session(df15))
+                    self.store.set_df(sym, "15m", fx_session.drop_dead_session(df15, sym))
             except Exception as e:
                 log.warning("15M bootstrap basarisiz %s: %s", sym, e)
         try:
@@ -273,20 +275,20 @@ class BingXMarketData:
 
         if full:
             for tf in ("4h", "1d"):
-                out = fx_session.resample_from_1h(df1h, tf)
+                out = fx_session.resample_from_1h(df1h, tf, symbol)
                 if not out.empty:
                     self.store.set_df(symbol, tf, out)
             return
 
         last_ts = df1h.index[-1]
-        if fx_session.is_dead_session(last_ts):
+        if fx_session.is_dead_session(last_ts, symbol):
             return  # piyasa kapali: HTF mumu ilerlemez
         recent = df1h.iloc[-_FORMING_TAIL:]
         for tf in ("4h", "1d"):
-            start = fx_session.bucket_start(last_ts, tf)
+            start = fx_session.bucket_start(last_ts, tf, symbol)
             # Kova basi son mumlarin icindeyse yalniz onlara bak; degilse (veri boslugu) tum seri.
             src = recent if recent.index[0] <= start else df1h
-            bars = fx_session.drop_dead_session(src[src.index >= start])
+            bars = fx_session.drop_dead_session(src[src.index >= start], symbol)
             if bars.empty:
                 continue
             row = {
@@ -522,7 +524,7 @@ class BingXMarketData:
         cur_dt = pd.to_datetime(ts_ms, unit="ms", utc=True)
         # Olu seansta BingX fiyat uretmeye devam eder ama piyasa kapalidir:
         # ne seriye yazilir ne de TP/SL takibine beslenir.
-        bar_dead = session_sym and fx_session.is_dead_session(cur_dt)
+        bar_dead = session_sym and fx_session.is_dead_session(cur_dt, symbol)
 
         if not bar_dead:
             self.store.upsert_candle(symbol, tf, ts_ms, candle)
@@ -534,14 +536,15 @@ class BingXMarketData:
         if prev_ts is not None and ts_ms > prev_ts:
             # Onceki mum kapandi.
             prev_dt = pd.to_datetime(prev_ts, unit="ms", utc=True)
-            prev_dead = session_sym and fx_session.is_dead_session(prev_dt)
+            prev_dead = session_sym and fx_session.is_dead_session(prev_dt, symbol)
             if not prev_dead:
                 await self._closed_queue.put((symbol, tf))
             if tf == "1h" and session_sym:
                 if not prev_dead:
                     # Sentezlenmis HTF: kapanan 1H bari bir kovayi bitirdi mi?
                     for htf in ("4h", "1d"):
-                        if fx_session.bucket_start(prev_dt, htf) != fx_session.bucket_start(cur_dt, htf):
+                        if (fx_session.bucket_start(prev_dt, htf, symbol)
+                                != fx_session.bucket_start(cur_dt, htf, symbol)):
                             await self._closed_queue.put((symbol, htf))
                     if fx_session.is_week_close_bar(prev_dt):
                         marker = prev_dt.strftime("%G-W%V")
@@ -629,11 +632,17 @@ class BingXMarketData:
                     today = datetime.now(timezone.utc).date()
                     if self._last_1d_day is None or today != self._last_1d_day:
                         await self._refresh_1d()
+                        # Gun kapandi: bias tahmin karnesine yeni satir + eskilerin ileri
+                        # hareketi (fwd_*) dolar. Olcum; motor karari degismez.
+                        await self._refresh_bias_journal()
 
                 if warmup:
                     warmup = False
                     async with async_session() as session:
                         await scanner.run_scan(session, source="scheduler", store=self.store)
+                    # Acilista bir kez: store'daki 1D gecmisi kadar karne dolar (replay degil,
+                    # saf fonksiyonun elde duran seriye uygulanmasi) -- olcum gunlerce beklemesin.
+                    await self._refresh_bias_journal()
                 else:
                     # WS kacagina karsi acik sinyal mutabakati.
                     async with async_session() as session:
@@ -642,6 +651,15 @@ class BingXMarketData:
                 break
             except Exception:
                 log.exception("maintenance loop error")
+
+    async def _refresh_bias_journal(self) -> None:
+        """1D bias karnesini tazele (idempotent upsert; hatasi akisi bozmaz)."""
+        try:
+            symbols = [(s, to_display_symbol(s), market_of(s)) for s in self._symbols]
+            async with async_session() as session:
+                await bias_journal.refresh(session, self.store, symbols)
+        except Exception:
+            log.exception("bias journal refresh failed")
 
     # ──────────────── Durum ────────────────
 
