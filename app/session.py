@@ -144,6 +144,29 @@ def is_week_close_bar(ts) -> bool:
     return ny.dayofweek == 4 and ny.hour == SESSION_HOUR - 1
 
 
+def last_week_close(ts) -> pd.Timestamp | None:
+    """`ts` anindan onceki (dahil) en son Cuma 17:00 NY kapanisi, UTC olarak.
+
+    FX haftasi bu anda kapanir: acik islemler duzlestirilir, dolmamis setuplar
+    silinir (bkz. scanner.close_session_positions). Sembole bagli degil, CME de
+    ayni anda kapanir (bkz. is_week_close_bar).
+    """
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    ny = t.tz_convert(NY)
+    # Bu takvim haftasinin Cuma'si; saat NY yerelinde kurulur (DST gecisi Pazar
+    # 02:00'de oldugu icin Cuma 17:00 her zaman tek ve gecerli bir andir).
+    friday = (ny.normalize().tz_localize(None)
+              - pd.Timedelta(days=int(ny.dayofweek))
+              + pd.Timedelta(days=4))
+    close = (friday + pd.Timedelta(hours=SESSION_HOUR)).tz_localize(NY)
+    if close > t:                       # hafta henuz kapanmadi -> onceki hafta
+        close = (friday - pd.Timedelta(days=7)
+                 + pd.Timedelta(hours=SESSION_HOUR)).tz_localize(NY)
+    return close.tz_convert("UTC")
+
+
 # ──────────────────── NY-hizali sentez ────────────────────
 
 

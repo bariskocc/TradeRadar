@@ -275,6 +275,7 @@ _POTENTIAL_CANCEL_REASONS = {
     "missed_quality": "Retest anında skor 7'nin altındaydı",
     "stale": "Entry daha önce test edilmişti (bayat retest)",
     "week_close": "Hafta kapanışı",
+    "week_gap": "CISD hafta kapanışından önceydi (hafta sonu boşluğu)",
 }
 
 # Kapida elenen setup'in POTANSIYEL bildiriminde gosterilen kapi adi (radar state /

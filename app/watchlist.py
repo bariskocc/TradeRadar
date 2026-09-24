@@ -18,6 +18,7 @@ Kapanmis basliklar sayfada AYRI tabloda durur, acik olanlarla karismaz.
 from __future__ import annotations
 
 import html
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from markupsafe import Markup
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BiasJournal, PotentialNotice, SetupJournal, Signal
@@ -217,6 +218,55 @@ async def _p_bpr(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("BPR'li setup", n, 40)])
 
 
+async def _p_bpr_leg(db: AsyncSession) -> Progress:
+    """Karar verilebilir `bfvg_near` sayisi (karar esigi 40).
+
+    `bfvg_near` TASIYAN satiri saymak yetmiyor (24.09): cogu `imm` (seviye donarken fiyat
+    adayin gerisinde) ya da henuz sonuclanmamis -- 96 satirda karar verilebilir yalniz 33 vardi
+    ve madde erken "aksiyon bekliyor"a dustu. Kurallar `entry_model_stat.tally` ile ayni.
+    Gerekce: IZLEME.md "BPR bacagi".
+    """
+    t = _journal_table()
+    rows = (await db.execute(
+        select(_journal_col("entries")).select_from(t)
+        .where(_journal_col("entries").like('%bfvg_near%'))
+    )).scalars().all()
+    n = 0
+    for raw in rows:
+        try:
+            v = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("bfvg_near") or {}
+        except (ValueError, AttributeError):
+            continue
+        if v.get("o") in ("win", "loss", "tp_before_entry", "no_touch") and not v.get("imm"):
+            n += 1
+    return Progress(bars=[Bar("karar verilebilir bacak setup'ı", n, 40)])
+
+
+async def _p_cfvg(db: AsyncSession) -> Progress:
+    """CISD kirilim FVG'si olcumu tasiyan setup sayisi (karar esigi 60 eslenmis setup).
+
+    22.09'dan itibaren yazilir. Pencere FVG'siz kapanirsa da satir yazilir (`no_fvg`), yani
+    sayac "model uygulanabildi mi" degil "olcum tamamlandi mi" sayar; karar verilebilir
+    (eslenmis) alt kume raporda. Gerekce: IZLEME.md "CISD kirilim FVG'si".
+    """
+    t = _journal_table()
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(_journal_col("entries").like('%cfvg_near%'))
+    ) or 0
+    return Progress(bars=[Bar("kırılım FVG'si ölçülen setup", n, 60)])
+
+
+async def _p_week_gap(db: AsyncSession) -> Progress:
+    """Hafta boslugu kapisinda elenen setup sayisi (karar esigi 10)."""
+    t = _journal_table()
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(
+            or_(t.c.best_stage == "week_gap", t.c.deleted_reason == "week_gap")
+        )
+    ) or 0
+    return Progress(bars=[Bar("week_gap elemesi", n, 10)])
+
+
 async def _p_pd_midnight(db: AsyncSession) -> Progress:
     """Duzeltmeden SONRA 00:00-00:30 UTC penceresinde dogan setup sayisi.
 
@@ -241,10 +291,17 @@ async def _p_bias_journal(db: AsyncSession) -> Progress:
         select(func.count()).select_from(t)
         .where(t.c.combined.in_(("BULLISH", "BEARISH")), t.c.fwd_3d.is_not(None))
     ) or 0
-    # Tarih de kosul: maddenin kendi basligi "ilk okuma 28.09.2026" diyor. Tarih olmadan
-    # karne 500 satiri ilk gun astigi icin madde 9 gun erken "aksiyon" diye bagiriyordu.
+    # Tarih de kosul: tarih olmadan karne 500 satiri ilk gun astigi icin madde 9 gun erken
+    # "aksiyon" diye bagiriyordu. Baslik "ilk okuma 28.09" diyor ama o okuma 21.09'da yapildi
+    # (hard filtre kaldi); kalan iki alt sorunun tarihi 03.10 -- trigger ile ayni (24.09).
     return Progress(bars=[Bar("yönlü satır (fwd_3d dolu)", yonlu, 500)],
-                    due=date(2026, 9, 28), note=f"{n} satır karnede")
+                    due=date(2026, 10, 3), note=f"{n} satır karnede")
+
+
+async def _p_bias_fidelity(db: AsyncSession) -> Progress:
+    """Tarihli madde; sayi raporda (`scripts/bias_fidelity_stat.py`) -- karsilastirma karne ile
+    Journal'i gun gun eslestiriyor, izleme sayfasinda her istekte yapmaya degmez."""
+    return Progress(due=date(2026, 10, 3), note="24.09: gün dönümünde 4H'te %18 yanlıştı; düzeltildi, restart'ta geçerli")
 
 
 async def _p_prefill(db: AsyncSession) -> Progress:
@@ -504,12 +561,43 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_entry_models,
     ),
     WatchItem(
-        key="bpr", status="open", started="21.09", onem=1,
+        key="bpr", status="done", started="21.09", onem=1,
         title="BPR entry modeli",
         trigger="40 BPR'li çözülmüş setup: bpr_near, ifvg_near'ı 0,15 R/setup geçiyor mu",
         measure="python scripts/entry_model_stat.py",
         md="BPR entry modeli (canlıya alındı 21.09.2026, ⏰ tetik: 40 BPR'li çözülmüş setup)",
+        result="BPR KALIYOR, skor ve skor-7 kapısı DEĞİŞMİYOR (24.09): aynı 54 setupta bpr_near "
+               "+0.015 vs ifvg_near -0.031 R/setup, fark +0.046 -- bandın içinde. C2 kapalı dilimde "
+               "de aynı yön (+0.094, n=32).",
         progress_fn=_p_bpr,
+    ),
+    WatchItem(
+        key="bpr_leg", status="open", started="22.09", onem=1,
+        title="BPR bacağı — kesişim yerine bacağın kendisinden mi girmeli?",
+        trigger="40 bacak ölçümlü setup: bfvg_near, bpr_near'ı 0,15 R/setup geçiyor mu",
+        measure="python scripts/entry_model_stat.py (bölüm 2)",
+        md="BPR bacağı — kesişim yerine bacağın kendisinden mi girmeli? (ölçüm başladı 22.09.2026)",
+        progress_fn=_p_bpr_leg,
+    ),
+    WatchItem(
+        key="cfvg", status="done", started="22.09", onem=1,
+        title="CISD kırılım FVG'si — onaydan sonra bırakılan boşluktan giriş",
+        trigger="60 eşlenmiş setup: cfvg_* varyantlarından biri chosen'ı 0,15 R/setup geçiyor mu",
+        measure="python scripts/entry_model_stat.py (bölüm 3)",
+        md="CISD kırılım FVG'si — onaydan sonra bırakılan boşluktan giriş (ölçüm başladı 22.09.2026)",
+        result="CISD entry'si KALIYOR (24.09): eşlenmiş 98-106 setupta üç cfvg varyantı da chosen'ın "
+               "0.06-0.08 R/setup altında -- bandın içinde, geçen yok. C2 kapalı dilimde de aynı "
+               "(far -0.084 vs +0.010, n=61). Kırılım setupların %39'unda FVG bırakmıyor. cfvg "
+               "ölçüm olarak duruyor.",
+        progress_fn=_p_cfvg,
+    ),
+    WatchItem(
+        key="week_gap", status="open", started="21.09", onem=1,
+        title="Hafta boşluğu kapısı — hafta sonunu aşan setup dirilmesin",
+        trigger="10 week_gap elemesi: elenenlerin WR'si taban WR'yi 5 puan geçerse kural gevşer",
+        measure="python scripts/deleted_gate_stat.py · /setup-journal (kapı week_gap)",
+        md="Hafta boşluğu kapısı — hafta sonunu aşan setup dirilmesin (canlıya alındı 21.09.2026)",
+        progress_fn=_p_week_gap,
     ),
     WatchItem(
         key="pd_midnight", status="open", started="18.09",
@@ -524,11 +612,19 @@ ITEMS: list[WatchItem] = [
         title="1D bias tahmin karnesi",
         # 21.09 ara okumasi: H1 battı (0/3 ufuk) ama hard filtre YERINDE KALDI -- karne 1-5 gun
         # olcuyor, setuplar medyan 1.2 saat yasiyor. Maddenin kalan isi iki alt soru.
-        trigger="05.10: htf +2 ödülü hak edilmiş mi (hizalı −0.461 vs NEUTRAL −0.406) · "
+        trigger="03.10: htf +2 ödülü hak edilmiş mi (hizalı −0.461 vs NEUTRAL −0.406) · "
                 "STRUCTURE_STALE_DAYS düşsün mü (bayat dal %52.0 vs taze AND %46.1)",
         measure="python scripts/bias_stat.py",
         md="1D bias tahmin karnesi (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
         progress_fn=_p_bias_journal,
+    ),
+    WatchItem(
+        key="bias_fidelity", status="open", started="24.09", onem=1,
+        title="1D bias hesap doğruluğu — motor doğru günün bias'ını mı kullanıyor?",
+        trigger="03.10: restart sonrası gün dönümünde yanlış bias 0 mı (düzeltme 24.09)",
+        measure="python scripts/bias_fidelity_stat.py",
+        md="1D bias hesap doğruluğu (başladı 24.09.2026, ⏰ 03.10.2026)",
+        progress_fn=_p_bias_fidelity,
     ),
     WatchItem(
         key="prefill", status="open", started="18.09", onem=3,

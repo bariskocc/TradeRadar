@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.crt_engine import cisd_fvg_candidates
 from app.models import SetupJournal
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ STAGES: list[tuple[str, str]] = [
     ("invalidated", "CRT 60% crossed"),
     ("missed_quality", "Score < 7 at retest"),
     ("stale", "Retest too old"),
+    ("week_gap", "CISD before week close"),
     ("cluster_limit", "Cluster limit"),
     ("corr_open", "Correlated pair open"),
     ("has_open", "Open signal exists"),
@@ -114,14 +116,32 @@ SHADOW_C1 = "c1"
 #   cisd / mss                -> iki yapisal aday (motor yalnizca kazanani tutuyordu)
 #   ifvg_near / mid / far     -> IFVG bolgesinin ust-orta-alt noktasi (LONG'da near = ust)
 #   bpr_near / mid / far      -> BPR (iki FVG kesisimi) bolgesinin ayni uc noktasi (21.09)
-#   dfvg_near / mid / far     -> kirilim sonrasi birakilan FVG (yeni model)
+#   bfvg_near / mid / far     -> BPR bacagi: kesisimi olusturan AYNI YONLU FVG'nin KENDISI
+#                                (22.09; kesisim bacagin icinde oldugu icin yakin kenari daha
+#                                sig -> dolum yuksek, RR dusuk. Yalniz BPR'li setupta dolar.)
+#   dfvg_near / mid / far     -> purge -> onay arasinda birakilan FVG (seviye dondugu an bakilir)
+#   cfvg_near / mid / far     -> CISD kirilim FVG'si (22.09, kullanici istegi): onayi yapan
+#                                hamlenin arkada biraktigi bosluk. IFVG'ye de MSS'e de bakmaz.
+#                                dfvg'den farki: pencere onay mumu MERKEZLI ve seviye GEC eklenir
+#                                (asagi bkz. `_cfvg_step`) -- dfvg bu FVG'yi yapisal olarak
+#                                goremiyordu, cunku 3 mumluk desen onay mumundan sonra tamamlanir.
 #   chosen                    -> motorun fiilen sectigi entry (temel cizgi)
 # Entry SL-TP arasinda degilse varyant "invalid" yazilir (izlenmez) -- ne siklikta
 # uygulanamadigi da olcumun parcasi. Karar kurali: IZLEME.md "Entry modeli karsilastirmasi".
 ENTRY_VARIANTS = ("chosen", "cisd", "mss",
                   "ifvg_near", "ifvg_mid", "ifvg_far",
                   "bpr_near", "bpr_mid", "bpr_far",
-                  "dfvg_near", "dfvg_mid", "dfvg_far")
+                  "bfvg_near", "bfvg_mid", "bfvg_far",
+                  "dfvg_near", "dfvg_mid", "dfvg_far",
+                  "cfvg_near", "cfvg_mid", "cfvg_far")
+
+# CISD kirilim FVG'si: onay mumu merkezli pencere (orta mum: onay-1 .. onay+2). Adaylardan
+# ILKI (kirilim origin'ine en yakin = derin = RR yuksek) kullanilir; kac aday cikti `n`de durur.
+CFVG_BARS_BEFORE = 1
+CFVG_BARS_AFTER = 2
+# Bekleyen tespit durumu `entries` sozlugunde bu ANAHTARDA tutulur (varyant degil; alt cizgi
+# oneki `entry_cands`teki `_ref` ile ayni gelenek). Varyant donguleri bu anahtari atlar.
+CFVG_STATE = "_cfvg"
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -175,26 +195,168 @@ def _entries_init(rec: dict) -> dict | None:
     sl, tp = rec.get("sl"), rec.get("tp")
     if not cands or sl is None or tp is None:
         return None
-    long = rec.get("direction") == "LONG"
+    seed = cands.pop(CFVG_STATE, None)     # CISD kirilim FVG'si: seviye henuz olusmamis olabilir
     out: dict = {}
     for name in ENTRY_VARIANTS:
         e = cands.get(name)
         if e is None:
             continue
-        e = float(e)
-        v = {"e": e, "rr": None, "o": "invalid", "t": None, "at": None, "until": None}
-        if not ((sl < e < tp) if long else (tp < e < sl)):
-            v["why"] = "out_of_range"      # entry SL-TP disinda: limit emri anlamsiz
-        else:
-            v["rr"] = round(abs(tp - e) / abs(e - sl), 4)
-            v["o"] = "pending"
-            # Fiyat seviyeyi ZATEN gecmisse limit emri aninda dolardi -- "fiyat geri geldi mi"
-            # sorusunun cevabi degildir ve sig varyantlari haksiz yere avantajli gosterir.
-            # Izlemeye devam edilir (islem gerceklesirdi) ama isaretlenir; rapor ayirir.
-            if ref is not None and ((e >= float(ref)) if long else (e <= float(ref))):
-                v["imm"] = True
-        out[name] = v
+        out[name] = _entry_variant(rec, e, ref)
+    state = _cfvg_init(rec, seed, ref)
+    if state is not None:
+        out[CFVG_STATE] = state
+        _cfvg_scan(rec, out)               # FVG seviyeler dondugunde zaten tamamsa hemen ekle
     return out or None
+
+
+def _horizon(rec: dict) -> timedelta:
+    return HORIZON.get(rec.get("strategy"), timedelta(hours=48))
+
+
+def _entry_variant(rec: dict, e: float, ref=None) -> dict:
+    """Tek bir aday entry: RR'si hesaplanir, SL/TP disindaysa izlenmez ("invalid")."""
+    sl, tp = rec["sl"], rec["tp"]
+    long = rec.get("direction") == "LONG"
+    e = float(e)
+    v = {"e": e, "rr": None, "o": "invalid", "t": None, "at": None, "until": None}
+    if not ((sl < e < tp) if long else (tp < e < sl)):
+        v["why"] = "out_of_range"      # entry SL-TP disinda: limit emri anlamsiz
+        return v
+    v["rr"] = round(abs(tp - e) / abs(e - sl), 4)
+    v["o"] = "pending"
+    # Fiyat seviyeyi ZATEN gecmisse limit emri aninda dolardi -- "fiyat geri geldi mi"
+    # sorusunun cevabi degildir ve sig varyantlari haksiz yere avantajli gosterir.
+    # Izlemeye devam edilir (islem gerceklesirdi) ama isaretlenir; rapor ayirir.
+    if ref is not None and ((e >= float(ref)) if long else (e <= float(ref))):
+        v["imm"] = True
+    return v
+
+
+# --- CISD kirilim FVG'si (cfvg): gec eklenen varyant ------------------------------------
+# Diger butun varyantlar seviyeler DONDUGU AN biliniyor; bu biri bilinemez: onayi yapan hamlenin
+# biraktigi FVG 3 mumluk bir desendir ve orta mumu genelde ONAY MUMUDUR -- yani bosluk, seviyeler
+# donduktan BIR MUM SONRA belli olur. Bu yuzden tespit `track_bar`a gelen kapanan mumlarla
+# artimli yapilir (high/low yetiyor) ve varyant hazir olunca `entries`e EKLENIR. SL/TP/ufuk
+# donmus degerlerdir; degisen yalnizca entry ve izlemenin BASLANGICI (`det`).
+def _cfvg_iso(ts) -> str | None:
+    """Tampondaki zamanlar tek bicimde (naive UTC ISO): karsilastirma metin uzerinden yapiliyor."""
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts)
+        except Exception:
+            return None
+    ts = _naive_utc(ts)
+    return ts.isoformat() if ts is not None else None
+
+
+def _cfvg_init(rec: dict, seed: dict | None, ref) -> dict | None:
+    """Scanner'in verdigi tohum (onay zamani + son kapali mumlar) ile bekleyen tespit durumu."""
+    confirm = _cfvg_iso((seed or {}).get("confirm"))
+    if not confirm:
+        return None
+    bars = []
+    for row in (seed.get("bars") or []):
+        try:
+            iso = _cfvg_iso(row[0])
+            if iso is None:
+                continue
+            bars.append([iso, float(row[1]), float(row[2])])
+        except Exception:
+            continue
+    bars.sort(key=lambda r: r[0])
+    return {"c": confirm, "b": bars, "avg": seed.get("avg"),
+            "ref": float(ref) if ref is not None else None, "n": 0, "done": False,
+            "o": "state"}          # varyant dongulerinin atlamasi icin (bkz. CFVG_STATE)
+
+
+def _cfvg_window_done(state: dict) -> bool:
+    """Onay mumu + CFVG_BARS_AFTER penceresinin son FVG'si de kapandi mi?"""
+    bars, confirm = state.get("b") or [], state.get("c")
+    k = None
+    for i, row in enumerate(bars):
+        if row[0] <= confirm:
+            k = i
+    if k is None:
+        return False
+    return len(bars) - 1 >= k + CFVG_BARS_AFTER + 1
+
+
+def _cfvg_scan(rec: dict, ents: dict | None = None) -> bool:
+    """Tamponu tara: FVG olustuysa varyantlari ekle, pencere bittiyse kapat. Degisti mi?
+
+    `ents` kurulum aninda verilir (`rec["entries"]` henuz atanmamis olur).
+    """
+    if ents is None:
+        ents = rec.get("entries")
+    state = (ents or {}).get(CFVG_STATE)
+    if not ents or not state or state.get("done"):
+        return False
+    cands = cisd_fvg_candidates(
+        [(row[0], row[1], row[2]) for row in state.get("b") or []],
+        rec.get("direction") or "",
+        confirm_ts=state.get("c"),
+        bars_before=CFVG_BARS_BEFORE,
+        bars_after=CFVG_BARS_AFTER,
+    )
+    changed = False
+    if len(cands) != state.get("n"):
+        state["n"] = len(cands)        # esik/coklu-FVG sorusu icin: kac aday cikti
+        changed = True
+    long = rec.get("direction") == "LONG"
+    if cands and "cfvg_near" not in ents:
+        z_lo, z_hi, formed = cands[0]  # ILKI: kirilim origin'ine en yakin (derin, RR yuksek)
+        # FVG'nin olustugu mum izlemeye DAHIL DEGIL: yakin kenar tanim geregi o mumun
+        # low'u (LONG) oldugu icin oradan "dolum" retest degil, formasyonun kendisidir.
+        until = _naive_utc(datetime.fromisoformat(formed))
+        # Seviyeler dondugunde FVG zaten varsa referans fiyat anlamli; sonra olustuysa
+        # fiyat boslugun kenarindadir, `imm` sorusu dogmaz.
+        ref = state.get("ref") if until <= rec["levels_at"] else None
+        for name, e in (("cfvg_near", z_hi if long else z_lo),
+                        ("cfvg_mid", round((z_lo + z_hi) / 2, 8)),
+                        ("cfvg_far", z_lo if long else z_hi)):
+            v = _entry_variant(rec, e, ref)
+            v["until"] = until
+            v["det"] = formed
+            if state.get("avg"):
+                v["gf"] = round((z_hi - z_lo) / float(state["avg"]), 4)
+            ents[name] = v
+        changed = True
+    if _cfvg_window_done(state):
+        _cfvg_close(state, ents)
+        changed = True
+    return changed
+
+
+def _cfvg_close(state: dict, ents: dict, why: str = "no_fvg") -> None:
+    """Pencereyi kapat; FVG cikmadiysa modelin UYGULANAMADIGINI yaz (bkz. C1 golge varyanti)."""
+    state["done"] = True
+    if "cfvg_near" in ents:
+        return
+    for name in ("cfvg_near", "cfvg_mid", "cfvg_far"):
+        ents[name] = {"e": None, "rr": None, "o": "invalid", "t": None, "at": None,
+                      "until": None, "why": why}
+
+
+def _cfvg_step(rec: dict, bar_ts, high: float, low: float) -> bool:
+    """Kapanan LTF mumunu tampona ekle ve tara."""
+    state = (rec.get("entries") or {}).get(CFVG_STATE)
+    if not state or state.get("done"):
+        return False
+    iso = _cfvg_iso(bar_ts)
+    if iso is None:
+        return False
+    bars = state.setdefault("b", [])
+    if bars and iso <= bars[-1][0]:
+        return False                   # ayni/eski mum (reconcile, telafi) -- tampon bozulmasin
+    bars.append([iso, float(high), float(low)])
+    _cfvg_scan(rec)
+    if not state.get("done") and _naive_utc(bar_ts) >= rec["levels_at"] + _horizon(rec):
+        # Mum akisi kesildi (seans kapanisi, sembol dustu): pencere ufukta zorla kapanir,
+        # yoksa kayit "izleniyor" gorunup bellekte kalirdi.
+        _cfvg_close(state, rec["entries"], why="no_bars")
+    return True
 
 
 def _retrace_init(rec: dict) -> dict | None:
@@ -359,9 +521,14 @@ def _entries_active(rec: dict, bar_ts=None) -> bool:
         return False
     if bar_ts is not None and bar_ts < rec["levels_at"]:
         return False
+    state = ents.get(CFVG_STATE)
+    if state is not None and not state.get("done") and (
+        bar_ts is None or bar_ts <= rec["levels_at"] + _horizon(rec)
+    ):
+        return True            # CISD kirilim FVG'si henuz olusmadi: mum tamponu dolmaya devam
     return any(
-        v["o"] in TRACKING and (bar_ts is None or v.get("until") is None or bar_ts > v["until"])
-        for v in ents.values()
+        v.get("o") in TRACKING and (bar_ts is None or v.get("until") is None or bar_ts > v["until"])
+        for name, v in ents.items() if name != CFVG_STATE
     )
 
 
@@ -375,8 +542,10 @@ def _apply_entries(rec: dict, bar_ts, high: float, low: float) -> None:
     hit_tp = high >= tp if long else low <= tp
     hit_sl = low <= sl if long else high >= sl
     horizon = HORIZON.get(rec["strategy"], timedelta(hours=48))
-    for v in rec["entries"].values():
-        if v["o"] not in TRACKING or (v.get("until") is not None and bar_ts <= v["until"]):
+    for name, v in list(rec["entries"].items()):
+        if name == CFVG_STATE:
+            continue
+        if v.get("o") not in TRACKING or (v.get("until") is not None and bar_ts <= v["until"]):
             continue
         e = v["e"]
         hit_e = low <= e if long else high >= e
@@ -401,6 +570,9 @@ def _apply_entries(rec: dict, bar_ts, high: float, low: float) -> None:
                 v["o"], v["at"] = "loss", bar_ts
         if v["o"] in TRACKING and bar_ts >= rec["levels_at"] + horizon:
             v["o"], v["at"] = ("no_touch" if v["o"] == "pending" else "open"), bar_ts
+    # CISD kirilim FVG'si en sonda: bu mumda olustuysa varyantlar EKLENIR ama ayni muma
+    # uygulanmaz (yakin kenar tanim geregi bu mumun ucu; dolum degil formasyon olurdu).
+    _cfvg_step(rec, bar_ts, high, low)
 
 
 def _variants_dump(data: dict | None, ts_fields: tuple) -> str | None:

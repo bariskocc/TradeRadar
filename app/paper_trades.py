@@ -599,7 +599,7 @@ def calendar_month(rows, first_day: date, last_day: date, open_rows=()) -> dict:
         if t.closed_at is None:
             continue
         day = t.closed_at.replace(tzinfo=timezone.utc).astimezone(TSI).date()
-        cell = by_day.setdefault(day, {"r": 0.0, "n": 0, "wins": 0, "losses": 0,
+        cell = by_day.setdefault(day, {"r": 0.0, "n": 0, "wins": 0, "losses": 0, "be": 0,
                                        "pnl": None, "cur": t.currency or DEFAULT_CURRENCY})
         if t.rr_value is not None:
             cell["r"] += float(t.rr_value)
@@ -611,6 +611,8 @@ def calendar_month(rows, first_day: date, last_day: date, open_rows=()) -> dict:
             cell["wins"] += 1
         elif t.result == "loss":
             cell["losses"] += 1
+        elif t.result == "breakeven":
+            cell["be"] += 1
     for cell in by_day.values():
         cell["r"] = round(cell["r"], 2)
     # Renk ve siralama olcutu: para varsa para, yoksa R (ikisi de ayni isarete sahip olmak
@@ -649,6 +651,7 @@ def calendar_month(rows, first_day: date, last_day: date, open_rows=()) -> dict:
                 "currency": data["cur"] if data else DEFAULT_CURRENCY,
                 "wins": data["wins"] if data else 0,
                 "losses": data["losses"] if data else 0,
+                "be": data["be"] if data else 0,
                 "open_n": open_by_day.get(day, 0),
                 "tone": tone,
                 # 0.10-0.45 bandi: en kucuk gun bile secilebilsin, en buyugu ekrani yakmasin.

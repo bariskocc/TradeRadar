@@ -122,12 +122,32 @@ def parse_dt(value: str | None) -> datetime | None:
     return None
 
 
+# Broker sonekleri ve takma adlari: "ALCHEMY:USTEC.R" -> "US100".
+# Yalnizca sembol ham haliyle TANINMADIGINDA denenir; kripto perp soneki ".P" bu yuzden guvende.
+_BROKER_SUFFIXES = (".R", ".C", ".RAW", ".PRO")
+_SYMBOL_ALIASES = {
+    "USTEC": "US100", "NAS100": "US100", "NDX": "US100",
+    "SPX500": "US500", "SPX": "US500", "US30": "US30",
+    "USOIL": "OILWTI", "WTI": "OILWTI", "UKOIL": "OILBRENT", "BRENT": "OILBRENT",
+    "GOLD": "XAUUSD", "SILVER": "XAGUSD",
+}
+
+
 def display_symbol(raw: str | None) -> str:
-    """"BINGX:FETUSDT.P" -> "FETUSDT.P" (borsa oneki atilir, sonra bilinen ada normalize)."""
+    """"BINGX:FETUSDT.P" -> "FETUSDT.P", "ALCHEMY:USTEC.R" -> "US100"."""
     text = (raw or "").strip()
     if ":" in text:
         text = text.split(":")[-1]
-    return normalize_symbol(text)
+    known = normalize_symbol(text)
+    if market_for(known) != "other":
+        return known                                   # zaten taniniyor, dokunma
+    bare = text.upper()
+    for suffix in _BROKER_SUFFIXES:
+        if bare.endswith(suffix):
+            bare = bare[: -len(suffix)]
+            break
+    alias = normalize_symbol(_SYMBOL_ALIASES.get(bare, bare))
+    return alias if market_for(alias) != "other" else known
 
 
 # ──────────────────── İşlem geçmişi ────────────────────
@@ -209,6 +229,7 @@ def parse_trades(text: str) -> tuple[list[dict], list[str]]:
         display = display_symbol(raw_symbol)
         trades.append({
             "ext_id": entries[0]["order"] or f"{raw_symbol}#{trade_no}",
+            "exit_order": (exits[-1]["order"] if exits else ""),
             "trade_no": trade_no,
             "raw_symbol": raw_symbol,
             "symbol": display,
@@ -248,7 +269,13 @@ def _weighted(items: list[dict]) -> float | None:
 # ──────────────────── Emirler ────────────────────
 
 def parse_orders(text: str) -> list[dict]:
-    """Gerceklesmis emirler; bizi ilgilendiren TP (`Kâr Al`) ve SL (`Zarar durdur`)."""
+    """Emir satirlari. SL/TP iki bicimde gelebilir:
+
+    * **Sutun**: eski "emirler gerceklesti" exportunda giris emrinin satirinda `Kâr Al` / `Zarar durdur`.
+    * **Ayri satir**: "emir gecmisi (tumu)" exportunda her bracket kendi satiri -- `Tür` = `Stop` ise
+      seviye `Durdur fiyatı`ndadir (SL), `Limit` ise `Limit fiyatı`ndadir (TP). Bunlari `merge`
+      icindeki `_attach_brackets` islemlere baglar.
+    """
     rows = _read_csv(text)
     if not rows:
         return []
@@ -266,12 +293,28 @@ def parse_orders(text: str) -> list[dict]:
         "order": _find(heads, "emir no", "order id", "order no", used=used),
         "lev": _find(heads, "kaldirac", "leverage", used=used),
         "margin": _find(heads, "teminat", "margin", used=used),
+        "kind": _find(heads, "tur", "type", used=used),
+        "status": _find(heads, "durum", "status", used=used),
+        "trigger": _find(heads, "durdur fiyati", "stop price", used=used),
+        "closed": _find(heads, "kapanis saati", "closing time", "close time", used=used),
     }
     out = []
     for row in rows:
         side = _norm(row.get(c["side"])) if c["side"] else ""
         fill = _num(row.get(c["fill"])) if c["fill"] else None
+        kind_raw = _norm(row.get(c["kind"])) if c["kind"] else ""
+        kind = ("stop" if kind_raw.startswith(_STOP_KINDS)
+                else "limit" if kind_raw.startswith(_LIMIT_KINDS) else "market")
+        level = None
+        if kind == "stop" and c["trigger"]:
+            level = _num(row.get(c["trigger"]))
+        elif kind == "limit" and c["limit"]:
+            level = _num(row.get(c["limit"]))
         out.append({
+            "kind": kind,
+            "level": level,
+            "status": _norm(row.get(c["status"])) if c["status"] else "",
+            "t_close": parse_dt(row.get(c["closed"])) if c["closed"] else None,
             "symbol": display_symbol(row.get(c["symbol"])) if c["symbol"] else "",
             "side": side,
             "is_buy": side.startswith("al") or side.startswith("buy") or side.startswith("long"),
@@ -317,10 +360,92 @@ def _fallback_order(trade: dict, orders: list[dict]) -> dict | None:
     return best
 
 
+# Bracket penceresinin ucundaki tolerans. Giris/cikis emrinin SANIYELI zamanini
+# cozebildigimizde 5 sn yeter; cozemezsek islem gecmisinin dakikaya yuvarli zamanina
+# duseriz ve pencereyi 2 dk acmak zorunda kaliriz (bkz. _attach_brackets).
+# `Tür` sutunundaki bracket adlari. TradingView ayni dosyada iki adlandirma kullaniyor:
+# emirle birlikte konan koruma "Stop"/"Limit", pozisyona SONRADAN eklenen ise
+# "Zarar Durdur"/"Kâr Al" yaziyor (22.09 #21'de fark edildi: satir "market" sanilip elenmis,
+# islem SL'siz gelmisti). Seviye yeri ikisinde de ayni: stop -> `Durdur fiyatı`, limit -> `Limit fiyatı`.
+_STOP_KINDS = ("stop", "zarar durdur", "stop loss")
+_LIMIT_KINDS = ("limit", "kar al", "take profit")
+
+_BRACKET_GRACE = timedelta(seconds=5)
+_BRACKET_LOOSE_GRACE = timedelta(minutes=2)
+
+
+def _attach_brackets(trades: list[dict], orders: list[dict]) -> None:
+    """Ayri satir olarak gelen Stop/Limit emirlerini islemlere baglar.
+
+    Kural: koruma emri **giris emrinden sonra veya ayni anda** girilmis ve **cikista**
+    (dolarak ya da iptal edilerek) olmus olmali. Kullanici SL'i market emriyle birlikte de
+    koyuyor, girdikten 10 sn sonra da -- ikisi de bu kurala uyar.
+
+    Zaman penceresi islemin kendi zamanindan degil **emir dosyasindaki saniyeli** zamandan
+    kurulur: islem gecmisi dakikaya yuvarli yaziyor ve o yuvarlamayla, girisin hemen oncesinde
+    reddedilmis bir emirden kalan bayat bracket islemin ustune yapisiyor (21.09 #6 vakasi).
+
+    Seviye birden cok kademeliyse (stop tasindi / pozisyon iki hedefe bolundu) **ilk girilen**
+    yazilir -- R'nin paydasi daima ilk SL. Kademelerin tamami `sl_steps`/`tp_steps`'te durur,
+    onizleme uyari rozetini oradan basar.
+    """
+    pool = [o for o in orders
+            if o.get("kind") in ("stop", "limit") and o.get("level") is not None
+            and not o.get("status", "").startswith(("reddedildi", "rejected"))]
+    if not pool:
+        return
+    by_no = {o["order"]: o for o in orders if o.get("order")}
+    for trade in trades:
+        if trade.get("sl") is not None and trade.get("tp") is not None:
+            continue
+        entry_order = by_no.get(trade.get("ext_id") or "")
+        exit_order = by_no.get(trade.get("exit_order") or "")
+        exact = entry_order is not None and entry_order.get("dt") is not None
+        start = entry_order["dt"] if exact else trade.get("entered_at")
+        if start is None:
+            continue
+        end = exit_order.get("t_close") if exit_order is not None else None
+        if end is None:
+            end = trade.get("closed_at")
+            exact = False
+        grace = _BRACKET_GRACE if exact else _BRACKET_LOOSE_GRACE
+        want_buy = trade["direction"] == "SHORT"       # koruma emri pozisyonun tersi yonde
+        qty = trade.get("qty") or 0.0
+        picked = []
+        for order in pool:
+            if order["symbol"] != trade["symbol"] or order["is_buy"] != want_buy:
+                continue
+            # Bolunmus bracket (7 birim -> 4 + 3) kucuk gelir; buyugu baska pozisyonundur.
+            if qty and order.get("qty") and order["qty"] > qty * (1 + _QTY_TOL):
+                continue
+            if order.get("dt") is None or order["dt"] < start:
+                continue
+            if end is not None and (order.get("t_close") is None or order["t_close"] > end + grace):
+                continue
+            picked.append(order)
+        if not picked:
+            continue
+        picked.sort(key=lambda o: o["dt"])
+        steps = {"stop": [], "limit": []}
+        for order in picked:
+            bucket = steps[order["kind"]]
+            if order["level"] not in bucket:
+                bucket.append(order["level"])           # kronolojik, tekrarsiz
+        if trade.get("sl") is None and steps["stop"]:
+            trade["sl"] = steps["stop"][0]
+        if trade.get("tp") is None and steps["limit"]:
+            trade["tp"] = steps["limit"][0]
+        trade["sl_steps"] = steps["stop"]
+        trade["tp_steps"] = steps["limit"]
+        trade["match"] = "bracket" if exact else "bracket (yakın)"
+
+
 def merge(trades: list[dict], orders: list[dict]) -> list[dict]:
     """Islemlere emir dosyasindan SL/TP (+ kaldirac, teminat) ekler ve plan R'yi hesaplar."""
     by_no = {o["order"]: o for o in orders if o.get("order")}
     for trade in trades:
+        trade.setdefault("sl_steps", [])
+        trade.setdefault("tp_steps", [])
         order = by_no.get(trade["ext_id"])
         match = "emir no" if order is not None else None
         if order is None:
@@ -332,6 +457,11 @@ def merge(trades: list[dict], orders: list[dict]) -> list[dict]:
             trade["leverage"] = order.get("leverage")
             trade["margin"] = order.get("margin")
         trade["match"] = match
+    # Sutun bicimli dosyada seviyeler zaten geldi; bracket yolu yalnizca o bicim yokken calisir
+    # ki eski export'un davranisi birebir korunsun.
+    if not any(o.get("sl") is not None or o.get("tp") is not None for o in orders):
+        _attach_brackets(trades, orders)
+    for trade in trades:
         _recalc(trade)
     return trades
 

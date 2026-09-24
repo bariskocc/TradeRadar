@@ -136,6 +136,7 @@ RADAR_STATE_META = {
     "invalidated":    {"label": "CRT 60% crossed",            "color": "yellow", "rank": 4},
     "past_sl":        {"label": "SL before fill",             "color": "yellow", "rank": 4},
     "stale":          {"label": "Retest too old (stale)",     "color": "yellow", "rank": 4},
+    "week_gap":       {"label": "CISD before week close",     "color": "yellow", "rank": 4},
     "week_close":     {"label": "Cancelled (week close)",      "color": "yellow", "rank": 4},
     "same_bar_sl":    {"label": "SL before fill",             "color": "yellow", "rank": 4},
     # "same_color":   {"label": "CRT/purge same color",      "color": "red",    "rank": 4},
@@ -1535,14 +1536,14 @@ async def api_radar(request: Request):
             + cnt.get("invalidated", 0)  # + cnt.get("same_color", 0)  # eski hard filter
             + cnt.get("tight_stop", 0) + cnt.get("bias_mismatch", 0)
             + cnt.get("cluster_limit", 0)
-            + cnt.get("stale", 0) + cnt.get("same_bar_sl", 0)
+            + cnt.get("stale", 0) + cnt.get("same_bar_sl", 0) + cnt.get("week_gap", 0)
             + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0)
         ),
         "setups": sum(cnt.get(k, 0) for k in (
             "waiting", "c2_open", "no_cisd", "low_rr", "missed", "invalidated",
             # "same_color",  # eski hard filter
             "tight_stop", "bias_mismatch", "cluster_limit", "low_quality",
-            "has_open", "duplicate", "corr_open", "stale", "same_bar_sl",
+            "has_open", "duplicate", "corr_open", "stale", "same_bar_sl", "week_gap",
             "past_sl", "missed_quality",
         )),
         "idle": cnt.get("no_setup", 0) + cnt.get("no_data", 0),

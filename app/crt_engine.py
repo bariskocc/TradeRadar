@@ -131,6 +131,10 @@ class CISDConfirmation:
     # BPR (iki FVG'nin kesisimi) varsa bolgesi; IFVG bolgesinin ICINDE kalir.
     bpr_low: Optional[float] = None
     bpr_high: Optional[float] = None
+    # Kesisimi olusturan ayni yonlu FVG'nin KENDI sinirlari. YALNIZ OLCUM (22.09):
+    # bacagin girise yakin kenari kesisiminkinin disinda kaldigi icin once dokunulur.
+    bleg_low: Optional[float] = None
+    bleg_high: Optional[float] = None
     # Iki adayin HAM seviyeleri. `_pick_wider_stop` yalnizca kazanani dondurdugu icin
     # kaybeden aday kayboluyordu; entry modeli karsilastirmasi (Setup Journal `entries`)
     # ayni setupta ikisini de izlemek zorunda. YALNIZ OLCUM -- motor karari bunlari kullanmaz.
@@ -1161,6 +1165,12 @@ class IFVGZone:
     # Bosluk / son 20 LTF mumunun ort. range'i. Yalniz OLCUM (MIN_IFVG_GAP_RANGE_FRAC
     # esiginin dogru yerde olup olmadigini sonradan veriyle sorabilmek icin).
     gap_frac: Optional[float] = None
+    # Yalniz kind="bpr" icin: kesisimi olusturan AYNI YONLU FVG'nin KENDI sinirlari
+    # (kesisim degil). Kesisim bu FVG'nin icinde kaldigi icin bacagin girise yakin
+    # kenari daima kesisiminkinden once dokunulur -- "BPR'ye degil bacaga limit
+    # koysaydik" sorusu bu iki sayidan olculur. Motor KULLANMAZ (22.09).
+    leg_low: Optional[float] = None
+    leg_high: Optional[float] = None
 
     def entry_for(self, direction: str) -> float:
         """Girise EN YAKIN kenar: LONG'da ust, SHORT'ta alt.
@@ -1276,6 +1286,72 @@ def detect_displacement_fvg(
         kind="bull" if bull else "bear",
         gap_frac=round((z_hi - z_lo) / _avg_range, 4) if _avg_range > 0 else None,
     )
+
+
+
+# CISD kirilim FVG'si (22.09, kullanici istegi) -- Setup Journal `entries` karsilastirmasinin
+# 5. modeli. Soru: "CISD onayindan sonra fiyat, onayi yapan hamlenin arkada biraktigi FVG'ye
+# retest veriyor mu; giris oradan daha mi iyi?" IFVG'ye de MSS'e de BAKMAZ: yalnizca CISD
+# onayi + o hamlenin biraktigi bosluk.
+#
+# `detect_displacement_fvg`ten farki PENCERE ve ZAMANLAMA:
+#   - O fonksiyon purge -> onay arasini tarar ve seviyeler DONDUGU AN cagrilir; onay mumu o an
+#     serinin son kapali mumu oldugu icin, orta mumu ONAY MUMU OLAN FVG'yi yapisal olarak hic
+#     goremez (3 mumluk desen bir mum daha ister). Olculdu: 1519 setup'in yalniz 283'unde
+#     dfvg seviyesi var ve 142'si CISD'den daha DERIN -- yani bulunan sey kirilim bacaginin
+#     degil, purge sonrasi eski bir boslugun FVG'si.
+#   - Bu fonksiyon onay mumu MERKEZLI calisir (orta mum: onay-1 .. onay+bars_after) ve setup
+#     journal tarafindan mum mum, ARTIMLI cagrilir; FVG onaydan sonra tamamlansa da yakalanir.
+#
+# Girdi DataFrame degil (ts, high, low) uclusu: journal'in kapanan mumlardan elinde yalnizca
+# bunlar var (`track_bar`) ve FVG icin fazlasi gerekmiyor. Boylece tespit tek yerde yasar --
+# canli artimli yol ile dogrulama betigi ayni kodu cagirir.
+def cisd_fvg_candidates(
+    bars,
+    direction: str,
+    *,
+    confirm_ts,
+    bars_before: int = 1,
+    bars_after: int = 2,
+) -> list[tuple]:
+    """Onay hamlesinin biraktigi FVG adaylari: [(lo, hi, olustugu_mum_ts), ...] olusum sirasiyla.
+
+    LONG (boga FVG): low[i+1] > high[i-1] -> bosluk [high[i-1], low[i+1]].
+    SHORT simetrik: high[i+1] < low[i-1] -> bosluk [high[i+1], low[i-1]].
+    Bosluk `bars[i+1]` kapaninca BILINIR; donen ts o mumdur (izleme SONRAKI mumdan baslar --
+    yakin kenar tanim geregi o mumun low'u/high'i oldugu icin "retest" sorusu kendiliginden
+    "evet" cikardi).
+
+    Adaylar artan i ile taranir; cagiran ILKINI (kirilim origin'ine en yakin, derin = RR yuksek)
+    kullanir, sayilari ise esik sorusu icin kaydedilir. Gurultu filtresi UYGULANMAZ.
+    """
+    out: list[tuple] = []
+    try:
+        rows = [(t, float(h), float(l)) for t, h, l in bars]
+    except Exception:
+        return out
+    if len(rows) < 3 or confirm_ts is None:
+        return out
+    k = None
+    for i, (t, _, _) in enumerate(rows):
+        if t is not None and t <= confirm_ts:
+            k = i
+    if k is None:
+        return out
+    long = direction == "LONG"
+    lo_i = max(1, k - max(0, bars_before))
+    hi_i = min(len(rows) - 2, k + max(0, bars_after))
+    for i in range(lo_i, hi_i + 1):
+        _, a_high, a_low = rows[i - 1]
+        _, b_high, b_low = rows[i + 1]
+        if long:
+            z_lo, z_hi = a_high, b_low
+        else:
+            z_lo, z_hi = b_high, a_low
+        if z_hi <= z_lo:
+            continue                      # bosluk yok
+        out.append((round(z_lo, 8), round(z_hi, 8), rows[i + 1][0]))
+    return out
 
 
 def detect_ltf_ifvg(
@@ -1413,6 +1489,10 @@ def detect_ltf_bpr(
     daha asagida, daha derin bir entry (RR daha iyi, dolum olasiligi daha dusuk).
     `kind` "bpr" yazilir; `entry_for` aynen calisir (LONG'da ust, SHORT'ta alt kenar).
 
+    Donen bolgede `leg_low`/`leg_high` ikinci FVG'nin KENDI sinirlaridir (kesisim degil).
+    Yalniz olcum: kesisim bu araligin icinde kaldigi icin bacagin girise yakin kenari
+    daima once dokunulur -- "kesisime degil bacaga limit koysaydik" sorusu oradan olculur.
+
     Ikinci FVG'ye ayni gurultu filtresi (MIN_IFVG_GAP_RANGE_FRAC) uygulanir; kesisimin
     kendisine asgari boyut sarti YOKTUR (kesisim tanim geregi daha kucuk). IFVG'nin
     mitigasyon kontrolu zaten yapilmistir, kesisim onun icinde kaldigi icin tekrarlanmaz.
@@ -1442,7 +1522,7 @@ def detect_ltf_bpr(
     long = direction == "LONG"
     lo_i = max(1, inverted_k - 1)
     hi_i = min(n - 2, inverted_k + max(0, bars_after))
-    picked: Optional[tuple[float, float, object]] = None
+    picked: Optional[tuple[float, float, object, float, float]] = None
     for i in range(lo_i, hi_i + 1):
         a = work.iloc[i - 1]
         b = work.iloc[i + 1]
@@ -1457,10 +1537,11 @@ def detect_ltf_bpr(
         ov_lo, ov_hi = max(z_lo, f_lo), min(z_hi, f_hi)
         if ov_hi <= ov_lo:
             continue                                  # kesismiyor -> BPR degil, sadece IFVG
-        picked = (ov_lo, ov_hi, work.index[i])        # en son aday kazanir (IFVG ile ayni kural)
+        # en son aday kazanir (IFVG ile ayni kural); bacagin kendi sinirlari da tasinir
+        picked = (ov_lo, ov_hi, work.index[i], f_lo, f_hi)
     if picked is None:
         return None
-    ov_lo, ov_hi, ts = picked
+    ov_lo, ov_hi, ts, leg_lo, leg_hi = picked
     return IFVGZone(
         low=round(ov_lo, 8),
         high=round(ov_hi, 8),
@@ -1468,6 +1549,8 @@ def detect_ltf_bpr(
         inverted_time=ts.to_pydatetime(),
         kind="bpr",
         gap_frac=round((ov_hi - ov_lo) / _avg_range, 4) if _avg_range > 0 else None,
+        leg_low=round(leg_lo, 8),
+        leg_high=round(leg_hi, 8),
     )
 
 

@@ -1193,6 +1193,30 @@ def _price_hit_sl_after(
     return False
 
 
+def _week_gap_since_cisd(
+    bingx_symbol: str,
+    cisd_time: datetime | None,
+    df_ltf: pd.DataFrame,
+) -> pd.Timestamp | None:
+    """CISD ile serinin son bari arasinda FX hafta kapanisi kaldi mi?
+
+    Kripto 7/24 oldugu icin yalniz seans sembollerinde anlamli. "Simdi" duvar
+    saati degil serinin son bari - reconcile/replay ayni sonucu versin.
+    """
+    if not is_session_symbol(bingx_symbol):
+        return None
+    cisd_ts = _as_utc(cisd_time)
+    if cisd_ts is None or df_ltf is None or df_ltf.empty:
+        return None
+    now = pd.Timestamp(df_ltf.index[-1])
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    close = fx_session.last_week_close(now)
+    if close is None or close <= pd.Timestamp(cisd_ts):
+        return None
+    return close
+
+
 def _price_hit_tp_after(
     df_ltf: pd.DataFrame,
     direction: str,
@@ -1405,6 +1429,8 @@ def _maybe_ifvg_entry(
     if bpr is not None:
         cisd.bpr_low = bpr.low
         cisd.bpr_high = bpr.high
+        cisd.bleg_low = bpr.leg_low      # yalniz olcum (Journal `entries` -> bfvg_*)
+        cisd.bleg_high = bpr.leg_high
     if not allow_ifvg:
         return cisd, planned
     # Guclu olan once: BPR -> IFVG. Ikisi de ayni RR korumasina tabi.
@@ -1520,7 +1546,17 @@ def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None, bpr=None) -> dic
             out["bpr_near"] = float(b_hi if long else b_lo)
             out["bpr_mid"] = round((float(b_lo) + float(b_hi)) / 2, 8)
             out["bpr_far"] = float(b_lo if long else b_hi)
-        # 3. model: kirilimi yapan hamlenin arkasinda biraktigi FVG
+        # BPR bacagi: kesisimi olusturan AYNI YONLU FVG'nin kendisi (kullanici sorusu 22.09).
+        # Kesisim bacagin icinde kaldigi icin bacagin yakin kenari daima daha sig -> dolum
+        # olasiligi yuksek, RR dusuk. AUDUSD 1D #85: fiyat BPR girisine 1 pip kala donmustu.
+        l_lo, l_hi = getattr(cisd, "bleg_low", None), getattr(cisd, "bleg_high", None)
+        if l_lo is None and bpr is not None:
+            l_lo, l_hi = getattr(bpr, "leg_low", None), getattr(bpr, "leg_high", None)
+        if l_lo is not None and l_hi is not None:
+            out["bfvg_near"] = float(l_hi if long else l_lo)
+            out["bfvg_mid"] = round((float(l_lo) + float(l_hi)) / 2, 8)
+            out["bfvg_far"] = float(l_lo if long else l_hi)
+        # 3. model: kirilimi yapan hamlenin arkasinda biraktigi FVG (purge -> onay penceresi)
         if getattr(cisd, "cisd_time", None) is not None:
             d = detect_displacement_fvg(
                 df_ltf, setup.direction,
@@ -1530,9 +1566,46 @@ def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None, bpr=None) -> dic
                 out["dfvg_near"] = float(d.high if long else d.low)
                 out["dfvg_mid"] = float(d.mid)
                 out["dfvg_far"] = float(d.low if long else d.high)
+            # 5. model (cfvg): AYNI fikir ama onay mumu MERKEZLI pencere ve GEC tespit.
+            # Seviye burada hesaplanamaz -- onayi yapan hamlenin FVG'si 3 mumluk bir desendir
+            # ve orta mumu genelde onay mumudur, yani bosluk bir mum SONRA belli olur (dfvg bu
+            # yuzden bu FVG'yi hic goremiyor). Journal'a tespitin TOHUMU verilir: onay zamani +
+            # cevresindeki kapali mumlar; gerisini `setup_journal._cfvg_step` mum mum tamamlar.
+            out[journal.CFVG_STATE] = _cfvg_seed(df_ltf, cisd.cisd_time)
     except Exception:
         log.exception("entry candidates failed for %s", getattr(setup, "symbol", "?"))
     return out
+
+
+def _cfvg_seed(df_ltf, confirm_time) -> dict | None:
+    """CISD kirilim FVG'si icin tohum: onay zamani + onayin cevresindeki KAPALI mumlar.
+
+    Tampon bilincli olarak kucuk: pencere (onay-1 .. onay+2 orta mum) icin gereken en fazla
+    mum kadar. Son satir forming oldugu icin dusulur (`_drop_forming_bar` ile ayni gelenek).
+    """
+    if df_ltf is None or len(df_ltf) < 3 or confirm_time is None:
+        return None
+    try:
+        closed = df_ltf.sort_index().iloc[:-1]
+        confirm_ts = pd.Timestamp(confirm_time)
+        if confirm_ts.tzinfo is None:
+            confirm_ts = confirm_ts.tz_localize("UTC")
+        idx = closed.index
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        pos = [i for i, t in enumerate(idx) if t <= confirm_ts]
+        if not pos:
+            return None
+        k = pos[-1]
+        lo = max(0, k - journal.CFVG_BARS_BEFORE - 1)
+        hi = k + journal.CFVG_BARS_AFTER + 2
+        win = closed.iloc[lo:hi]
+        bars = [[t.to_pydatetime(), float(r["high"]), float(r["low"])]
+                for t, r in zip(idx[lo:hi], (row for _, row in win.iterrows()))]
+        return {"confirm": confirm_ts.to_pydatetime(), "bars": bars,
+                "avg": _avg_ltf_range(df_ltf)}
+    except Exception:
+        return None
 
 
 def _preview_trade_levels(
@@ -2223,6 +2296,27 @@ async def _detect_and_create_waiting_locked(
                 setup.symbol, setup.direction, stop_pct or 0.0, min_pct,
             )
         await _gated("tight_stop")
+        return None
+
+    # Hafta boslugu: CISD hafta kapanisindan once olustu, arada FX haftasi kapanip
+    # yeniden acildi. Cuma kapanisi dolmamis setuplari zaten siliyor (Pazar acilis
+    # gap'i SL'nin otesinden acabilir, motor bunu olcemez); ayni setup Pazartesi
+    # dirilirse o koruma bosa cikar. Ustelik hafta sonu hareketi olu seans olarak
+    # elendigi icin past_tp/past_sl kapilari bu araligi goremez - yani setup'i
+    # "hala gecerli" sanmak veriyle degil verinin yoklugu ile desteklenir.
+    week_gap_at = _week_gap_since_cisd(bingx_symbol, cisd.cisd_time, df_ltf) if cisd.confirmed else None
+    if week_gap_at is not None:
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "week_gap")
+        _radar("week_gap", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
+                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        log.info(
+            "SKIPPED (WEEK GAP): %s %s CISD %s hafta kapanisindan (%s) once, setup dirilmez.",
+            setup.symbol, setup.direction, cisd.cisd_time, week_gap_at,
+        )
+        await _gated("week_gap")
         return None
 
     tp_after = cisd.cisd_time if cisd.confirmed else setup.purge_time

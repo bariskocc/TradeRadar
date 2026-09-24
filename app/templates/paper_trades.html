@@ -603,36 +603,49 @@
                             {% for cell in week.cells %}
                             {% if cell.n %}
                             <a href="/paper-trades?view=trades&tab=all&date_basis=closed&date_from={{ cell.iso }}&date_to={{ cell.iso }}"
-                               class="block rounded-lg border p-1 md:p-2 min-h-[58px] md:min-h-[76px] overflow-hidden transition hover:border-accent-blue
+                               class="block rounded-lg border p-1 md:p-2 min-h-[62px] md:min-h-[86px] overflow-hidden transition hover:border-accent-blue
                                {% if cell.tone == 'win' %}border-green-500/40{% elif cell.tone == 'loss' %}border-red-500/40{% else %}border-dark-600{% endif %}
                                {% if not cell.in_month %}opacity-40{% endif %}"
                                style="background-color: rgba({{ '34,197,94' if cell.tone == 'win' else ('239,68,68' if cell.tone == 'loss' else '39,43,64') }}, {{ cell.alpha }})"
-                               title="{{ cell.n }} işlem · {{ cell.wins }}W / {{ cell.losses }}L{% if cell.open_n %} · {{ cell.open_n }} açık{% endif %}">
-                                <span class="block text-[11px] md:text-xs font-semibold leading-none {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ cell.day }}</span>
+                               title="{{ cell.n }} işlem · {{ cell.wins }}W / {{ cell.be }}BE / {{ cell.losses }}L{% if cell.pnl is not none %} · {{ '%+.2f'|format(cell.r) }}R{% endif %}{% if cell.open_n %} · {{ cell.open_n }} açık{% endif %}">
+                                <div class="flex items-baseline justify-between gap-1 leading-none">
+                                    <span class="text-[11px] md:text-xs font-semibold {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ cell.day }}</span>
+                                    {% if cell.pnl is not none %}
+                                    <span class="hidden md:inline text-[9px] text-gray-400 shrink-0">{{ '%+.2f'|format(cell.r) }}R</span>
+                                    {% endif %}
+                                </div>
                                 {% if cell.pnl is not none %}
                                 <span class="block text-[10px] md:text-sm font-bold mt-1 truncate {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(cell.pnl, cell.currency) }}</span>
                                 {% else %}
                                 <span class="block text-[10px] md:text-sm font-bold mt-1 truncate">{{ m.rv(cell.r) }}</span>
                                 {% endif %}
-                                <span class="inline-flex items-center gap-0.5 mt-1 px-1 rounded bg-black/25 text-[9px] text-gray-300">
-                                    {{ cell.n }}{% if cell.open_n %}<span class="text-amber-400">+{{ cell.open_n }}</span>{% endif %}
+                                <span class="inline-flex items-center gap-0.5 mt-1 px-1 rounded bg-black/25 text-[9px] whitespace-nowrap">
+                                    {% if cell.wins or cell.losses or cell.be %}
+                                    <span class="hidden md:inline text-gray-400">{{ cell.n }}&nbsp;·</span>
+                                    {% if cell.wins %}<span class="text-green-400">{{ cell.wins }}W</span>{% endif %}
+                                    {% if cell.be %}<span class="text-gray-300">{{ cell.be }}BE</span>{% endif %}
+                                    {% if cell.losses %}<span class="text-red-400">{{ cell.losses }}L</span>{% endif %}
+                                    {% else %}
+                                    <span class="text-gray-300">{{ cell.n }}</span>
+                                    {% endif %}
+                                    {% if cell.open_n %}<span class="text-amber-400">+{{ cell.open_n }}</span>{% endif %}
                                 </span>
                             </a>
                             {% elif cell.open_n %}
                             <a href="/paper-trades?view=trades&tab=open"
-                               class="block rounded-lg border border-amber-500/40 bg-amber-500/5 p-1 md:p-2 min-h-[58px] md:min-h-[76px] overflow-hidden transition hover:border-accent-blue
+                               class="block rounded-lg border border-amber-500/40 bg-amber-500/5 p-1 md:p-2 min-h-[62px] md:min-h-[86px] overflow-hidden transition hover:border-accent-blue
                                {% if not cell.in_month %}opacity-40{% endif %}"
                                title="{{ cell.open_n }} açık işlem bu gün girildi — sonuç kapanınca yazılır">
                                 <span class="block text-[11px] md:text-xs font-semibold leading-none text-amber-400">{{ cell.day }}</span>
                                 <span class="block text-[10px] md:text-xs text-amber-400/80 mt-1 truncate">{{ cell.open_n }} açık</span>
                             </a>
                             {% else %}
-                            <div class="rounded-lg border border-dark-600 bg-dark-700/30 p-1 md:p-2 min-h-[58px] md:min-h-[76px] {% if not cell.in_month %}opacity-40{% endif %}">
+                            <div class="rounded-lg border border-dark-600 bg-dark-700/30 p-1 md:p-2 min-h-[62px] md:min-h-[86px] {% if not cell.in_month %}opacity-40{% endif %}">
                                 <span class="block text-[11px] md:text-xs leading-none {% if cell.in_month %}text-gray-500{% else %}text-gray-700{% endif %}">{{ cell.day }}</span>
                             </div>
                             {% endif %}
                             {% endfor %}
-                            <div class="hidden md:flex rounded-lg border border-dark-600 bg-dark-700/50 p-2 min-h-[76px] flex-col justify-center items-end">
+                            <div class="hidden md:flex rounded-lg border border-dark-600 bg-dark-700/50 p-2 min-h-[86px] flex-col justify-center items-end">
                                 {% if week.n %}
                                 {% if week.pnl is not none %}
                                 <span class="text-xs font-bold {% if week.pnl > 0 %}text-green-400{% elif week.pnl < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(week.pnl, c.currency) }}</span>
@@ -672,6 +685,8 @@
                 <p class="text-[11px] text-gray-500 mb-4">
                     TradingView alt panelinden indirdiğin iki CSV'yi seç. <b>İşlem geçmişi</b> giriş/çıkışları
                     zaten eşleştirilmiş verir; <b>emirler</b> dosyası SL/TP taşır — R ancak onunla hesaplanır.
+                    Emir dosyasını <b>&quot;tümü&quot;</b> olarak indir, &quot;gerçekleşti&quot; olarak değil: elle
+                    kapattığın işlemin SL/TP emri iptal edilmiş olur ve yalnız &quot;tümü&quot; listesinde görünür.
                     Zamanlar <b>TSİ</b> kabul edilir. Dosyalar okunur, birleştirilir ve <b>önce önizlenir</b>;
                     kayıt ayrı bir onayla yazılır.
                 </p>
@@ -683,7 +698,7 @@
                                    class="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-dark-700 file:text-gray-300 hover:file:bg-dark-600">
                         </div>
                         <div>
-                            {{ lbl('Emirler CSV (SL/TP için)', 'paper-trading-emirler-gerceklesti-*.csv') }}
+                            {{ lbl('Emirler CSV (SL/TP için)', 'emir geçmişi → TÜMÜ (iptaller dahil)') }}
                             <input type="file" name="orders_file" accept=".csv,text/csv"
                                    class="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-dark-700 file:text-gray-300 hover:file:bg-dark-600">
                         </div>
@@ -797,9 +812,19 @@
                                     <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ row.entered_at }}</td>
                                     <td class="px-2 py-2 whitespace-nowrap">
                                         <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold
-                                            {% if row.match == 'emir no' %}bg-green-500/15 text-green-400
-                                            {% elif row.match == 'yakın eşleşme' %}bg-amber-500/15 text-amber-400
-                                            {% else %}bg-dark-700 text-gray-500{% endif %}">{{ row.match }}</span>
+                                            {% if row.match in ('emir no', 'bracket') %}bg-green-500/15 text-green-400
+                                            {% elif row.match in ('yakın eşleşme', 'bracket (yakın)') %}bg-amber-500/15 text-amber-400
+                                            {% else %}bg-dark-700 text-gray-500{% endif %}"
+                                            {% if row.match == 'bracket (yakın)' %}title="Giriş emri emir dosyasında yok (export satır sınırına takılmış) — SL/TP dakikalık pencereyle tahmin edildi, kontrol et"
+                                            {% elif row.match == 'bracket' %}title="SL/TP ayrı Stop/Limit satırlarından, saniyeli zamanla eşleşti"{% endif %}>{{ row.match }}</span>
+                                        {% if row.sl_steps and row.sl_steps|length > 1 %}
+                                        <span class="ml-1 inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400"
+                                              title="Stop {{ row.sl_steps|length }} kez taşınmış: {{ row.sl_steps|join(' → ') }} — R'nin paydası ilk SL">stop ×{{ row.sl_steps|length }}</span>
+                                        {% endif %}
+                                        {% if row.tp_steps and row.tp_steps|length > 1 %}
+                                        <span class="ml-1 inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400"
+                                              title="Birden çok hedef: {{ row.tp_steps|join(' · ') }} — ilk girilen yazıldı; diğerini istiyorsan içe aktardıktan sonra işlemi düzenle">hedef ×{{ row.tp_steps|length }}</span>
+                                        {% endif %}
                                         {% if row.signal_id %}
                                         <span class="ml-1 inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-accent-blue/15 text-accent-blue"
                                               title="Bot sinyaline bağlanacak">#{{ row.signal_id }}</span>
