@@ -29,7 +29,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from app.crt_engine import SCORE_PART_KEYS  # noqa: E402
+from app.crt_engine import (  # noqa: E402
+    C2_RECLAIM_PENALTY, C2_RECLAIM_WEAK_PCT, MIN_IFVG_GAP_RANGE_FRAC, PURGE_WICK_SCORE_PCT,
+    SCORE_PART_KEYS,
+)
 
 # Kalem -> baslik (raw/score kalem degil, toplam)
 LABELS = {
@@ -42,7 +45,9 @@ LABELS = {
     "pd_struct": "PD yapisal FVG/OB (+1)",
     "wick": "Purge rejection wick (+1)",
     "ifvg": "LTF IFVG (+1)",
-    "reclaim": "Zayif C2 geri donusu (-2)",
+    # Etiket motorun sabitinden: 19.09'da -2 -> -4 oldu ve elle yazilmis "-2" kaldi. Satirda
+    # "puanli" = cezayi yiyen (reclaim < 0), yani iki donemin satirlari birlikte sayilir.
+    "reclaim": f"Zayif C2 geri donusu (-{C2_RECLAIM_PENALTY}; 19.09 oncesi -2)",
     "smt": "SMT divergence (+2)",
 }
 PARTS = [k for k in SCORE_PART_KEYS if k not in ("raw", "score")]
@@ -59,14 +64,17 @@ def rate(rows) -> tuple[int, float | None]:
     return n, 100.0 * sum(1 for r in rows if r["outcome"] == "win") / n
 
 
-def line(label: str, got, missed, min_n: int) -> None:
+def line(label: str, got, missed, min_n: int, penalty: bool = False) -> None:
+    """`penalty`: ceza kalemi (reclaim) -- 'puanli' taraf cezayi yiyen. Orada NEGATIF fark
+    cezanin dogru calistigini gosterir; isaret tersine okunur (eskiden "ALEYHINE" basiyordu)."""
     n1, w1 = rate(got)
     n0, w0 = rate(missed)
     if n1 < min_n or n0 < min_n:
         print(f"  {label:34s}  az ornek (puanli {n1}, puansiz {n0})")
         return
     diff = w1 - w0
-    flag = "  <-- kalem lehine" if diff >= 5 else ("  <-- kalem ALEYHINE" if diff <= -5 else "")
+    support = -diff if penalty else diff
+    flag = "  <-- kalem lehine" if support >= 5 else ("  <-- kalem ALEYHINE" if support <= -5 else "")
     print(f"  {label:34s}  puanli {w1:5.1f}% (n={n1:4d})   puansiz {w0:5.1f}% (n={n0:4d})   "
           f"fark {diff:+5.1f}{flag}")
 
@@ -168,7 +176,7 @@ def main() -> None:
         if k == "ifvg":
             pool = [r for r in rows if r["features"].get("ifvg_checked", 1) == 1] or rows
         got, missed = _split(pool, k)
-        line(LABELS[k], got, missed, args.min_n)
+        line(LABELS[k], got, missed, args.min_n, penalty=(k == "reclaim"))
     neg = [r for r in rows if r["parts"].get("htf", 0) < 0]
     if neg:
         n2, w2 = rate(neg)
@@ -185,7 +193,7 @@ def main() -> None:
         print(f"  --- skor {lo}-{hi}: n={m}, win {ww:.1f}% ---")
         for k in PARTS:
             got, missed = _split(band, k)
-            line(LABELS[k], got, missed, max(10, args.min_n // 2))
+            line(LABELS[k], got, missed, max(10, args.min_n // 2), penalty=(k == "reclaim"))
         print()
 
     feat_rows = [r for r in rows if r["features"]]
@@ -194,10 +202,12 @@ def main() -> None:
         print("  Kalemin ikili esigi yerine olcumun kendisi: win% ceyrekler arasinda artiyorsa")
         print("  esik anlamli, duzse kalem ikili olarak bilgi tasimiyor demektir.")
         print("")
-        for f, label, thr in (("wick_frac", "purge wick / C1 range", "esik 0.30"),
+        for f, label, thr in (("wick_frac", "purge wick / C1 range",
+                               f"esik {PURGE_WICK_SCORE_PCT:.2f}"),
                               ("c2_body_frac", "C2 govde / range", "doji esigi"),
-                              ("reclaim_pct", "C2 geri donus %", "ceza < 25"),
-                              ("ifvg_gap_frac", "IFVG bosluk / LTF range", "esik 0.15"),
+                              ("reclaim_pct", "C2 geri donus %", f"ceza < {C2_RECLAIM_WEAK_PCT:g}"),
+                              ("ifvg_gap_frac", "IFVG bosluk / LTF range",
+                               f"esik {MIN_IFVG_GAP_RANGE_FRAC:.2f}"),
                               ("range_atr", "C1 range / ATR", "band 0.8-2.5"),
                               ("stop_range_mult", "stop mesafesi / LTF range", "dar stop esigi 1.0")):
             vals = sorted(((r["features"][f], r) for r in feat_rows
