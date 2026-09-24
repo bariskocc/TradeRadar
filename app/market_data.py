@@ -332,6 +332,48 @@ class BingXMarketData:
         day_ms = int(day_start.value // 1_000_000)
         self.store.upsert_candle(symbol, "1d", day_ms, row)
 
+    def _sync_1d_from_4h(self, symbol: str, prev_dt: pd.Timestamp) -> None:
+        """Kapanan 4H barinin gununu (ve yeni barin gununu) 4H serisinden yeniden kur.
+
+        1H akisi olmayan kripto (4H evreni altcoinleri) icin. Onlarin 1D serisi yalniz REST'ten,
+        GUNDE BIR KEZ (gun donumunden sonraki ilk bakim turunda) yenileniyordu: o anda bugunun
+        mumu yalniz ilk dakikalari tasiyor ve gun boyu oyle kaliyordu. Ertesi 00:00 4H
+        taramasinda `_drop_forming_daily` o mumu zamana gore "kapanmis" sayiyor, 1D bias ve
+        PDH/PDL bu yarim mumla hesaplaniyordu -- 24.09 olcumu: gun donumu degerlendirmelerinin
+        %18'i yanlis bias (`scripts/bias_fidelity_stat.py`, IZLEME.md "1D bias hesap dogrulugu").
+
+        4H barlari UTC'ye hizali oldugu icin gunluk bar kayipsiz cikar (seans sentezinde ayni
+        yontem 198/198 birebir). Gun eksiksiz degilse (ilk 4H bari gun basinda degil ya da kapali
+        gunde 6 bar yok) satira DOKUNULMAZ -- yanlis acilis/uc yazmaktansa eski hali kalsin.
+        """
+        if not self.store.get_df(symbol, "1h").empty:
+            return  # 1H akisi var: `_rebuild_forming_1d` zaten her mesajda guncelliyor
+        df4 = self.store.get_df(symbol, "4h")
+        if df4 is None or df4.empty:
+            return
+        tail = df4.iloc[-_FORMING_TAIL:]
+        idx = tail.index
+        idx = idx.tz_localize("UTC") if getattr(idx, "tz", None) is None else idx.tz_convert("UTC")
+        days = idx.normalize()
+        prev_day = pd.Timestamp(prev_dt).tz_convert("UTC").normalize()
+        for day_start in sorted({prev_day, days[-1]}):
+            mask = days == day_start
+            bars = tail[mask]
+            if bars.empty or idx[mask][0] != day_start:
+                continue
+            day_closed = day_start + pd.Timedelta(days=1) <= idx[-1]
+            if day_closed and len(bars) != 6:
+                log.debug("1D<-4H atlandi %s %s: %d bar", symbol, day_start.date(), len(bars))
+                continue
+            row = {
+                "open": float(bars.iloc[0]["open"]),
+                "high": float(bars["high"].max()),
+                "low": float(bars["low"].min()),
+                "close": float(bars.iloc[-1]["close"]),
+                "volume": float(bars["volume"].sum()),
+            }
+            self.store.upsert_candle(symbol, "1d", int(day_start.value // 1_000_000), row)
+
     async def _refresh_1d(self) -> None:
         """Gunluk (1D) veriyi yeniden cek (gunde bir kez).
 
@@ -537,6 +579,9 @@ class BingXMarketData:
             # Onceki mum kapandi.
             prev_dt = pd.to_datetime(prev_ts, unit="ms", utc=True)
             prev_dead = session_sym and fx_session.is_dead_session(prev_dt, symbol)
+            if tf == "4h" and not session_sym:
+                # Kapanis olayi kuyruga girmeden ONCE: 00:00 taramasi dunun tam mumunu gorsun.
+                self._sync_1d_from_4h(symbol, prev_dt)
             if not prev_dead:
                 await self._closed_queue.put((symbol, tf))
             if tf == "1h" and session_sym:
