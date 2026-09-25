@@ -219,3 +219,54 @@ def resample_from_1h(df1h: pd.DataFrame, timeframe: str,
     out = work.groupby("_bucket", sort=True).agg(_OHLC_AGG)
     out.index.name = None
     return out
+
+
+# ──────────────────── ICT islem seanslari (killzone) ────────────────────
+
+# Islemin hangi seansta acildigini gostermek icin (Signals + Paper Trades SESSION sutunu).
+# Motor kararina dokunmaz. Saatler **NY yerel** yazilir ki ABD yaz/kis saati kendiliginden
+# cozulsun: London 02:00-05:00 NY = TSI yazin 09:00-12:00, kisin 10:00-13:00.
+# Araliklar ICT killzone konvansiyonu; aralarda kalan her an "no session".
+# (anahtar, etiket, baslangic, bitis) -- dakika cinsinden NY gun ici, bitis haric.
+TRADING_SESSIONS = (
+    ("asia",     "Asia",     20 * 60,      24 * 60),
+    ("london",   "London",    2 * 60,       5 * 60),
+    ("ny_am",    "NY AM",     9 * 60 + 30, 11 * 60),
+    ("ny_lunch", "NY Lunch", 12 * 60,      13 * 60),
+    ("ny_pm",    "NY PM",    13 * 60 + 30, 16 * 60),
+)
+
+_TSI = ZoneInfo("Europe/Istanbul")
+
+
+def _hhmm(minutes: int) -> str:
+    return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}"
+
+
+def trading_session(dt) -> dict | None:
+    """`dt` (naive = UTC) hangi ICT seansina dusuyor?
+
+    Donus: {"key", "label", "hint"} -- `key` seans disinda None. Hafta sonu (Cuma 17:00 NY ->
+    Pazar 17:00 NY, FX kapali) seans sayilmaz; Pazar aksami Asia yeni haftanin ilk seansidir.
+    `hint` o gunun seans araligini TSI ve NY olarak verir (DST'ye gore kayar).
+    """
+    if dt is None:
+        return None
+    from datetime import datetime, timedelta, timezone
+    if not isinstance(dt, datetime):
+        dt = pd.Timestamp(dt).to_pydatetime()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    ny = dt.astimezone(NY)
+    dow, minute = ny.weekday(), ny.hour * 60 + ny.minute
+    if dow == 5 or (dow == 4 and ny.hour >= SESSION_HOUR) or (dow == 6 and ny.hour < SESSION_HOUR):
+        return {"key": None, "label": "No session", "hint": "Hafta sonu — FX kapalı"}
+    day = ny.replace(hour=0, minute=0, second=0, microsecond=0)
+    for key, label, start, end in TRADING_SESSIONS:
+        if start <= minute < end:
+            t0 = (day + timedelta(minutes=start)).astimezone(_TSI)
+            t1 = (day + timedelta(minutes=end)).astimezone(_TSI)
+            hint = (f"{label} {t0:%H:%M}–{t1:%H:%M} TSİ "
+                    f"({_hhmm(start)}–{_hhmm(end)} NY)")
+            return {"key": key, "label": label, "hint": hint}
+    return {"key": None, "label": "No session", "hint": "Seans dışı (killzone arası)"}

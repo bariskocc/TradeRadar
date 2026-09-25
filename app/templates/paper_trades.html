@@ -24,7 +24,7 @@
                 <div>
                     <h1 class="text-xl font-bold text-white">Paper Trading Journal</h1>
                     <p class="text-sm text-gray-500 mt-0.5">
-                        Deneme işlemlerinin karnesi — kararım motorunkinden iyi mi, plana uydum mu?
+                        Deneme işlemlerinin karnesi — ne kazandım, ne kaybettim?
                     </p>
                 </div>
                 <div class="flex items-center gap-3">
@@ -55,7 +55,7 @@
                 <div class="flex items-center justify-between mb-4">
                     <h2 class="text-sm font-semibold text-white">
                         İşlemi kapat — {{ ct.symbol }} <span class="{% if ct.t.direction == 'LONG' %}text-green-400{% else %}text-red-400{% endif %}">{{ ct.t.direction }}</span>
-                        <span class="text-gray-500 font-normal">· giriş {{ ct.t.entry_price|fmt_price }} · SL {{ ct.t.stop_loss|fmt_price }}{% if ct.t.take_profit %} · TP {{ ct.t.take_profit|fmt_price }}{% endif %}</span>
+                        <span class="text-gray-500 font-normal">· giriş {{ ct.t.entry_price|fmt_price }}</span>
                     </h2>
                     <a href="/paper-trades?{{ qs }}" class="text-xs text-gray-400 hover:text-white">Vazgeç</a>
                 </div>
@@ -71,35 +71,8 @@
                             </p>
                         </div>
                         <div>
-                            {{ lbl('Çıkış nedeni') }}
-                            <select name="exit_reason" {{ fld() }}>
-                                {% for key, label in exit_reasons %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
-                            </select>
-                        </div>
-                        <div>
                             {{ lbl('Çıkış zamanı', 'Boş bırakırsan şimdi') }}
                             <input type="datetime-local" name="closed_at" value="{{ now_input }}" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Plana uydum mu?') }}
-                            <select name="followed_plan" {{ fld() }}>
-                                <option value="">— seçilmedi —</option>
-                                <option value="yes">Evet, plandaki gibi</option>
-                                <option value="no">Hayır, saptım</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                        <div>
-                            {{ lbl('Kısmi çıkış fiyatı', 'Pozisyonun bir kısmını önceden kapattıysan') }}
-                            <input type="text" inputmode="decimal" name="partial_price"
-                                   value="{{ ct.t.partial_price if ct.t.partial_price is not none else '' }}" placeholder="opsiyonel" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Kısmi oran', '0,5 = yarısı') }}
-                            <input type="text" inputmode="decimal" name="partial_fraction"
-                                   value="{{ ct.t.partial_fraction if ct.t.partial_fraction is not none else '' }}" placeholder="0,5" {{ fld() }}>
                         </div>
                         <div>
                             {{ lbl('Komisyon') }}
@@ -111,31 +84,10 @@
                             <input type="text" inputmode="decimal" name="pnl_amount" placeholder="otomatik" {{ fld() }}>
                         </div>
                     </div>
-                    <div class="grid grid-cols-1 gap-3 mb-4">
-                        <div>
-                            {{ lbl('Not') }}
-                            <input type="text" name="note" value="{{ ct.t.note or '' }}" placeholder="Ne öğrendim?" {{ fld() }}>
-                        </div>
-                    </div>
-
-                    <div class="mb-4">
-                        {{ lbl('Hata etiketleri', 'Panoda her etiketin kaç R’ye mal olduğu ölçülür') }}
-                        <div class="flex flex-wrap gap-1.5">
-                            {% for key, label in mistake_tags %}
-                            <label class="cursor-pointer select-none">
-                                <input type="checkbox" name="mistakes" value="{{ key }}" class="peer sr-only">
-                                <span class="inline-flex items-center px-3 py-1.5 rounded-lg border text-xs transition
-                                    border-dark-600 bg-dark-700 text-gray-400 hover:text-white
-                                    peer-checked:bg-amber-500/15 peer-checked:border-amber-500 peer-checked:text-amber-400">{{ label }}</span>
-                            </label>
-                            {% endfor %}
-                        </div>
-                    </div>
-
                     <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
                         Kapat ve kaydet
                     </button>
-                    <span class="ml-3 text-xs text-gray-500">R ve sonuç fiyatlardan hesaplanır; elle girilmez.</span>
+                    <span class="ml-3 text-xs text-gray-500">Sonuç (win/loss) K/Z'den hesaplanır; elle girilmez.</span>
                 </form>
             </section>
             {% endif %}
@@ -144,28 +96,12 @@
             <details class="mb-5 bg-dark-800 rounded-xl border border-dark-600" {% if form_open %}open{% endif %}>
                 <summary class="px-5 py-3 cursor-pointer text-sm font-semibold text-white select-none">
                     {% if form.id %}İşlemi düzenle — #{{ form.id }}{% else %}Yeni işlem{% endif %}
-                    <span class="ml-2 text-xs font-normal text-gray-500">sembol · yön · giriş · SL · TP yeter, gerisi opsiyonel</span>
+                    <span class="ml-2 text-xs font-normal text-gray-500">sembol · yön · giriş yeter; miktar girilirse K/Z hesaplanır</span>
                 </summary>
                 <form method="POST" action="{% if form.id %}/paper-trades/{{ form.id }}/edit{% else %}/paper-trades/new{% endif %}" class="px-5 pb-5">
                     <input type="hidden" name="qs" value="{{ qs }}">
 
-                    {% if suggestions %}
-                    <div class="mb-4 p-3 rounded-lg bg-dark-700/50 border border-dark-600">
-                        {{ lbl('Bot sinyalinden doldur', 'Açık sinyaller; seçince alanlar dolar ve işlem o sinyale bağlanır') }}
-                        <select id="sig-pick" class="w-full md:w-96 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            <option value="">— kendi setup'ım (bağlama) —</option>
-                            {% for s in suggestions %}
-                            <option value="{{ s.id }}"
-                                data-symbol="{{ s.symbol }}" data-direction="{{ s.direction }}" data-strategy="{{ s.strategy }}"
-                                data-entry="{{ s.entry if s.entry is not none else '' }}"
-                                data-sl="{{ s.sl if s.sl is not none else '' }}"
-                                data-tp="{{ s.tp if s.tp is not none else '' }}">{{ s.label }} — #{{ s.id }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    {% endif %}
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                    <div class="grid grid-cols-2 gap-3 mb-3">
                         <div>
                             {{ lbl('Sembol') }}
                             <input type="text" name="symbol" list="paper-symbols" required value="{{ form.symbol }}"
@@ -178,22 +114,6 @@
                                 <option value="SHORT" {% if form.direction == 'SHORT' %}selected{% endif %}>SHORT</option>
                             </select>
                         </div>
-                        <div>
-                            {{ lbl('Strateji / TF') }}
-                            <select name="strategy" {{ fld() }}>
-                                {% for key, label in strategies %}
-                                <option value="{{ key }}" {% if form.strategy == key %}selected{% endif %}>{{ label }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            {{ lbl('Kaynak', 'İşlemi neden aldım') }}
-                            <select name="source" {{ fld() }}>
-                                {% for key, label in sources %}
-                                <option value="{{ key }}" {% if form.source == key %}selected{% endif %}>{{ label }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
                     </div>
 
                     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
@@ -202,44 +122,9 @@
                             <input type="text" inputmode="decimal" name="entry_price" required value="{{ form.entry_price }}" {{ fld() }}>
                         </div>
                         <div>
-                            {{ lbl('SL (ilk)', 'R’nin paydası; BE’ye çekince değiştirme') }}
-                            <input type="text" inputmode="decimal" name="stop_loss" required value="{{ form.stop_loss }}" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('TP') }}
-                            <input type="text" inputmode="decimal" name="take_profit" value="{{ form.take_profit }}" {{ fld() }}>
-                        </div>
-                        <div>
                             {{ lbl('Giriş zamanı') }}
                             <input type="datetime-local" name="entered_at" value="{{ form.entered_at or now_input }}" {{ fld() }}>
                         </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                        <div>
-                            {{ lbl('Güven (1-5)') }}
-                            <select name="confidence" {{ fld() }}>
-                                <option value="">—</option>
-                                {% for c in [1, 2, 3, 4, 5] %}
-                                <option value="{{ c }}" {% if form.confidence == c|string %}selected{% endif %}>{{ c }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            {{ lbl('Kapı', 'Elenen setup’ı aldıysan hangi kapı elemişti') }}
-                            <input type="text" name="gate" value="{{ form.gate }}" placeholder="bias_mismatch…" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Sinyal #', 'Bağlı bot sinyali (opsiyonel)') }}
-                            <input type="text" inputmode="numeric" name="signal_id" id="sig-id" value="{{ form.signal_id }}" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Grafik linki') }}
-                            <input type="text" name="chart_url" value="{{ form.chart_url }}" placeholder="TradingView linki" {{ fld() }}>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                         <div>
                             {{ lbl('Miktar', 'Pozisyon büyüklüğü — girilirse K/Z para olarak hesaplanır') }}
                             <input type="text" inputmode="decimal" name="qty" value="{{ form.qty }}" placeholder="opsiyonel" {{ fld() }}>
@@ -248,11 +133,6 @@
                             {{ lbl('Para birimi') }}
                             <input type="text" name="currency" value="{{ form.currency or 'USD' }}" {{ fld() }}>
                         </div>
-                    </div>
-
-                    <div class="mb-3">
-                        {{ lbl('Not') }}
-                        <input type="text" name="note" value="{{ form.note }}" placeholder="Setup neydi, ne düşündüm?" {{ fld() }}>
                     </div>
 
                     {% if not form.id %}
@@ -266,36 +146,11 @@
                                 <input type="text" inputmode="decimal" name="exit_price" {{ fld() }}>
                             </div>
                             <div>
-                                {{ lbl('Çıkış nedeni') }}
-                                <select name="exit_reason" {{ fld() }}>
-                                    {% for key, label in exit_reasons %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
-                                </select>
-                            </div>
-                            <div>
                                 {{ lbl('Çıkış zamanı') }}
                                 <input type="datetime-local" name="closed_at" {{ fld() }}>
                             </div>
-                            <div>
-                                {{ lbl('Plana uydum mu?') }}
-                                <select name="followed_plan" {{ fld() }}>
-                                    <option value="">—</option>
-                                    <option value="yes">Evet</option>
-                                    <option value="no">Hayır</option>
-                                </select>
-                            </div>
                         </div>
                     </details>
-                    {% else %}
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                        <div>
-                            {{ lbl('Kısmi çıkış fiyatı') }}
-                            <input type="text" inputmode="decimal" name="partial_price" value="{{ form.partial_price }}" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Kısmi oran') }}
-                            <input type="text" inputmode="decimal" name="partial_fraction" value="{{ form.partial_fraction }}" placeholder="0,5" {{ fld() }}>
-                        </div>
-                    </div>
                     {% endif %}
 
                     <div class="flex items-center gap-2">
@@ -361,19 +216,14 @@
                 </div>
 
                 {% if s.n %}
-                <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+                <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
                     <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                         <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Net K/Z</p>
                         <p class="text-2xl font-bold {% if s.total_pnl is none %}text-gray-600{% elif s.total_pnl > 0 %}text-green-400{% elif s.total_pnl < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(s.total_pnl, s.currency) }}</p>
                         <p class="text-[11px] text-gray-500 mt-1">
-                            {{ m.rv(s.total_r) }} toplam{% if s.r_n != s.n %} ({{ s.r_n }}/{{ s.n }} işlemde R var){% endif %}
-                        </p>
-                    </div>
-                    <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Toplam R</p>
-                        <p class="text-2xl font-bold">{{ m.rv(s.total_r) }}</p>
-                        <p class="text-[11px] text-gray-500 mt-1">
-                            {% if s.delta_r is not none %}önceki döneme göre {{ m.rv(s.delta_r) }}{% else %}önceki dönem yok{% endif %}
+                            {% if s.delta_pnl is not none %}önceki döneme göre
+                            <span class="{% if s.delta_pnl > 0 %}text-green-400{% elif s.delta_pnl < 0 %}text-red-400{% endif %}">{{ fmt_money(s.delta_pnl, s.currency) }}</span>
+                            {% else %}önceki dönem yok{% endif %}
                         </p>
                     </div>
                     <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
@@ -393,36 +243,17 @@
                         </p>
                     </div>
                     <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Ort. R</p>
-                        <p class="text-2xl font-bold">{{ m.rv(s.avg_r) }}</p>
+                        <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Ort. K/Z</p>
+                        <p class="text-2xl font-bold {% if s.avg_pnl is none %}text-gray-600{% elif s.avg_pnl > 0 %}text-green-400{% elif s.avg_pnl < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(s.avg_pnl, s.currency) }}</p>
                         <p class="text-[11px] text-gray-500 mt-1">işlem başına beklenti</p>
                     </div>
                     <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                         <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">En iyi / en kötü</p>
-                        <p class="text-xs text-white truncate">{{ s.best.symbol }} <span class="font-semibold">{% if s.best.pnl is not none %}{{ fmt_money(s.best.pnl, s.currency) }}{% else %}{{ m.rv(s.best.r) }}{% endif %}</span></p>
+                        <p class="text-xs text-white truncate">{{ s.best.symbol }} <span class="font-semibold">{{ fmt_money(s.best.pnl, s.currency) }}</span></p>
                         {% if s.worst %}
-                        <p class="text-xs text-white truncate mt-1">{{ s.worst.symbol }} <span class="font-semibold">{% if s.worst.pnl is not none %}{{ fmt_money(s.worst.pnl, s.currency) }}{% else %}{{ m.rv(s.worst.r) }}{% endif %}</span></p>
+                        <p class="text-xs text-white truncate mt-1">{{ s.worst.symbol }} <span class="font-semibold">{{ fmt_money(s.worst.pnl, s.currency) }}</span></p>
                         {% endif %}
                     </div>
-                </div>
-
-                <div class="flex flex-wrap items-center gap-2 mt-4">
-                    {% for g in s.by_source %}
-                    <span class="px-2.5 py-1 rounded-lg bg-dark-700 border border-dark-600 text-xs {% if not g.n %}opacity-50{% endif %}">
-                        <span class="text-gray-400">{{ g.label }}</span>
-                        {% if g.pnl is not none %}<span class="font-semibold ml-1 {% if g.pnl > 0 %}text-green-400{% elif g.pnl < 0 %}text-red-400{% endif %}">{{ fmt_money(g.pnl, s.currency) }}</span>{% endif %}
-                        <span class="font-semibold ml-1">{% if g.n %}{{ m.rv(g.r) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</span>
-                        <span class="text-gray-500">({{ g.n }})</span>
-                    </span>
-                    {% endfor %}
-                    <span class="w-px h-5 bg-dark-600 mx-1"></span>
-                    {% for g in s.by_tf %}
-                    <span class="px-2.5 py-1 rounded-lg bg-dark-700 border border-dark-600 text-xs {% if not g.n %}opacity-50{% endif %}">
-                        <span class="text-gray-400">{{ g.label }}</span>
-                        <span class="font-semibold ml-1">{% if g.n %}{{ m.rv(g.r) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</span>
-                        <span class="text-gray-500">({{ g.n }})</span>
-                    </span>
-                    {% endfor %}
                 </div>
                 {% else %}
                 <div class="py-8 text-center">
@@ -431,115 +262,6 @@
                 {% endif %}
             </section>
 
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-5 mb-5">
-
-                <section class="bg-dark-800 rounded-xl border border-dark-600 p-5">
-                    <h2 class="text-sm font-semibold text-white mb-1">Ben vs Motor</h2>
-                    <p class="text-[11px] text-gray-500 mb-4">Tüm zamanlar · kapanan işlemler</p>
-
-                    <div class="space-y-2">
-                        {% for g in vs.by_source %}
-                        <div class="flex items-center justify-between px-3 py-2 rounded-lg bg-dark-700 border border-dark-600">
-                            <div class="flex items-center gap-2">
-                                <span class="text-sm text-gray-300">{{ g.label }}</span>
-                                {% if g.n and g.low %}{{ m.low() }}{% endif %}
-                            </div>
-                            <div class="flex items-center gap-4 text-xs">
-                                <span class="text-gray-500">{{ g.n }} işlem</span>
-                                <span class="text-gray-400">{% if g.win_rate is not none %}%{{ g.win_rate }} WR{% else %}—{% endif %}</span>
-                                <span class="font-semibold min-w-[56px] text-right">{% if g.n %}{{ m.rv(g.r) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</span>
-                            </div>
-                        </div>
-                        {% endfor %}
-                    </div>
-
-                    {% if vs.pairs_n %}
-                    <div class="mt-4">
-                        <p class="text-[11px] font-semibold text-gray-400 mb-2">
-                            Aynı sinyalde ben vs motor — {{ vs.pairs_n }} eşleşme, fark toplamı {{ m.rv(vs.diff_total) }}
-                        </p>
-                        <div class="space-y-1">
-                            {% for pr in vs.pairs %}
-                            <div class="flex items-center justify-between px-3 py-1.5 rounded bg-dark-700/60 text-xs">
-                                <span class="text-gray-300">{{ pr.symbol }} <span class="{% if pr.direction == 'LONG' %}text-green-400{% else %}text-red-400{% endif %}">{{ pr.direction }}</span>
-                                    <span class="text-gray-600">#{{ pr.signal_id }}</span></span>
-                                <span class="flex items-center gap-3">
-                                    <span class="text-gray-500">motor {{ m.rv(pr.engine) }}</span>
-                                    <span class="text-gray-500">ben {{ m.rv(pr.mine) }}</span>
-                                    <span class="font-semibold min-w-[52px] text-right">{{ m.rv(pr.diff) }}</span>
-                                </span>
-                            </div>
-                            {% endfor %}
-                        </div>
-                    </div>
-                    {% endif %}
-
-                    {% if vs.gates %}
-                    <div class="mt-4">
-                        <p class="text-[11px] font-semibold text-gray-400 mb-2">Elenen setup'ı aldım — kapı bazında</p>
-                        <div class="space-y-1">
-                            {% for g in vs.gates %}
-                            <div class="flex items-center justify-between px-3 py-1.5 rounded bg-dark-700/60 text-xs">
-                                <span class="text-gray-300 font-mono">{{ g.gate }}</span>
-                                <span class="flex items-center gap-3">
-                                    <span class="text-gray-500">{{ g.n }} işlem</span>
-                                    <span class="text-gray-400">%{{ g.win_rate }} WR</span>
-                                    <span class="font-semibold min-w-[52px] text-right">{{ m.rv(g.r) }}</span>
-                                </span>
-                            </div>
-                            {% endfor %}
-                        </div>
-                        <p class="text-[10px] text-gray-500 mt-2">Negatif toplam = motor haklıydı, kapı seni korumuş.</p>
-                    </div>
-                    {% endif %}
-                </section>
-
-                <section class="bg-dark-800 rounded-xl border border-dark-600 p-5">
-                    <h2 class="text-sm font-semibold text-white mb-1">Disiplin</h2>
-                    <p class="text-[11px] text-gray-500 mb-4">Hangi hata pahalı? · tüm zamanlar</p>
-
-                    {% if disc.no_data %}
-                    <p class="text-sm text-gray-500 py-6 text-center">
-                        Henüz disiplin verisi yok — işlemi kapatırken "plana uydum mu" ve hata etiketlerini doldur.
-                    </p>
-                    {% else %}
-                    <div class="grid grid-cols-3 gap-3 mb-4">
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Plana uydum</p>
-                            <p class="text-xl font-bold">{{ m.rv(disc.followed.r) }}</p>
-                            <p class="text-[11px] text-gray-500 mt-1">{{ disc.followed.n }} işlem{% if disc.followed.win_rate is not none %} · %{{ disc.followed.win_rate }} WR{% endif %}</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Plandan saptım</p>
-                            <p class="text-xl font-bold">{{ m.rv(disc.broken.r) }}</p>
-                            <p class="text-[11px] text-gray-500 mt-1">{{ disc.broken.n }} işlem{% if disc.broken.win_rate is not none %} · %{{ disc.broken.win_rate }} WR{% endif %}</p>
-                        </div>
-                        <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
-                            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Hatasız işlem</p>
-                            <p class="text-xl font-bold">{{ m.rv(disc.clean.r) }}</p>
-                            <p class="text-[11px] text-gray-500 mt-1">{{ disc.clean.n }} işlem{% if disc.clean.win_rate is not none %} · %{{ disc.clean.win_rate }} WR{% endif %}</p>
-                        </div>
-                    </div>
-
-                    {% if disc.tags %}
-                    <div class="space-y-1">
-                        {% for tag in disc.tags %}
-                        <div class="flex items-center justify-between px-3 py-1.5 rounded bg-dark-700/60 text-xs">
-                            <span class="text-gray-300">{{ tag.label }}</span>
-                            <span class="flex items-center gap-3">
-                                <span class="text-gray-500">{{ tag.n }} işlem</span>
-                                <span class="text-gray-400">%{{ tag.win_rate }} WR</span>
-                                <span class="font-semibold min-w-[52px] text-right">{{ m.rv(tag.r) }}</span>
-                            </span>
-                        </div>
-                        {% endfor %}
-                    </div>
-                    {% else %}
-                    <p class="text-xs text-gray-500">Hata etiketi girilmiş işlem yok.</p>
-                    {% endif %}
-                    {% endif %}
-                </section>
-            </div>
             {% endif %}
 
             {# ──────────── CALENDAR ──────────── #}
@@ -578,13 +300,11 @@
                         {% if c.total_pnl is not none %}
                         <p class="text-2xl font-bold {% if c.total_pnl > 0 %}text-green-400{% elif c.total_pnl < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(c.total_pnl, c.currency) }}</p>
                         <p class="text-[11px] text-gray-500">
-                            {{ m.rv(c.total_r) }}{% if c.avg_day_pnl is not none %} · gün başına {{ fmt_money(c.avg_day_pnl, c.currency) }}{% endif %}
+                            {% if c.avg_day_pnl is not none %}gün başına {{ fmt_money(c.avg_day_pnl, c.currency) }}{% endif %}
                         </p>
                         {% else %}
-                        <p class="text-2xl font-bold">{{ m.rv(c.total_r) }}</p>
-                        <p class="text-[11px] text-gray-500">
-                            {% if c.avg_day_r is not none %}gün başına {{ '%+.2f'|format(c.avg_day_r) }}R{% else %}işlem yok{% endif %}
-                        </p>
+                        <p class="text-2xl font-bold text-gray-600">—</p>
+                        <p class="text-[11px] text-gray-500">işlem yok</p>
                         {% endif %}
                     </div>
                 </div>
@@ -607,17 +327,14 @@
                                {% if cell.tone == 'win' %}border-green-500/40{% elif cell.tone == 'loss' %}border-red-500/40{% else %}border-dark-600{% endif %}
                                {% if not cell.in_month %}opacity-40{% endif %}"
                                style="background-color: rgba({{ '34,197,94' if cell.tone == 'win' else ('239,68,68' if cell.tone == 'loss' else '39,43,64') }}, {{ cell.alpha }})"
-                               title="{{ cell.n }} işlem · {{ cell.wins }}W / {{ cell.be }}BE / {{ cell.losses }}L{% if cell.pnl is not none %} · {{ '%+.2f'|format(cell.r) }}R{% endif %}{% if cell.open_n %} · {{ cell.open_n }} açık{% endif %}">
+                               title="{{ cell.n }} işlem · {{ cell.wins }}W / {{ cell.be }}BE / {{ cell.losses }}L{% if cell.open_n %} · {{ cell.open_n }} açık{% endif %}">
                                 <div class="flex items-baseline justify-between gap-1 leading-none">
                                     <span class="text-[11px] md:text-xs font-semibold {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ cell.day }}</span>
-                                    {% if cell.pnl is not none %}
-                                    <span class="hidden md:inline text-[9px] text-gray-400 shrink-0">{{ '%+.2f'|format(cell.r) }}R</span>
-                                    {% endif %}
                                 </div>
                                 {% if cell.pnl is not none %}
                                 <span class="block text-[10px] md:text-sm font-bold mt-1 truncate {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(cell.pnl, cell.currency) }}</span>
                                 {% else %}
-                                <span class="block text-[10px] md:text-sm font-bold mt-1 truncate">{{ m.rv(cell.r) }}</span>
+                                <span class="block text-[10px] md:text-sm font-bold mt-1 truncate text-gray-600">—</span>
                                 {% endif %}
                                 <span class="inline-flex items-center gap-0.5 mt-1 px-1 rounded bg-black/25 text-[9px] whitespace-nowrap">
                                     {% if cell.wins or cell.losses or cell.be %}
@@ -650,7 +367,7 @@
                                 {% if week.pnl is not none %}
                                 <span class="text-xs font-bold {% if week.pnl > 0 %}text-green-400{% elif week.pnl < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(week.pnl, c.currency) }}</span>
                                 {% else %}
-                                <span class="text-xs font-bold">{{ m.rv(week.r) }}</span>
+                                <span class="text-xs font-bold text-gray-600">—</span>
                                 {% endif %}
                                 <span class="text-[10px] text-gray-500 mt-1">{{ week.n }} işlem</span>
                                 {% else %}
@@ -665,9 +382,9 @@
                 {% if c.best or c.open_n %}
                 <div class="flex flex-wrap items-center gap-4 mt-4 text-xs">
                     {% if not c.best %}<span class="text-gray-500">Bu ay kapanan işlem yok.</span>{% endif %}
-                    {% if c.best %}<span class="text-gray-500">En iyi gün: <span class="text-gray-300">{{ c.best.day }}</span> {% if c.best.pnl is not none %}{{ fmt_money(c.best.pnl, c.currency) }}{% else %}{{ m.rv(c.best.r) }}{% endif %}</span>
+                    {% if c.best %}<span class="text-gray-500">En iyi gün: <span class="text-gray-300">{{ c.best.day }}</span> {{ fmt_money(c.best.pnl, c.currency) }}</span>
                     {% if c.worst and c.worst.day != c.best.day %}
-                    <span class="text-gray-500">En kötü gün: <span class="text-gray-300">{{ c.worst.day }}</span> {% if c.worst.pnl is not none %}{{ fmt_money(c.worst.pnl, c.currency) }}{% else %}{{ m.rv(c.worst.r) }}{% endif %}</span>
+                    <span class="text-gray-500">En kötü gün: <span class="text-gray-300">{{ c.worst.day }}</span> {{ fmt_money(c.worst.pnl, c.currency) }}</span>
                     {% endif %}
                     {% endif %}
                     <span class="text-gray-600">Tutar = işlemin <b>kapandığı</b> güne yazılır (TSİ). Açık işlemler
@@ -683,32 +400,19 @@
             <section class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-5">
                 <h2 class="text-sm font-semibold text-white mb-1">TradingView paper trading içe aktarma</h2>
                 <p class="text-[11px] text-gray-500 mb-4">
-                    TradingView alt panelinden indirdiğin iki CSV'yi seç. <b>İşlem geçmişi</b> giriş/çıkışları
-                    zaten eşleştirilmiş verir; <b>emirler</b> dosyası SL/TP taşır — R ancak onunla hesaplanır.
-                    Emir dosyasını <b>&quot;tümü&quot;</b> olarak indir, &quot;gerçekleşti&quot; olarak değil: elle
-                    kapattığın işlemin SL/TP emri iptal edilmiş olur ve yalnız &quot;tümü&quot; listesinde görünür.
-                    Zamanlar <b>TSİ</b> kabul edilir. Dosyalar okunur, birleştirilir ve <b>önce önizlenir</b>;
-                    kayıt ayrı bir onayla yazılır.
+                    TradingView alt panelinden indirdiğin <b>işlem geçmişi</b> CSV'sini seç — giriş/çıkış,
+                    miktar ve net K/Z bu dosyada. Zamanlar <b>TSİ</b> kabul edilir. Dosya okunur ve
+                    <b>önce önizlenir</b>; kayıt ayrı bir onayla yazılır. Daha önce aktarılan işlem tekrar yazılmaz.
                 </p>
                 <form method="POST" action="/paper-trades/import/preview" enctype="multipart/form-data">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                    <div class="mb-3 max-w-md">
                         <div>
-                            {{ lbl('İşlem geçmişi CSV (zorunlu)', 'paper-trading-islem-gecmisi-*.csv') }}
+                            {{ lbl('İşlem geçmişi CSV', 'paper-trading-islem-gecmisi-*.csv') }}
                             <input type="file" name="trades_file" accept=".csv,text/csv" required
                                    class="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-dark-700 file:text-gray-300 hover:file:bg-dark-600">
                         </div>
-                        <div>
-                            {{ lbl('Emirler CSV (SL/TP için)', 'emir geçmişi → TÜMÜ (iptaller dahil)') }}
-                            <input type="file" name="orders_file" accept=".csv,text/csv"
-                                   class="w-full text-sm text-gray-300 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-dark-700 file:text-gray-300 hover:file:bg-dark-600">
-                        </div>
                     </div>
-                    <label class="flex items-center gap-2 mb-4 cursor-pointer select-none">
-                        <input type="checkbox" name="link_signals" value="1" checked class="accent-blue-500">
-                        <span class="text-xs text-gray-400">Aynı sembol/yönde ±48 saat içindeki bot sinyaline bağla
-                            (Ben vs Motor panosu kendiliğinden dolsun)</span>
-                    </label>
-                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
+                    <button type="submit" class="mt-1 px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
                         Oku ve önizle
                     </button>
                 </form>
@@ -720,54 +424,34 @@
                     <h2 class="text-sm font-semibold text-white">
                         Önizleme — {{ ir.rows|length }} işlem okundu
                         <span class="text-gray-500 font-normal">· {{ ir.new_n }} yeni
-                            {%- if ir.exists_n %}, {{ ir.exists_n }} zaten var{% endif %}
-                            {%- if ir.orders_n %} · {{ ir.orders_n }} emir eşleştirildi{% endif %}
-                            {%- if ir.linked_n %} · {{ ir.linked_n }} sinyal bağlandı{% endif %}</span>
+                            {%- if ir.exists_n %}, {{ ir.exists_n }} zaten var{% endif %}</span>
                     </h2>
                 </div>
 
                 {% for w in ir.warnings %}
                 <p class="text-xs text-amber-400 mb-1">⚠️ {{ w }}</p>
                 {% endfor %}
-                {% if ir.no_sl_n %}
-                <p class="text-xs text-amber-400 mb-3">
-                    ⚠️ {{ ir.no_sl_n }} işlemde SL yok — R hesaplanamaz (sonuç yine de para olarak yazılır).
-                    SL sütununa elle yazarsan R de hesaplanır.
-                </p>
-                {% endif %}
 
                 <form method="POST" action="/paper-trades/import/commit">
                     <input type="hidden" name="payload" value="{{ ir.payload }}">
                     <div class="flex flex-wrap items-end gap-3 mb-3">
-                        <div>
-                            {{ lbl('Kaynak', 'Sinyale bağlanmayan satırlar bu kaynakla kaydedilir') }}
-                            <select name="source" class="w-40 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                                {% for key, label in sources %}
-                                <option value="{{ key }}" {% if key == 'manual' %}selected{% endif %}>{{ label }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
                         <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
                             İçe aktar ({{ ir.new_n }})
                         </button>
                     </div>
 
                     <div class="overflow-x-auto">
-                        <table class="w-full min-w-[1100px]">
+                        <table class="w-full min-w-[700px]">
                             <thead>
                                 <tr class="border-b border-dark-600">
                                     <th class="px-2 py-2 w-8"></th>
                                     <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">SEMBOL</th>
                                     <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">YÖN</th>
                                     <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider">GİRİŞ</th>
-                                    <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider">SL</th>
-                                    <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider">TP</th>
                                     <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider">ÇIKIŞ</th>
                                     <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider">MİKTAR</th>
                                     <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider">K/Z</th>
-                                    <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider">R</th>
                                     <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">GİRİŞ ZAMANI</th>
-                                    <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider" title="SL/TP hangi yolla bulundu">EŞLEŞME</th>
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-dark-700">
@@ -782,21 +466,13 @@
                                     </td>
                                     <td class="px-2 py-2 text-sm text-white whitespace-nowrap">
                                         {{ row.label }}
-                                        {% if not row.known %}<span class="text-[9px] text-amber-400" title="Bot bu sembolü izlemiyor: {{ row.raw_symbol }}">●</span>{% endif %}
+                                        {% if not row.known %}<span class="text-[9px] text-amber-400" title="Canlı fiyat yok: {{ row.raw_symbol }}">●</span>{% endif %}
                                     </td>
                                     <td class="px-2 py-2 whitespace-nowrap">
                                         <span class="inline-flex px-2 py-0.5 rounded text-xs font-bold
                                             {% if row.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ row.direction }}</span>
                                     </td>
                                     <td class="px-2 py-2 text-right text-xs font-mono text-white whitespace-nowrap">{{ row.entry|fmt_price }}</td>
-                                    <td class="px-2 py-2 text-right whitespace-nowrap">
-                                        <input type="text" inputmode="decimal" name="sl_{{ row.ext_id }}"
-                                               value="{{ row.sl if row.sl is not none else '' }}" placeholder="elle gir"
-                                               class="w-24 px-2 py-1 bg-dark-700 border rounded text-xs text-right font-mono text-red-400
-                                               {% if not row.sl_side_ok %}border-amber-500{% else %}border-dark-600{% endif %}"
-                                               {% if not row.sl_side_ok %}title="SL yönün yanlış tarafında görünüyor — eşleşme hatalı olabilir"{% endif %}>
-                                    </td>
-                                    <td class="px-2 py-2 text-right text-xs font-mono text-green-400 whitespace-nowrap">{{ row.tp|fmt_price }}</td>
                                     <td class="px-2 py-2 text-right text-xs font-mono text-white whitespace-nowrap">
                                         {% if row.exit is not none %}{{ row.exit|fmt_price }}{% else %}<span class="text-amber-400 text-[10px]">açık</span>{% endif %}
                                     </td>
@@ -806,30 +482,7 @@
                                         <span class="{% if row.pnl > 0 %}text-green-400{% elif row.pnl < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ fmt_money(row.pnl, row.currency) }}</span>
                                         {% else %}<span class="text-gray-600">—</span>{% endif %}
                                     </td>
-                                    <td class="px-2 py-2 text-center text-xs font-bold whitespace-nowrap">
-                                        {% if row.rr is not none %}{{ m.rv(row.rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}
-                                    </td>
                                     <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ row.entered_at }}</td>
-                                    <td class="px-2 py-2 whitespace-nowrap">
-                                        <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold
-                                            {% if row.match in ('emir no', 'bracket') %}bg-green-500/15 text-green-400
-                                            {% elif row.match in ('yakın eşleşme', 'bracket (yakın)') %}bg-amber-500/15 text-amber-400
-                                            {% else %}bg-dark-700 text-gray-500{% endif %}"
-                                            {% if row.match == 'bracket (yakın)' %}title="Giriş emri emir dosyasında yok (export satır sınırına takılmış) — SL/TP dakikalık pencereyle tahmin edildi, kontrol et"
-                                            {% elif row.match == 'bracket' %}title="SL/TP ayrı Stop/Limit satırlarından, saniyeli zamanla eşleşti"{% endif %}>{{ row.match }}</span>
-                                        {% if row.sl_steps and row.sl_steps|length > 1 %}
-                                        <span class="ml-1 inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400"
-                                              title="Stop {{ row.sl_steps|length }} kez taşınmış: {{ row.sl_steps|join(' → ') }} — R'nin paydası ilk SL">stop ×{{ row.sl_steps|length }}</span>
-                                        {% endif %}
-                                        {% if row.tp_steps and row.tp_steps|length > 1 %}
-                                        <span class="ml-1 inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400"
-                                              title="Birden çok hedef: {{ row.tp_steps|join(' · ') }} — ilk girilen yazıldı; diğerini istiyorsan içe aktardıktan sonra işlemi düzenle">hedef ×{{ row.tp_steps|length }}</span>
-                                        {% endif %}
-                                        {% if row.signal_id %}
-                                        <span class="ml-1 inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-accent-blue/15 text-accent-blue"
-                                              title="Bot sinyaline bağlanacak">#{{ row.signal_id }}</span>
-                                        {% endif %}
-                                    </td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
@@ -871,24 +524,6 @@
                             <option value="">Hepsi</option>
                             <option value="LONG" {% if filters.direction == 'LONG' %}selected{% endif %}>LONG</option>
                             <option value="SHORT" {% if filters.direction == 'SHORT' %}selected{% endif %}>SHORT</option>
-                        </select>
-                    </div>
-                    <div>
-                        {{ lbl('TF') }}
-                        <select name="strategy" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
-                            <option value="">Hepsi</option>
-                            {% for key, label in strategies %}
-                            <option value="{{ key }}" {% if filters.strategy == key %}selected{% endif %}>{{ label }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <div>
-                        {{ lbl('Kaynak') }}
-                        <select name="source" class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
-                            <option value="">Hepsi</option>
-                            {% for key, label in sources %}
-                            <option value="{{ key }}" {% if filters.source == key %}selected{% endif %}>{{ label }}</option>
-                            {% endfor %}
                         </select>
                     </div>
                     <div>
@@ -951,7 +586,7 @@
 </div>
 
 <script>
-// Trades sekmesinde tablo 30 sn'de bir yenilenir (acik islemlerde canli fiyat + canli R).
+// Trades sekmesinde tablo 30 sn'de bir yenilenir (acik islemlerde canli fiyat + canli K/Z).
 async function loadPaperTable() {
     const box = document.getElementById('paper-table');
     if (!box) return;
@@ -967,23 +602,5 @@ async function loadPaperTable() {
 }
 if (document.getElementById('paper-table')) setInterval(loadPaperTable, 30000);
 
-// "Bot sinyalinden doldur": secilen sinyalin seviyeleri forma yazilir, islem o sinyale baglanir.
-const pick = document.getElementById('sig-pick');
-if (pick) {
-    pick.addEventListener('change', () => {
-        const o = pick.selectedOptions[0];
-        const form = pick.closest('form');
-        const set = (name, value) => { const el = form.querySelector(`[name="${name}"]`); if (el) el.value = value; };
-        if (!pick.value) { set('signal_id', ''); set('source', 'manual'); return; }
-        set('symbol', o.dataset.symbol);
-        set('direction', o.dataset.direction);
-        set('strategy', o.dataset.strategy);
-        set('entry_price', o.dataset.entry);
-        set('stop_loss', o.dataset.sl);
-        set('take_profit', o.dataset.tp);
-        set('signal_id', pick.value);
-        set('source', 'bot');
-    });
-}
 </script>
 {% endblock %}

@@ -30,6 +30,13 @@ CRT_PURGE_SEARCH = 3  # C1'den sonra purge/C2 aramak icin bakilacak mum sayisi (
 CRT_C1_LOOKBACK = 5
 CRT_C1_LOOKBACK_1H = 8
 DOJI_BODY_RATIO_MAX = 0.10
+# C2 rengi hard filtresi hangi HTF'lerde gecerli (25.09, kullanici karari): 1D'de
+# kalkti, yanlis renk yalniz skorda (base 0) ceza olur. 4H/1H'te guclu yanlis renk
+# C1'i elemeye devam eder.
+C2_COLOR_HARD_FILTER_TFS = frozenset({"4h", "1h"})
+# IFVG'nin mid'i C1 araliginda olmali mi (25.09 kapatildi, kullanici karari): purge
+# fitilinin icindeki FVG'nin inversiyonu da gecerli IFVG. True eski davranis.
+REQUIRE_IFVG_MID_IN_C1 = False
 # Waiting/pending iptal: purge tarafından CRT range'in bu kadarı (LTF close).
 CRT_INVALIDATION_FRAC = 0.60
 # Swing pivot hassasiyeti:
@@ -629,7 +636,9 @@ def _calc_live_setup_bias(
         or (direction == "LONG" and c2_state == "bullish")
     )
     doji_c2 = c2_state == "doji"
-    base_score = 2 if correct_c2 else 1
+    # Dogru renk +2, doji +1, yanlis renk 0 (25.09: 1D'de yanlis renk artik setup
+    # olabiliyor; 4H/1H'te yalniz Journal'in elenen aday skorunu etkiler).
+    base_score = 2 if correct_c2 else (1 if doji_c2 else 0)
 
     labels = list(pd_labels) if pd_labels is not None else ([] if not pd_hit else ["FVG"])
     pd_score = _pd_array_score(labels)
@@ -684,11 +693,9 @@ def _calc_live_setup_bias(
     )
     weekly_score = 1 if weekly_aligned else 0
 
-    # 1D: iceri kapanmis C2 forming olsa da +1. 4H/1H: yalniz kapali C2.
-    if (timeframe or "").lower() == "1d":
-        c2_closed_score = 1
-    else:
-        c2_closed_score = 1 if purge_idx < (len(df_4h) - 1) else 0
+    # Yalniz kapali C2 +1 (tum TF). 25.09'a kadar 1D'de forming C2 de +1 aliyordu;
+    # 1D C2 kapanisini beklemeyi biraktigi icin bedel skorda odenir (1H gibi).
+    c2_closed_score = 1 if purge_idx < (len(df_4h) - 1) else 0
 
     wick_score = _purge_wick_score(crt_range, rev, direction)
 
@@ -788,6 +795,16 @@ def _candle_state(row: pd.Series) -> str:
 
 def _is_bear_body(row: pd.Series) -> bool:
     return _candle_state(row) == "bearish"
+
+
+def _closes_up(row: pd.Series) -> bool:
+    """CISD blogu icin: mum yukari kapatti mi (govde boyutundan bagimsiz)."""
+    return float(row["close"]) > float(row["open"])
+
+
+def _closes_down(row: pd.Series) -> bool:
+    """CISD blogu icin: mum asagi kapatti mi (govde boyutundan bagimsiz)."""
+    return float(row["close"]) < float(row["open"])
 
 
 def _is_bull_body(row: pd.Series) -> bool:
@@ -1368,8 +1385,9 @@ def detect_ltf_ifvg(
 
     LONG: bear FVG invert (close zone ustu) + bolge acik.
     SHORT: bull FVG invert (close zone alti) + bolge acik.
-    FVG, CRT mumunun acilisindan itibaren aranir; mid C1 high-low icinde
-    olmali. Birden fazla aday varsa en son (guncel) acik bolge secilir.
+    FVG, CRT mumunun acilisindan itibaren aranir. Mid'in C1 high-low icinde
+    olmasi sarti 25.09'da kalkti (REQUIRE_IFVG_MID_IN_C1): purge fitilindeki FVG
+    de sayilir. Birden fazla aday varsa en son (guncel) acik bolge secilir.
     Inversion purge sonrasi. C2 HTF mumu icindeki LTF ekstrem mitigasyon
     sayilmaz (purge fitili IFVG'yi iptal etmez).
 
@@ -1423,7 +1441,7 @@ def detect_ltf_ifvg(
             continue
         if min_gap > 0 and (z_hi - z_lo) < min_gap:
             continue  # gurultu: gercek displacement yok
-        if not _ifvg_mid_inside_crt(z_lo, z_hi, crt_low, crt_high):
+        if REQUIRE_IFVG_MID_IN_C1 and not _ifvg_mid_inside_crt(z_lo, z_hi, crt_low, crt_high):
             continue
         invert_from = max(i + 2, int(work.index.searchsorted(purge_ts, side="right")))
         inverted_k: Optional[int] = None
@@ -1695,7 +1713,8 @@ def detect_crt_setup(
     Purge mum rengi (reversal, A kurali):
       - Sweep + iceri kapanis zorunlu.
       - C2 dogru renk (LONG yesil / SHORT kirmizi) VEYA doji (govde/range <= %10).
-      - Guclu yanlis renk (doji degil) C1'i eler.
+      - Guclu yanlis renk (doji degil) C1'i eler -- yalniz C2_COLOR_HARD_FILTER_TFS
+        (4H/1H). 1D'de yanlis renk gecer, skorda base 0 alir (25.09).
 
     BAYATLIK KONTROLU: Purge mumundan ONCE araya giren bir mum, C1'in ilgili
     ekstremini (LONG'ta low, SHORT'ta high) HAM olarak (esik alti kucuk delme
@@ -1734,6 +1753,8 @@ def detect_crt_setup(
     candidates: list[tuple[float, float, int, CRTSetup]] = []
 
     c1_back = CRT_C1_LOOKBACK_1H if (timeframe or "").lower() == "1h" else CRT_C1_LOOKBACK
+    # 1D'de C2 rengi hard filtre degil (25.09); yanlis renk skorda base 0 alir.
+    color_hard = (timeframe or "4h").lower() in C2_COLOR_HARD_FILTER_TFS
 
     def _reject(reason: str, direction: str, c1_i: int, c2_i: int) -> None:
         # Yalniz KAPANMIS C2: forming mumun rengi/kapanisi fiyatla degisir (gurultu).
@@ -1767,16 +1788,17 @@ def detect_crt_setup(
             if c2_high > crt_high * (1 + purge_threshold):  # HIGH supuruldu
                 # geri kapatti + (kirmizi veya doji) + high onceden delinmemis -> SHORT
                 c2_state = _candle_state(c2)
+                color_ok = c2_state in ("bearish", "doji") or not color_hard
                 if (
                     c2_close <= crt_high
-                    and c2_state in ("bearish", "doji")
+                    and color_ok
                     and not pre_high_breach
                 ):
                     return "SHORT", j, None
                 # asti / guclu yanlis renk / bayat -> C1 gecersiz
                 if c2_close > crt_high:
                     reason = "c2_breakout"
-                elif c2_state not in ("bearish", "doji"):
+                elif not color_ok:
                     reason = "c2_wrong_color"
                 else:
                     reason = "c1_stale"
@@ -1784,15 +1806,16 @@ def detect_crt_setup(
             if c2_low < crt_low * (1 - purge_threshold):    # LOW supuruldu
                 # geri kapatti + (yesil veya doji) + low onceden delinmemis -> LONG
                 c2_state = _candle_state(c2)
+                color_ok = c2_state in ("bullish", "doji") or not color_hard
                 if (
                     c2_close >= crt_low
-                    and c2_state in ("bullish", "doji")
+                    and color_ok
                     and not pre_low_breach
                 ):
                     return "LONG", j, None
                 if c2_close < crt_low:
                     reason = "c2_breakout"
-                elif c2_state not in ("bullish", "doji"):
+                elif not color_ok:
                     reason = "c2_wrong_color"
                 else:
                     reason = "c1_stale"
@@ -2134,7 +2157,7 @@ def _check_bullish_cisd(
     """15M bullish onay: swing vs bearish blog (CISD), tek aday (genis stop).
 
     - Dip = 4H C2 purge araligindaki 15M min low (C2 sonrasi yeni LL sayilmaz).
-    - CISD: C2 ekstreminden ONCEKI dusus blogunun ILK acilisi (doji blogu bolmez).
+    - CISD: C2 ekstreminden ONCEKI dusus blogunun ILK acilisi (yukari kapanan mum bitirir).
     - Swing: o dipten ONCEKI son swing high (esit tepe platosu dahil).
     - Entry + kirilim + ref = daha genis stop veren aday.
     """
@@ -2158,15 +2181,18 @@ def _check_bullish_cisd(
     # ise (genis wick'li doji degil) CISD delivery'sinin basladigi yer odur;
     # bloga dahil edilir (acilisi = CISD seviyesi). Aksi halde (doji / wick
     # rejection) ondan ONCEKI dusus blogu alinir.
-    # Doji blogu BOLMEZ (GBPCHF: 06:00/07:00 TSI doji 04:00 ilk mumu kesiyordu).
-    # Zit govde (yesil) blogu bitirir.
+    # Blogun basini ters yonde KAPANAN ilk mum bitirir -- govdesi %10'un altinda
+    # (doji) olsa bile (25.09, US100 1D: 24.09 10:00 TSI yesil %9.7 govdeli mum
+    # blogu bolmedigi icin CISD 30450'ye kaymisti, dogrusu 11:00 acilisi 30264).
+    # Ayni renkli doji blogu BOLMEZ (GBPCHF 07.09: 06:00/07:00 TSI yesil dojiler
+    # yukselis blogunun icindeydi, ilk mum 04:00).
     run_end = low_iloc if _is_bear_body(work.iloc[low_iloc]) else low_iloc - 1
     while run_end >= 0 and not _is_bear_body(work.iloc[run_end]):
         run_end -= 1
     if run_end < 0:
         return None
     run_start = run_end
-    while run_start - 1 >= 0 and not _is_bull_body(work.iloc[run_start - 1]):
+    while run_start - 1 >= 0 and not _closes_up(work.iloc[run_start - 1]):
         run_start -= 1
 
     # Serinin ILK (en yuksek acilisli) mumunun acilisi = CISD seviyesi.
@@ -2226,7 +2252,7 @@ def _check_bearish_cisd(
     """15M bearish onay: swing vs bullish blog (CISD), tek aday (genis stop).
 
     - Tepe = 4H C2 purge araligindaki 15M max high (C2 sonrasi yeni HH sayilmaz).
-    - CISD: C2 ekstreminden ONCEKI yukselis blogunun ILK acilisi (doji blogu bolmez).
+    - CISD: C2 ekstreminden ONCEKI yukselis blogunun ILK acilisi (asagi kapanan mum bitirir).
     - Swing: o tepeden ONCEKI son swing low (esit dip platosu dahil).
     - Entry + kirilim + ref = daha genis stop veren aday.
     """
@@ -2250,15 +2276,15 @@ def _check_bearish_cisd(
     # govdesi ise (genis wick'li doji degil) CISD delivery'sinin basladigi yer
     # odur; bloga dahil edilir (acilisi = CISD seviyesi). Aksi halde (doji /
     # wick rejection) ondan ONCEKI yukselis blogu alinir.
-    # Doji blogu BOLMEZ (GBPCHF: 06:00/07:00 TSI doji 04:00 ilk mumu kesiyordu).
-    # Zit govde (kirmizi) blogu bitirir.
+    # Blogun basini ters yonde KAPANAN ilk mum bitirir (doji olsa bile, 25.09);
+    # ayni renkli doji blogu BOLMEZ (GBPCHF 07.09). Bkz. _check_bullish_cisd.
     run_end = high_iloc if _is_bull_body(work.iloc[high_iloc]) else high_iloc - 1
     while run_end >= 0 and not _is_bull_body(work.iloc[run_end]):
         run_end -= 1
     if run_end < 0:
         return None
     run_start = run_end
-    while run_start - 1 >= 0 and not _is_bear_body(work.iloc[run_start - 1]):
+    while run_start - 1 >= 0 and not _closes_down(work.iloc[run_start - 1]):
         run_start -= 1
 
     # Serinin ILK (en dusuk acilisli) mumunun acilisi = CISD seviyesi.

@@ -1,24 +1,18 @@
-{# Paper Trades tablosu -- /paper-trades/table ile 30 sn'de bir yenilenir (canli fiyat + canli R). #}
-{% import '_dash_macros.html' as m %}
+{# Paper Trades tablosu -- /paper-trades/table ile 30 sn'de bir yenilenir (canli fiyat + canli K/Z). #}
+{% import '_session_macros.html' as sess %}
 
 <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto">
-    <table class="w-full min-w-[1180px]">
+    <table class="w-full min-w-[760px]">
         <thead>
             <tr class="border-b border-dark-600">
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SEMBOL</th>
-                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TF</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">YÖN</th>
-                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="İşlemi neden aldım">KAYNAK</th>
                 <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">GİRİŞ</th>
-                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SL</th>
-                <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TP</th>
-                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PLAN R</th>
                 <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ÇIKIŞ</th>
-                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Açık işlemde canlı R, kapalıda gerçekleşen R">R</th>
                 <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Net kâr/zarar (komisyon dahil). İçe aktarılan işlemde borsanın kendi rakamı.">K/Z</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DURUM</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">GİRİŞ ZAMANI</th>
-                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DİSİPLİN</th>
+                <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Girişin düştüğü ICT seansı">SESSION</th>
                 <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap"></th>
             </tr>
         </thead>
@@ -29,44 +23,20 @@
                 <td class="px-2 py-2 whitespace-nowrap">
                     <div class="text-sm font-medium text-white">
                         {{ r.symbol }}
-                        {% if r.unknown_symbol %}<span class="text-[9px] text-gray-500" title="Bot bu sembolü izlemiyor — canlı fiyat yok">●</span>{% endif %}
+                        {% if r.unknown_symbol %}<span class="text-[9px] text-gray-500" title="Canlı fiyat yok">●</span>{% endif %}
                     </div>
-                </td>
-                <td class="px-2 py-2 whitespace-nowrap">
-                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
-                        {% if t.strategy == '1d' %}bg-accent-purple/15 text-accent-purple{% elif t.strategy == '1h' %}bg-amber-500/15 text-amber-400{% elif t.strategy == '4h' %}bg-accent-blue/15 text-accent-blue{% else %}bg-dark-700 text-gray-400{% endif %}">{{ r.strategy_label }}</span>
                 </td>
                 <td class="px-2 py-2 whitespace-nowrap">
                     <span class="inline-flex px-2 py-0.5 rounded text-xs font-bold
                         {% if t.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ t.direction }}</span>
                 </td>
-                <td class="px-2 py-2 whitespace-nowrap">
-                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
-                        {% if t.source == 'bot' %}bg-accent-blue/15 text-accent-blue{% elif t.source == 'gated' %}bg-amber-500/15 text-amber-400{% else %}bg-dark-700 text-gray-300{% endif %}"
-                        title="{{ r.source_label }}{% if t.gate %} — kapı: {{ t.gate }}{% endif %}{% if t.signal_id %} — sinyal #{{ t.signal_id }}{% endif %}">
-                        {{ r.source_label }}{% if t.gate %} · {{ t.gate }}{% endif %}
-                    </span>
-                </td>
                 <td class="px-2 py-2 text-right text-xs font-mono text-white whitespace-nowrap">{{ t.entry_price|fmt_price }}</td>
-                <td class="px-2 py-2 text-right text-xs font-mono text-red-400 whitespace-nowrap">{{ t.stop_loss|fmt_price }}</td>
-                <td class="px-2 py-2 text-right text-xs font-mono text-green-400 whitespace-nowrap">{{ t.take_profit|fmt_price }}</td>
-                <td class="px-2 py-2 text-center text-xs font-semibold text-gray-300 whitespace-nowrap">
-                    {% if t.planned_rr %}{{ '%.2f'|format(t.planned_rr) }}{% else %}<span class="text-gray-600">—</span>{% endif %}
-                </td>
                 <td class="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
                     {% if t.exit_price is not none %}
                     <span class="text-white">{{ t.exit_price|fmt_price }}</span>
                     {% elif r.price is not none %}
                     <span class="text-gray-400" title="Canlı fiyat (WebSocket)">{{ r.price|fmt_price }}</span>
                     {% else %}<span class="text-gray-600">—</span>{% endif %}
-                </td>
-                <td class="px-2 py-2 text-center text-xs font-bold whitespace-nowrap">
-                    {% if t.status == 'closed' %}{{ m.rv(r.rr) }}
-                    {% elif r.live_r is not none %}{{ m.rv(r.live_r) }}<span class="block text-[9px] font-normal text-gray-500">canlı</span>
-                    {% else %}<span class="text-gray-600">—</span>{% endif %}
-                    {% if r.banked_r is not none %}
-                    <span class="block text-[9px] font-normal text-gray-500" title="Kısmi çıkıştan kasaya giren R">kasa {{ '%+.2f'|format(r.banked_r) }}R</span>
-                    {% endif %}
                 </td>
                 <td class="px-2 py-2 text-right text-xs font-semibold whitespace-nowrap">
                     {% set money = r.pnl if t.status == 'closed' else r.live_pnl %}
@@ -81,24 +51,11 @@
                     {% else %}
                     <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
                         {% if t.result == 'win' %}bg-green-500/15 text-green-400{% elif t.result == 'loss' %}bg-red-500/15 text-red-400{% else %}bg-gray-500/15 text-gray-300{% endif %}"
-                        title="Çıkış: {{ r.exit_label }} · {{ r.closed_label }}">{{ r.result_label }}{% if r.exit_label %} · {{ r.exit_label }}{% endif %}</span>
+                        title="Kapanış: {{ r.closed_label }}">{{ r.result_label }}</span>
                     {% endif %}
                 </td>
                 <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.entered_label }}</td>
-                <td class="px-2 py-2 whitespace-nowrap">
-                    <div class="flex items-center gap-1">
-                        {% if t.followed_plan is not none %}
-                        <span class="inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold {% if t.followed_plan %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}"
-                            title="{{ 'Plana uydum' if t.followed_plan else 'Plandan saptım' }}">{{ 'PLAN ✓' if t.followed_plan else 'PLAN ✗' }}</span>
-                        {% endif %}
-                        {% for label in r.mistakes %}
-                        <span class="inline-flex px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/10 text-amber-400">{{ label }}</span>
-                        {% endfor %}
-                        {% if t.note %}<span class="text-gray-500 text-xs cursor-help" title="{{ t.note }}">📝</span>{% endif %}
-                        {% if t.chart_url %}<a href="{{ t.chart_url }}" target="_blank" rel="noopener" class="text-gray-500 hover:text-accent-blue text-xs" title="Grafik">🔗</a>{% endif %}
-                        {% if t.confidence %}<span class="text-[9px] text-gray-500" title="Girişteki güven">G{{ t.confidence }}</span>{% endif %}
-                    </div>
-                </td>
+                <td class="px-2 py-2 whitespace-nowrap">{{ sess.session_badge(t.entered_at) }}</td>
                 <td class="px-2 py-2 text-right whitespace-nowrap">
                     <div class="flex items-center justify-end gap-1">
                         {% if t.status == 'open' %}
@@ -119,7 +76,7 @@
                 </td>
             </tr>
             {% else %}
-            <tr><td colspan="15" class="px-4 py-10 text-center text-sm text-gray-500">
+            <tr><td colspan="9" class="px-4 py-10 text-center text-sm text-gray-500">
                 Bu filtrede kayıt yok. Üstteki <span class="text-gray-300">Yeni işlem</span> ile ekleyebilirsin.
             </td></tr>
             {% endfor %}

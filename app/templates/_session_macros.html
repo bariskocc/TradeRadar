@@ -1,0 +1,16 @@
+{# ICT seans rozeti -- app.session.trading_session. Renk siniflari burada acik yazili ki Tailwind derlesin. #}
+{% macro session_badge(dt, empty_hint='') -%}
+{% set s = trade_session(dt) %}
+{% if s is none -%}
+<span class="text-gray-600"{% if empty_hint %} title="{{ empty_hint }}"{% endif %}>—</span>
+{%- else -%}
+{% set cls = {
+    'asia': 'bg-blue-500/15 text-blue-400',
+    'london': 'bg-red-500/15 text-red-400',
+    'ny_am': 'bg-green-500/15 text-green-400',
+    'ny_lunch': 'bg-yellow-500/15 text-yellow-400',
+    'ny_pm': 'bg-purple-500/15 text-purple-400',
+}.get(s.key, 'bg-dark-700 text-gray-500') %}
+<span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ cls }}" title="{{ s.hint }}">{{ s.label }}</span>
+{%- endif %}
+{%- endmacro %}

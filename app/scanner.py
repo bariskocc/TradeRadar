@@ -214,6 +214,14 @@ STRATEGY_CFG = {
         "be_arm_tp_fraction": 0.50,
         "partial_close_fraction": 0.50,
         "trail_arm_tp_fraction": None,
+        # 25.09 (kullanici karari): 1D C2 kapanisini BEKLEMEZ, IFVG girisi de C2 acikken
+        # serbest. 11.09'da "C2 yeni dip/tepe yapip SL'yi yiyebilir" diye geri alinmisti;
+        # bedel artik skorda: kapanmamis C2 c2_closed kalemini (+1) almaz. Vaka: US100 1D
+        # LONG 24.09 -- CISD 30264 / IFVG retesti C2 acikken oldu, C2 kapaninca fiyat
+        # geri donmedi. Journal: C2 icinde dolan 48 setup R/setup -0.375 (taban -0.395).
+        # Bkz. IZLEME.md "1D C2 hard filtreleri kalkti".
+        "require_c2_closed": False,
+        "ifvg_requires_c2_closed": False,
     },
     STRATEGY_1H: {
         "htf": "1h",

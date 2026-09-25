@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import '_session_macros.html' as sess %}
 
 {% block title %}TradeRadar - {{ page_title }}{% endblock %}
 
@@ -174,6 +175,7 @@
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PLAN R</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">REAL R</th>
                             <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">STATUS</th>
+                            <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Girisin (dolum mumunun) dustugu ICT seansi">SESSION</th>
                             <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SETUP</th>
                             <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="MSS'in kirdigi onceki swing mumunun acilis zamani">MSS REF</th>
                             <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">CISD</th>
@@ -369,6 +371,9 @@
                                 </span>
                                 {% endif %}
                             </td>
+                            <td class="px-2 py-2 whitespace-nowrap">
+                                {{ sess.session_badge(signal.entry_filled_time, 'Henüz dolmadı') }}
+                            </td>
                             <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">
                                 {{ signal.crt_bar_time|fmt_date_tsi }}
                             </td>
@@ -384,7 +389,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="22" class="px-2 py-12 text-center text-gray-500">
+                            <td colspan="23" class="px-2 py-12 text-center text-gray-500">
                                 {% if tab == 'active' %}
                                 No active signals.
                                 {% elif tab == 'waiting' %}

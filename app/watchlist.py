@@ -30,6 +30,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BiasJournal, PotentialNotice, SetupJournal, Signal
+from app.setup_journal import PRE_SETUP_STAGES
 
 IZLEME_PATH = Path(__file__).resolve().parent.parent / "IZLEME.md"
 
@@ -127,6 +128,20 @@ async def _p_noncrypto(db: AsyncSession) -> Progress:
 async def _p_partial(db: AsyncSession) -> Progress:
     n = await _closed_count(db, Signal.partial_size.is_not(None), Signal.partial_rr.is_not(None))
     return Progress(bars=[Bar("kısmi kârlı kapalı işlem", n, 25)])
+
+
+async def _p_partial_flat(db: AsyncSession) -> Progress:
+    """%50'ye gelip iki kolu da cozulmus motor setup'u (4H/1D); karar kurali
+    `scripts/partial_flat_stat.py` ANA dilimiyle ayni sayar: pt temiz, ayni mum/ufuk disi haric."""
+    t = SetupJournal.__table__
+    k1 = lambda f: func.json_extract(t.c.shadow, f'$."1".{f}')  # noqa: E731
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(
+            t.c.shadow.is_not(None), t.c.strategy.in_(("4h", "1d")),
+            t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
+            k1("pa").is_not(None), k1("cur").in_(("tp", "be")), k1("o").in_(("win", "loss")))
+    ) or 0
+    return Progress(bars=[Bar("%50'ye gelip çözülmüş setup", n, 100)], due=date(2026, 10, 3))
 
 
 async def _p_direction(db: AsyncSession) -> Progress:
@@ -254,6 +269,16 @@ async def _p_cfvg(db: AsyncSession) -> Progress:
         select(func.count()).select_from(t).where(_journal_col("entries").like('%cfvg_near%'))
     ) or 0
     return Progress(bars=[Bar("kırılım FVG'si ölçülen setup", n, 60)])
+
+
+async def _p_1d_c2_open(db: AsyncSession) -> Progress:
+    """25.09 sonrasi C2 acikken (purge + 24s'ten once) dolup kapanan 1D islem."""
+    n = await _closed_count(
+        db, Signal.timeframe == "1d", Signal.entry_filled_time >= datetime(2026, 9, 25),
+        Signal.purge_time.is_not(None),
+        func.julianday(Signal.entry_filled_time) < func.julianday(Signal.purge_time) + 1.0,
+    )
+    return Progress(bars=[Bar("C2 açıkken dolan kapalı 1D işlem", n, 10)], due=date(2026, 10, 3))
 
 
 async def _p_week_gap(db: AsyncSession) -> Progress:
@@ -470,12 +495,26 @@ async def _p_deleted_gate(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("çözülmüş silinen setup", len(resolved), 20)], note=note)
 
 
-async def _p_score_parts(db: AsyncSession) -> Progress:
-    n = await db.scalar(
-        select(func.count()).select_from(_journal_table())
-        .where(_journal_col("score_parts").is_not(None))
-    ) or 0
-    return Progress(due=date(2026, 9, 28), note=f"{n} setup'ta skor kırılımı kayıtlı")
+async def _score_parts_resolved(db: AsyncSession, strategy: str, since: datetime | None = None) -> int:
+    """Stratejinin kirilimli ve sonuclanmis (win/loss) Journal satiri -- raporun okuma birimi."""
+    t = _journal_table()
+    where = [t.c.strategy == strategy, t.c.score_parts.is_not(None), t.c.outcome.in_(("win", "loss"))]
+    if since is not None:
+        where.append(t.c.first_seen >= since)
+    return await db.scalar(select(func.count()).select_from(t).where(*where)) or 0
+
+
+async def _p_score_parts_4h(db: AsyncSession) -> Progress:
+    n = await _score_parts_resolved(db, "4h")
+    return Progress(due=date(2026, 9, 28), note=f"4H: {n} sonuçlanmış kırılımlı setup")
+
+
+async def _p_score_parts_1d(db: AsyncSession) -> Progress:
+    # Tarihli madde: cubuk eklemek hatirlatmayi saklar (ready tarih + cubuk ister), sayi note'ta.
+    n = await _score_parts_resolved(db, "1d")
+    n25 = await _score_parts_resolved(db, "1d", datetime(2026, 9, 25))
+    return Progress(due=date(2026, 10, 3),
+                    note=f"1D: {n} sonuçlanmış setup · C2/renk kalemleri için 25.09 sonrası {n25}")
 
 
 async def _p_journal_live(db: AsyncSession) -> Progress:
@@ -600,6 +639,15 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_week_gap,
     ),
     WatchItem(
+        key="rules_0925", status="open", started="25.09", onem=1,
+        title="1D C2 hard filtreleri kalktı + CISD bloğu + IFVG C1 şartı",
+        trigger="03.10.2026 ya da C2 açıkken dolan 10 kapalı 1D işlem: bu işlemler diğer 1D işlemlerden "
+                "0.3R+ kötüyse require_c2_closed geri açılır",
+        measure="signals (timeframe=1d, entry_filled_time < purge_time + 24s) · setup_journal 1d base=0",
+        md="1D C2 hard filtreleri kalktı + CISD bloğu + IFVG C1 şartı (25.09.2026, restart bekliyor)",
+        progress_fn=_p_1d_c2_open,
+    ),
+    WatchItem(
         key="pd_midnight", status="open", started="18.09",
         title="Gece yarısı PDH/PDL kayması düzeltildi",
         trigger="02.10.2026: pencere içi pd_major oranı %44.7'ye yakınsadı mı (yoksa %30 altı = tutmadı)",
@@ -667,6 +715,14 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_partial,
     ),
     WatchItem(
+        key="partial_flat", status="open", started="24.09", onem=1,
+        title="Kısmi kâr + BE kapatılsın mı?",
+        trigger="100 setup %50'ye gelip çözülünce (Journal, 4H/1D) ve 03.10",
+        measure="python scripts/partial_flat_stat.py",
+        md="Kısmi kâr + BE kapatılsın mı? (ölçüm başladı 24.09.2026, ⏰ tetik: 100 setup + 03.10)",
+        progress_fn=_p_partial_flat,
+    ),
+    WatchItem(
         key="tight_stop_gate", status="open", started="18.09", onem=1,
         title="Dar stop kapısı — elenen setup TP'ye gidiyor mu?",
         trigger="20 çözülmüş elenen setup (kapı haftada ~1–2 eliyor)",
@@ -711,12 +767,21 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_1h,
     ),
     WatchItem(
-        key="score_parts", status="open", started="16.09", onem=1,
-        title="Skor kalemleri — kırılım izleme",
-        trigger="28.09.2026 tarihinde ilk okuma (skor bandı 0–6'dan)",
-        measure="python scripts/score_parts_stat.py",
-        md="Skor kalemleri — kırılım izleme (başladı 16.09.2026, ⏰ ilk okuma 28.09.2026)",
-        progress_fn=_p_score_parts,
+        key="score_parts_4h", status="open", started="16.09", onem=1,
+        title="Skor kalemleri — 4H",
+        trigger="28.09.2026 ilk okuma (skor bandı 0–6, iki takvim haftası ayrı); "
+                "uzun fitil × −4 ceza hipotezi (rapor bölüm 5) 03.10'da W40 ile",
+        measure="python scripts/score_parts_stat.py --strategy 4h",
+        md="Skor kalemleri — 4H (ölçüm 16.09.2026, ⏰ ilk okuma 28.09.2026)",
+        progress_fn=_p_score_parts_4h,
+    ),
+    WatchItem(
+        key="score_parts_1d", status="open", started="16.09", onem=1,
+        title="Skor kalemleri — 1D",
+        trigger="03.10.2026 okuma; kalem başına iki tarafta 50 sonuçlanmış yoksa “veri birikiyor”",
+        measure="python scripts/score_parts_stat.py --strategy 1d  (C2/renk: --since 2026-09-25)",
+        md="Skor kalemleri — 1D (ölçüm 16.09.2026, ⏰ okuma 03.10.2026)",
+        progress_fn=_p_score_parts_1d,
     ),
     WatchItem(
         key="ws_watchdog", status="open", started="16.09", onem=3,

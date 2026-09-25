@@ -79,7 +79,6 @@
                 <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Devreye girmis koruma: BE (stop girise cekildi) / TRAIL (MFE takibi)">PROTECTION</th>
                 <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Aktif: dolum zamani. Bekleyen: sinyal gelis zamani (TSI)">SINCE</th>
                 <th class="px-2 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">AGE</th>
-                <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Bu sinyali elle aldiysan Paper Trading Journal'a ekle">JOURNAL</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-dark-700">
@@ -225,15 +224,10 @@
                 </td>
                 <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.since|fmt_date_tsi }}</td>
                 <td class="px-2 py-2 text-right text-xs text-gray-400 whitespace-nowrap">{{ r.age }}</td>
-                <td class="px-2 py-2 text-center whitespace-nowrap">
-                    <a href="/paper-trades?new=1&source=bot&signal_id={{ s.id }}&symbol={{ s.symbol }}&direction={{ s.direction }}&strategy={{ s.timeframe or '4h' }}&entry={{ s.entry_price }}&sl={{ s.initial_stop_loss or s.stop_loss }}&tp={{ s.take_profit }}"
-                       class="inline-flex px-2 py-0.5 rounded text-[10px] font-semibold bg-dark-700 text-gray-400 hover:bg-accent-blue/20 hover:text-accent-blue"
-                       title="Günlüğe ekle (alanlar dolu gelir)">+ Günlük</a>
-                </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="22" class="px-2 py-10 text-center text-sm text-gray-600">No open signals</td>
+                <td colspan="21" class="px-2 py-10 text-center text-sm text-gray-600">No open signals</td>
             </tr>
             {% endfor %}
         </tbody>

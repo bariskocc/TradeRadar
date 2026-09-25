@@ -94,8 +94,19 @@ _TOUCH_EVERY = timedelta(minutes=30)
 SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5)}
 # JSON'a yazilirken/okunurken datetime'a cevrilecek alanlar. Golgede "e" dolum ani; entry
 # varyantlarinda "e" ENTRY FIYATI olduğu icin dolum ani ayri alanda ("t") tutulur.
-_SHADOW_TS = ("e", "at", "until")
+_SHADOW_TS = ("e", "at", "until", "pa")
 _ENTRY_TS = ("t", "at", "until")
+
+# Kismi kar + BE karsi-olgusu (24.09, kullanici istegi): "%50'ye gelen islemlerin kaci sonunda TP,
+# kaci SL? Kismi kar + BE'yi kapatsak mi?" Canli sinyalde BE islemi kapattigi icin sonrasi
+# gorulmuyor; k=1 golgesi ise duz TP/SL oldugu icin devam ediyor. Ayni golgeye motorun kuralini
+# da isletiriz (yalniz k=1 varyantinda, 4H/1D'deki kural: TP yolunun %50'si):
+#   pa  -> %50 seviyesine degilen mum (dolum mumu sayilmaz, TP/SL goren mum sayilmaz -- motorla ayni)
+#   cur -> motorun kuraliyla kalan yari: "tp" (girise donmeden TP) | "be" (once girise dondu)
+#          | "amb" (ayni mumda ikisi). Duz sonuc `o`'da ayrica durur -> ikisi ayni satirdan okunur.
+#   pt  -> olcum temiz mi: yalniz dolum ONCESINDEN beri izlenen golge True (yoksa %50 kacirilmis olabilir)
+# Karar kurali: IZLEME.md "Kısmi kâr + BE kapatılsın mı?".
+PARTIAL_ARM_FRAC = 0.5
 
 # C1 varyanti (17.09): sabit kesir degil, setup'in KENDI C1 ucu (LONG'da C1 low, SHORT'ta C1 high).
 # Soru: "SL purge ucu yerine C1 ucu olsa?" TP zaten karsi C1 ucu oldugu icin bu, islemi saf range
@@ -690,6 +701,9 @@ def _apply_shadow(rec: dict, bar_ts, high: float, low: float) -> None:
             continue
         hit_sl = low <= v["sl"] if long else high >= v["sl"]
         v["until"] = bar_ts
+        prev = v["o"]
+        if v.get("k") == 1.0 and "pt" not in v:
+            v["pt"] = prev == "pending"
         if v["o"] == "pending":
             if hit_tp and not hit_e:
                 v["o"], v["at"] = "tp_before_entry", bar_ts
@@ -708,8 +722,35 @@ def _apply_shadow(rec: dict, bar_ts, high: float, low: float) -> None:
                 v["o"], v["at"] = "win", bar_ts
             elif hit_sl:
                 v["o"], v["at"] = "loss", bar_ts
+        if v.get("pt") and prev == "filled":
+            _apply_partial_arm(v, long, e, tp, hit_e, hit_tp, bar_ts, high, low)
         if v["o"] in TRACKING and bar_ts >= rec["levels_at"] + horizon:
             v["o"], v["at"] = ("no_touch" if v["o"] == "pending" else "open"), bar_ts
+
+
+def _apply_partial_arm(v: dict, long: bool, e: float, tp: float, hit_e: bool, hit_tp: bool,
+                       bar_ts, high: float, low: float) -> None:
+    """k=1 golgesine motorun %50 kismi kar + BE kuralini isletir (yukaridaki nota bkz.).
+
+    Sira `manage_symbol_on_price` ile ayni: once TP/SL, ancak ikisi de yoksa %50 tetigi; BE
+    tetigin gectigi mumdan SONRAKI mumlarda gecerli (o mumun karsi fitili sayilmaz).
+    """
+    if v.get("pa") is None:
+        if v["o"] != "filled":
+            return                                  # bu mumda duz sonuc cikti: tetik yok, iki kural ayni
+        lvl = e + PARTIAL_ARM_FRAC * (tp - e)
+        if (high >= lvl) if long else (low <= lvl):
+            v["pa"] = bar_ts
+        return
+    if v.get("cur") is not None:
+        return
+    if hit_tp and hit_e:
+        v["cur"] = "amb"
+    elif hit_tp:
+        v["cur"] = "tp"
+    elif hit_e:
+        v["cur"] = "be"
+
 
 _COLUMNS = (
     "market_type", "crt_bar_time", "first_seen", "last_seen", "last_stage", "best_stage", "best_stage_at",

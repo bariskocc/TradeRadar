@@ -23,7 +23,7 @@ from app.watchlist import build_watchlist
 from app import paper_trades as paper
 from app import tv_import as tv
 from app.setup_journal import PRE_SETUP_STAGES
-from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR
+from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR, trading_session
 from app.telegram import is_configured as tg_is_configured
 from app.auth import verify_credentials, create_access_token, get_current_user
 from app.scanner import run_scan, SMT_QUALITY_BONUS, MAX_QUALITY_SCORE
@@ -176,6 +176,7 @@ templates.env.globals["signal_planned_rr"] = _signal_planned_rr
 templates.env.globals["signal_realized_rr"] = _signal_realized_rr
 templates.env.globals["fmt_ui_symbol"] = _fmt_ui_symbol
 templates.env.globals["fmt_money"] = paper.fmt_money
+templates.env.globals["trade_session"] = trading_session
 
 
 def _static_version(name: str = "css/app.css") -> str:
@@ -1821,7 +1822,7 @@ def _paper_num_str(value) -> str:
 def _paper_filters(request: Request) -> dict:
     q = request.query_params
     f = {key: (q.get(key) or "").strip()
-         for key in ("symbol", "direction", "strategy", "source", "result",
+         for key in ("symbol", "direction", "result",
                      "date_from", "date_to", "date_basis")}
     markets: list[str] = []
     for value in q.getlist("market_type"):
@@ -1839,7 +1840,7 @@ def _paper_qs(f: dict, view: str, tab: str, kind: str, offset: int) -> tuple[str
     filter_qs = YALNIZ filtreler -- sekme ve donem linkleri view/tab/period'i kendileri yazar
     (tekrarlanan parametrede Starlette ilkini aldigi icin ikisini birlestirmek kirilgan)."""
     items: list[tuple[str, str]] = [
-        (key, f[key]) for key in ("symbol", "direction", "strategy", "source", "result") if f.get(key)
+        (key, f[key]) for key in ("symbol", "direction", "result") if f.get(key)
     ]
     items.extend(("market_type", mk) for mk in f["markets"])
     items.extend((("date_from", f.get("date_from") or ""), ("date_to", f.get("date_to") or "")))
@@ -1850,12 +1851,10 @@ def _paper_qs(f: dict, view: str, tab: str, kind: str, offset: int) -> tuple[str
 
 
 def _paper_form_ctx(request: Request, trade, form_data: dict | None) -> dict:
-    """Form'un dolu degerleri: POST hatasi > duzenlenen kayit > URL onyuklemesi > bos."""
+    """Form'un dolu degerleri: POST hatasi > duzenlenen kayit > bos."""
     if form_data is not None:
         ctx = {key: (form_data.get(key) or "") for key in (
-            "symbol", "direction", "strategy", "source", "entry_price", "stop_loss", "take_profit",
-            "entered_at", "confidence", "gate", "signal_id", "chart_url", "note",
-            "partial_price", "partial_fraction", "qty", "currency")}
+            "symbol", "direction", "entry_price", "entered_at", "qty", "currency")}
         ctx["id"] = form_data.get("id") or (trade.id if trade else "")
         return ctx
     if trade is not None:
@@ -1863,43 +1862,14 @@ def _paper_form_ctx(request: Request, trade, form_data: dict | None) -> dict:
             "id": trade.id,
             "symbol": trade.symbol or "",
             "direction": trade.direction or "LONG",
-            "strategy": trade.strategy or "other",
-            "source": trade.source or "manual",
             "entry_price": _paper_num_str(trade.entry_price),
-            "stop_loss": _paper_num_str(trade.stop_loss),
-            "take_profit": _paper_num_str(trade.take_profit),
             "entered_at": paper.to_input_dt(trade.entered_at),
-            "confidence": str(trade.confidence) if trade.confidence else "",
-            "gate": trade.gate or "",
-            "signal_id": str(trade.signal_id) if trade.signal_id else "",
-            "chart_url": trade.chart_url or "",
-            "note": trade.note or "",
-            "partial_price": _paper_num_str(trade.partial_price),
-            "partial_fraction": _paper_num_str(trade.partial_fraction),
             "qty": _paper_num_str(trade.qty),
             "currency": trade.currency or paper.DEFAULT_CURRENCY,
         }
-    # URL onyuklemesi: Open Signals / Signals sayfasindaki "Günlüğe ekle" butonu boyle gelir.
-    q = request.query_params
     return {
-        "id": "",
-        "symbol": q.get("symbol") or "",
-        "direction": q.get("direction") or "LONG",
-        "strategy": q.get("strategy") or "other",
-        "source": q.get("source") or ("bot" if q.get("signal_id") else "manual"),
-        "entry_price": q.get("entry") or "",
-        "stop_loss": q.get("sl") or "",
-        "take_profit": q.get("tp") or "",
-        "entered_at": "",
-        "confidence": "",
-        "gate": q.get("gate") or "",
-        "signal_id": q.get("signal_id") or "",
-        "chart_url": "",
-        "note": "",
-        "partial_price": "",
-        "partial_fraction": "",
-        "qty": "",
-        "currency": paper.DEFAULT_CURRENCY,
+        "id": "", "symbol": "", "direction": "LONG", "entry_price": "", "entered_at": "",
+        "qty": "", "currency": paper.DEFAULT_CURRENCY,
     }
 
 
@@ -1908,7 +1878,7 @@ async def _paper_context(
     form_data: dict | None = None, edit_id: int | None = None, full: bool = True,
 ) -> dict:
     """Sayfa baglami. `full=False` yalnizca tablo parcasi icin: 30 sn'de bir yenilenen
-    istek panolari (donem ozeti / ben vs motor / disiplin / sinyal onerileri) hesaplamaz."""
+    istek panolari (donem ozeti / takvim) hesaplamaz."""
     q = request.query_params
     view = (q.get("view") or "overview").lower()
     view = view if view in _PAPER_VIEWS else "overview"
@@ -1935,9 +1905,7 @@ async def _paper_context(
 
     listing = await paper.list_page(db, f, tab, page)
     # Her sekme yalniz kendi panosunu hesaplar (tablo parcasi hicbirini).
-    panels: dict = {"summary": {}, "vs": {}, "disc": {}, "suggestions": [], "calendar": None}
-    if full:
-        panels["suggestions"] = await paper.signal_suggestions(db)
+    panels: dict = {"summary": {}, "calendar": None}
     if full and view == "calendar":
         panels["calendar"] = paper.calendar_month(
             await paper.closed_trades(db, naive(start), naive(end)),
@@ -1947,11 +1915,9 @@ async def _paper_context(
     elif full and view == "overview":
         summary = paper.period_summary(await paper.closed_trades(db, naive(start), naive(end)))
         prev = paper.period_summary(await paper.closed_trades(db, naive(prev_start), naive(prev_end)))
-        summary["delta_r"] = round(summary["total_r"] - prev["total_r"], 2) if prev["n"] else None
-        all_closed = await paper.closed_trades(db)
+        summary["delta_pnl"] = (round((summary["total_pnl"] or 0.0) - (prev["total_pnl"] or 0.0), 2)
+                                if prev["n"] else None)
         panels["summary"] = summary
-        panels["vs"] = await paper.vs_engine(db, all_closed)
-        panels["disc"] = paper.discipline(all_closed)
 
     # Duzenlenen / kapatilan kayit
     trade = None
@@ -1988,10 +1954,6 @@ async def _paper_context(
         "form_open": bool(q.get("new") or edit_raw or errors or form_data),
         "close_target": close_target,
         "symbols": paper.symbol_choices(),
-        "sources": paper.SOURCES,
-        "strategies": paper.STRATEGIES,
-        "exit_reasons": paper.EXIT_REASONS,
-        "mistake_tags": paper.MISTAKE_TAGS,
         "markets": paper.MARKET_OPTIONS,
         "period": {"kind": kind, "offset": offset, "label": label, "table_link": table_link},
         **panels,
@@ -2013,9 +1975,7 @@ async def _paper_context(
 
 async def _paper_form_data(request: Request) -> dict:
     raw = await request.form()
-    data = {key: raw.get(key) for key in raw.keys()}
-    data["mistakes"] = raw.getlist("mistakes")
-    return data
+    return {key: raw.get(key) for key in raw.keys()}
 
 
 def _paper_redirect(data: dict) -> RedirectResponse:
@@ -2066,15 +2026,14 @@ async def paper_trade_edit(trade_id: int, request: Request, db: AsyncSession = D
     if trade is None:
         return RedirectResponse(url="/paper-trades", status_code=303)
     data = await _paper_form_data(request)
-    errors = paper.apply_plan(trade, data) + paper.apply_partial(trade, data)
+    errors = paper.apply_plan(trade, data)
     if errors:
         data["id"] = trade_id
         ctx = await _paper_context(request, db, errors=errors, form_data=data, edit_id=trade_id)
         return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
-    # Seviyeler degistiyse kapanmis islemin R'si de yeniden hesaplanir (elle girilmez).
+    # Giris/yon degistiyse kapanmis islemin sonucu da yeniden hesaplanir (elle girilmez).
     if trade.status == "closed" and trade.exit_price is not None:
-        trade.rr_value = round(paper.rr_at(trade, trade.exit_price) or 0.0, 4)
-        trade.result = paper.result_of(trade.rr_value)
+        trade.result = paper.result_for(trade)
     await db.commit()
     return _paper_redirect(data)
 
@@ -2118,9 +2077,9 @@ async def paper_trade_delete(trade_id: int, request: Request, db: AsyncSession =
 
 
 # ──────────────────── TradingView içe aktarma ────────────────────
-# Iki CSV (islem gecmisi + emirler) okunur, birlestirilir, ONIZLEME gosterilir; yazma ayri
-# bir onaydan gecer. Dogrudan yazmiyoruz cunku: SL emir dosyasi yoksa eksik kalir (elle
-# girilir), sembol eslesmeyebilir ve ayni dosya iki kez yuklenebilir.
+# Tek CSV (islem gecmisi) okunur, ONIZLEME gosterilir; yazma ayri bir onaydan gecer. Dogrudan
+# yazmiyoruz cunku sembol eslesmeyebilir ve ayni dosya iki kez yuklenebilir. Emir dosyasi
+# (SL/TP) 25.09'dan beri okunmuyor: sayfa yalniz para + win/loss gosteriyor.
 
 
 def _decode_upload(raw: bytes) -> str:
@@ -2156,8 +2115,6 @@ async def paper_import_preview(
     request: Request,
     db: AsyncSession = Depends(get_db),
     trades_file: UploadFile = File(...),
-    orders_file: UploadFile | None = File(None),
-    link_signals: str = Form(default=""),
 ):
     if not get_current_user(request):
         return RedirectResponse(url="/login", status_code=303)
@@ -2165,14 +2122,8 @@ async def paper_import_preview(
     errors: list[str] = []
     rows: list[dict] = []
     warnings: list[str] = []
-    orders_n = 0
     try:
-        trades, warnings = tv.parse_trades(_decode_upload(await trades_file.read()))
-        orders = []
-        if orders_file is not None and orders_file.filename:
-            orders = tv.parse_orders(_decode_upload(await orders_file.read()))
-            orders_n = len(orders)
-        rows = tv.merge(trades, orders)
+        rows, warnings = tv.parse_trades(_decode_upload(await trades_file.read()))
     except ValueError as exc:
         errors.append(str(exc))
     except Exception as exc:                                  # noqa: BLE001
@@ -2186,14 +2137,6 @@ async def paper_import_preview(
         )).scalars().all())
         for row in rows:
             row["exists"] = row["ext_id"] in seen
-            row["sl_side_ok"] = tv.sl_side_ok(row)
-            row["signal_id"] = None
-            if link_signals and not row["exists"]:
-                row["signal_id"] = await paper.match_signal(
-                    db, row["symbol"], row["direction"], row["entered_at"])
-        if not orders_n:
-            warnings.append("Emir dosyası verilmedi — SL/TP gelmedi, R hesaplanamaz. "
-                            "Aşağıdaki SL alanlarını elle doldurabilirsin.")
 
     ctx = await _paper_context(request, db)
     ctx.update({
@@ -2201,13 +2144,9 @@ async def paper_import_preview(
         "import_result": {
             "rows": rows,
             "warnings": warnings,
-            "orders_n": orders_n,
             "new_n": sum(1 for r in rows if not r["exists"]),
             "exists_n": sum(1 for r in rows if r["exists"]),
-            "no_sl_n": sum(1 for r in rows if not r["exists"] and r["sl"] is None),
-            "linked_n": sum(1 for r in rows if r.get("signal_id")),
             "payload": _import_payload(rows),
-            "link_signals": bool(link_signals),
         },
         "errors": errors,
     })
@@ -2224,9 +2163,6 @@ async def paper_import_commit(request: Request, db: AsyncSession = Depends(get_d
     except json.JSONDecodeError:
         rows = []
     picked = {v for v in (await request.form()).getlist("pick") if v}
-    source = (data.get("source") or "manual").lower()
-    source = source if source in paper.SOURCE_LABELS else "manual"
-
     seen = set((await db.execute(
         select(PaperTrade.ext_id).where(PaperTrade.ext_id.in_([r.get("ext_id") for r in rows]))
     )).scalars().all()) if rows else set()
@@ -2236,15 +2172,11 @@ async def paper_import_commit(request: Request, db: AsyncSession = Depends(get_d
         ext_id = row.get("ext_id")
         if ext_id in seen or (picked and ext_id not in picked):
             continue
-        sl = paper.parse_num(data.get(f"sl_{ext_id}")) or row.get("sl")
-        entry = row.get("entry")
         trade = PaperTrade(
             symbol=row.get("symbol"), market_type=row.get("market_type"),
             direction=row.get("direction"), strategy="other",
-            source="bot" if row.get("signal_id") else source,
-            signal_id=row.get("signal_id"),
-            entry_price=entry, stop_loss=sl, take_profit=row.get("tp"),
-            planned_rr=paper.calc_planned_rr(entry, sl, row.get("tp")),
+            source="manual",
+            entry_price=row.get("entry"),
             entered_at=_payload_dt(row.get("entered_at")) or paper.now_utc(),
             partial_price=row.get("partial_price"), partial_fraction=row.get("partial_fraction"),
             exit_price=row.get("exit"), closed_at=_payload_dt(row.get("closed_at")),
@@ -2253,14 +2185,11 @@ async def paper_import_commit(request: Request, db: AsyncSession = Depends(get_d
             currency=row.get("currency") or paper.DEFAULT_CURRENCY,
             qty=row.get("qty"), notional=row.get("notional"), fees=row.get("fees"),
             pnl_amount=row.get("pnl"), return_pct=row.get("return_pct"),
-            leverage=row.get("leverage"), margin=row.get("margin"),
             ext_source="tv", ext_id=ext_id,
             note=f"TradingView içe aktarma · trade #{row.get('trade_no')}",
         )
         if trade.status == "closed":
-            rr = paper.rr_at(trade, trade.exit_price)
-            trade.rr_value = round(rr, 4) if rr is not None else None
-            trade.result = paper.result_of(trade.rr_value, paper.pnl_of(trade))
+            trade.result = paper.result_for(trade)
             if trade.entered_at and trade.closed_at:
                 trade.duration_hours = round(
                     max(0.0, (trade.closed_at - trade.entered_at).total_seconds() / 3600.0), 2)
