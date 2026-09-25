@@ -1854,22 +1854,28 @@ def _paper_form_ctx(request: Request, trade, form_data: dict | None) -> dict:
     """Form'un dolu degerleri: POST hatasi > duzenlenen kayit > bos."""
     if form_data is not None:
         ctx = {key: (form_data.get(key) or "") for key in (
-            "symbol", "direction", "entry_price", "entered_at", "qty", "currency")}
+            "symbol", "direction", "status", "pnl_amount", "entry_price", "entered_at",
+            "exit_price", "closed_at", "currency")}
         ctx["id"] = form_data.get("id") or (trade.id if trade else "")
         return ctx
     if trade is not None:
+        closed = trade.status == "closed"
         return {
             "id": trade.id,
             "symbol": trade.symbol or "",
             "direction": trade.direction or "LONG",
+            "status": (trade.result or "win") if closed else "open",
+            "pnl_amount": _paper_num_str(paper.pnl_of(trade)) if closed else "",
             "entry_price": _paper_num_str(trade.entry_price),
             "entered_at": paper.to_input_dt(trade.entered_at),
-            "qty": _paper_num_str(trade.qty),
+            "exit_price": _paper_num_str(trade.exit_price) if closed else "",
+            "closed_at": paper.to_input_dt(trade.closed_at) if closed else "",
             "currency": trade.currency or paper.DEFAULT_CURRENCY,
         }
     return {
-        "id": "", "symbol": "", "direction": "LONG", "entry_price": "", "entered_at": "",
-        "qty": "", "currency": paper.DEFAULT_CURRENCY,
+        "id": "", "symbol": "", "direction": "LONG", "status": "open", "pnl_amount": "",
+        "entry_price": "", "entered_at": "", "exit_price": "", "closed_at": "",
+        "currency": paper.DEFAULT_CURRENCY,
     }
 
 
@@ -1955,6 +1961,8 @@ async def _paper_context(
         "close_target": close_target,
         "symbols": paper.symbol_choices(),
         "markets": paper.MARKET_OPTIONS,
+        "status_options": paper.STATUS_OPTIONS,
+        "result_options": [(k, v) for k, v in paper.STATUS_OPTIONS if k != "open"],
         "period": {"kind": kind, "offset": offset, "label": label, "table_link": table_link},
         **panels,
         "listing": listing,
@@ -2006,10 +2014,9 @@ async def paper_trade_new(request: Request, db: AsyncSession = Depends(get_db)):
         return RedirectResponse(url="/login", status_code=303)
     data = await _paper_form_data(request)
     trade = PaperTrade()
-    errors = paper.apply_plan(trade, data)
-    # Hizli kayit: cikis da girildiyse islem dogrudan kapali dogar (gecmis islemleri toplu girmek icin).
-    if not errors and (data.get("exit_price") or "").strip():
-        errors = paper.apply_close(trade, data)
+    # Durum Win/Loss/BE ise islem dogrudan kapali dogar (gecmis islemleri toplu girmek icin).
+    # Iki adimin hatalari birlikte toplanir: giris VE cikis zamani eksikse ikisi birden soylenir.
+    errors = paper.apply_plan(trade, data) + paper.apply_status(trade, data)
     if errors:
         ctx = await _paper_context(request, db, errors=errors, form_data=data)
         return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
@@ -2026,14 +2033,11 @@ async def paper_trade_edit(trade_id: int, request: Request, db: AsyncSession = D
     if trade is None:
         return RedirectResponse(url="/paper-trades", status_code=303)
     data = await _paper_form_data(request)
-    errors = paper.apply_plan(trade, data)
+    errors = paper.apply_plan(trade, data) + paper.apply_status(trade, data)
     if errors:
         data["id"] = trade_id
         ctx = await _paper_context(request, db, errors=errors, form_data=data, edit_id=trade_id)
         return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
-    # Giris/yon degistiyse kapanmis islemin sonucu da yeniden hesaplanir (elle girilmez).
-    if trade.status == "closed" and trade.exit_price is not None:
-        trade.result = paper.result_for(trade)
     await db.commit()
     return _paper_redirect(data)
 

@@ -61,33 +61,40 @@
                 </div>
                 <form method="POST" action="/paper-trades/{{ ct.t.id }}/close">
                     <input type="hidden" name="qs" value="{{ qs }}">
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+                        <div>
+                            {{ lbl('Durum', 'Otomatik: K/Z’nin işaretinden, o da yoksa çıkış fiyatından') }}
+                            <select name="result" data-status-for="close-pnl" {{ fld() }}>
+                                <option value="">Otomatik</option>
+                                {% for key, label in result_options %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            {{ lbl('Net K/Z', 'Boş bırakırsan miktar × fiyat farkı − komisyon (miktar biliniyorsa)') }}
+                            <input type="text" inputmode="decimal" name="pnl_amount" id="close-pnl" placeholder="opsiyonel" {{ fld() }}>
+                        </div>
                         <div>
                             {{ lbl('Çıkış fiyatı') }}
-                            <input type="text" inputmode="decimal" name="exit_price" required
-                                   value="{{ ct.price if ct.price is not none else '' }}" {{ fld() }}>
+                            <input type="text" inputmode="decimal" name="exit_price"
+                                   value="{{ ct.price if ct.price is not none else '' }}" placeholder="opsiyonel" {{ fld() }}>
                             <p class="text-[10px] text-gray-500 mt-1">
                                 {% if ct.price is not none %}canlı fiyat dolduruldu{% else %}canlı fiyat yok{% endif %}
                             </p>
                         </div>
                         <div>
-                            {{ lbl('Çıkış zamanı', 'Boş bırakırsan şimdi') }}
-                            <input type="datetime-local" name="closed_at" value="{{ now_input }}" {{ fld() }}>
+                            {{ lbl('Çıkış zamanı') }}
+                            <input type="datetime-local" name="closed_at" required value="{{ now_input }}" {{ fld() }}>
                         </div>
                         <div>
                             {{ lbl('Komisyon') }}
                             <input type="text" inputmode="decimal" name="fees"
                                    value="{{ ct.t.fees if ct.t.fees is not none else '' }}" placeholder="0" {{ fld() }}>
                         </div>
-                        <div>
-                            {{ lbl('Net K/Z', 'Boş bırakırsan miktar × fiyat farkı − komisyon') }}
-                            <input type="text" inputmode="decimal" name="pnl_amount" placeholder="otomatik" {{ fld() }}>
-                        </div>
                     </div>
                     <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
                         Kapat ve kaydet
                     </button>
-                    <span class="ml-3 text-xs text-gray-500">Sonuç (win/loss) K/Z'den hesaplanır; elle girilmez.</span>
+                    <span class="ml-3 text-xs text-gray-500">Yalnız çıkış zamanı zorunlu; durum seçmezsen K/Z'nin işaretinden, o da yoksa çıkış fiyatından bulunur.</span>
                 </form>
             </section>
             {% endif %}
@@ -96,12 +103,12 @@
             <details class="mb-5 bg-dark-800 rounded-xl border border-dark-600" {% if form_open %}open{% endif %}>
                 <summary class="px-5 py-3 cursor-pointer text-sm font-semibold text-white select-none">
                     {% if form.id %}İşlemi düzenle — #{{ form.id }}{% else %}Yeni işlem{% endif %}
-                    <span class="ml-2 text-xs font-normal text-gray-500">sembol · yön · giriş yeter; miktar girilirse K/Z hesaplanır</span>
+                    <span class="ml-2 text-xs font-normal text-gray-500">sembol + giriş zamanı zorunlu (kapalı işlemde çıkış zamanı da) · fiyatlar opsiyonel</span>
                 </summary>
                 <form method="POST" action="{% if form.id %}/paper-trades/{{ form.id }}/edit{% else %}/paper-trades/new{% endif %}" class="px-5 pb-5">
                     <input type="hidden" name="qs" value="{{ qs }}">
 
-                    <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                         <div>
                             {{ lbl('Sembol') }}
                             <input type="text" name="symbol" list="paper-symbols" required value="{{ form.symbol }}"
@@ -114,44 +121,47 @@
                                 <option value="SHORT" {% if form.direction == 'SHORT' %}selected{% endif %}>SHORT</option>
                             </select>
                         </div>
+                        <div>
+                            {{ lbl('Durum') }}
+                            <select name="status" data-status-for="form-pnl" {{ fld() }}>
+                                {% for key, label in status_options %}
+                                <option value="{{ key }}" {% if form.status == key %}selected{% endif %}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            {{ lbl('K/Z', 'Net kâr/zarar (komisyon dahil). Açık işlemde boş bırak.') }}
+                            <input type="text" inputmode="decimal" name="pnl_amount" id="form-pnl" value="{{ form.pnl_amount }}"
+                                   placeholder="ör. 12,50 / -8" {{ fld() }}>
+                        </div>
                     </div>
 
                     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                         <div>
                             {{ lbl('Giriş fiyatı') }}
-                            <input type="text" inputmode="decimal" name="entry_price" required value="{{ form.entry_price }}" {{ fld() }}>
+                            <input type="text" inputmode="decimal" name="entry_price" value="{{ form.entry_price }}" placeholder="opsiyonel" {{ fld() }}>
                         </div>
                         <div>
                             {{ lbl('Giriş zamanı') }}
-                            <input type="datetime-local" name="entered_at" value="{{ form.entered_at or now_input }}" {{ fld() }}>
+                            <input type="datetime-local" name="entered_at" required value="{{ form.entered_at }}" {{ fld() }}>
                         </div>
                         <div>
-                            {{ lbl('Miktar', 'Pozisyon büyüklüğü — girilirse K/Z para olarak hesaplanır') }}
-                            <input type="text" inputmode="decimal" name="qty" value="{{ form.qty }}" placeholder="opsiyonel" {{ fld() }}>
+                            {{ lbl('Çıkış fiyatı') }}
+                            <input type="text" inputmode="decimal" name="exit_price" value="{{ form.exit_price }}" placeholder="opsiyonel" {{ fld() }}>
                         </div>
+                        <div>
+                            {{ lbl('Çıkış zamanı', 'Durum Win/Loss/Breakeven ise zorunlu') }}
+                            <input type="datetime-local" name="closed_at" id="form-closed-at" value="{{ form.closed_at }}"
+                                   {% if form.status and form.status != 'open' %}required{% endif %} {{ fld() }}>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
                         <div>
                             {{ lbl('Para birimi') }}
                             <input type="text" name="currency" value="{{ form.currency or 'USD' }}" {{ fld() }}>
                         </div>
                     </div>
-
-                    {% if not form.id %}
-                    <details class="mb-3 rounded-lg border border-dark-600 bg-dark-700/40">
-                        <summary class="px-3 py-2 cursor-pointer text-xs text-gray-400 select-none">
-                            Hızlı kayıt: işlem kapandıysa çıkışı da şimdi gir
-                        </summary>
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 p-3">
-                            <div>
-                                {{ lbl('Çıkış fiyatı') }}
-                                <input type="text" inputmode="decimal" name="exit_price" {{ fld() }}>
-                            </div>
-                            <div>
-                                {{ lbl('Çıkış zamanı') }}
-                                <input type="datetime-local" name="closed_at" {{ fld() }}>
-                            </div>
-                        </div>
-                    </details>
-                    {% endif %}
 
                     <div class="flex items-center gap-2">
                         <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
@@ -601,6 +611,31 @@ async function loadPaperTable() {
     }
 }
 if (document.getElementById('paper-table')) setInterval(loadPaperTable, 30000);
+
+// Cikis zamani yalniz kapali durumda (Win/Loss/BE) zorunlu.
+const statusSel = document.querySelector('select[name="status"]');
+const closedAt = document.getElementById('form-closed-at');
+if (statusSel && closedAt) {
+    const syncRequired = () => { closedAt.required = statusSel.value !== 'open'; };
+    statusSel.addEventListener('change', syncRequired);
+    statusSel.addEventListener('status-sync', syncRequired);   // K/Z'den otomatik secim
+    syncRequired();
+}
+
+// K/Z yazilinca Durum kutusu isaretten secilir -- elle secilmis bir durum ezilmez.
+document.querySelectorAll('select[data-status-for]').forEach(sel => {
+    const pnl = document.getElementById(sel.dataset.statusFor);
+    if (!pnl) return;
+    let auto = !pnl.value;
+    sel.addEventListener('change', () => { auto = false; });
+    pnl.addEventListener('input', () => {
+        if (!auto) return;
+        const v = parseFloat(pnl.value.replace(/\s/g, '').replace(/\.(?=.*,)/g, '').replace(',', '.'));
+        if (isNaN(v)) return;
+        sel.value = v > 0.005 ? 'win' : (v < -0.005 ? 'loss' : 'breakeven');
+        sel.dispatchEvent(new Event('status-sync'));
+    });
+});
 
 </script>
 {% endblock %}

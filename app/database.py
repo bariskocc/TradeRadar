@@ -83,6 +83,34 @@ async def _backfill_closed_at(conn) -> None:
         await conn.execute(text("UPDATE signals SET closed_at = :c WHERE id = :i"), {"c": value, "i": sid})
 
 
+async def _relax_paper_entry_price(conn) -> None:
+    """paper_trades.entry_price'taki NOT NULL'u kaldir (25.09: giris fiyati zorunlu degil).
+
+    SQLite bir kolonun kisitini ALTER ile degistiremez; tablo kendi CREATE cumlesinden
+    yeniden kurulur, veri ve indeksler aynen tasinir. Kisit zaten yoksa hicbir sey yapmaz.
+    """
+    if "sqlite" not in (DATABASE_URL or ""):
+        return
+    info = (await conn.exec_driver_sql("PRAGMA table_info(paper_trades)")).fetchall()
+    if not any(row[1] == "entry_price" and row[3] for row in info):
+        return
+    create_sql = (await conn.exec_driver_sql(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='paper_trades'")).scalar()
+    new_sql = create_sql.replace("entry_price FLOAT NOT NULL", "entry_price FLOAT", 1)
+    if new_sql == create_sql:
+        return                                         # beklenmeyen sema: dokunma
+    new_sql = new_sql.replace("CREATE TABLE paper_trades", "CREATE TABLE paper_trades__new", 1)
+    indexes = [r[0] for r in (await conn.exec_driver_sql(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='paper_trades' "
+        "AND sql IS NOT NULL")).fetchall()]
+    await conn.exec_driver_sql(new_sql)
+    await conn.exec_driver_sql("INSERT INTO paper_trades__new SELECT * FROM paper_trades")
+    await conn.exec_driver_sql("DROP TABLE paper_trades")
+    await conn.exec_driver_sql("ALTER TABLE paper_trades__new RENAME TO paper_trades")
+    for ddl in indexes:
+        await conn.exec_driver_sql(ddl)
+
+
 async def _apply_column_migrations(conn) -> None:
     for table, columns in _MIGRATIONS.items():
         res = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
@@ -105,6 +133,7 @@ async def init_db():
     # transaction" ile uygulama acilisini dusuruyordu (14.09 16:11).
     async with engine.begin() as conn:
         await _backfill_closed_at(conn)
+        await _relax_paper_entry_price(conn)
 
 
 async def get_db():

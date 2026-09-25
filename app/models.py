@@ -335,7 +335,7 @@ class PaperTrade(Base):
     gate = Column(String, nullable=True)
 
     # Plan (acarken)
-    entry_price = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=True)                # 25.09: zorunlu degil (yalniz sonuc + K/Z girilebilir)
     # ILK SL; R'nin paydasi, degismez. TradingView ice aktarmasinda emir dosyasi yoksa (ya da
     # islem stop emirsiz acildiysa) BOS kalabilir -> o kayitta R hesaplanmaz, sonuc paradan yazilir.
     stop_loss = Column(Float, nullable=True)

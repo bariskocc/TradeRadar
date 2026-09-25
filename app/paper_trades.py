@@ -5,7 +5,9 @@ Sayfa: /paper-trades. Bu modul saf mantik + sorgu; route'lar app/main.py'de.
 
 Sayfa yalniz PARA ve win/loss gosterir (25.09, kullanici karari). SL/TP/R, TF, kaynak, cikis
 nedeni ve disiplin alanlari kalkti; kolonlar DB'de duruyor (eski kayitlar), yeni kayitta bos.
-`result` paranin isaretinden, para yoksa fiyat hareketinin yonunden (`result_of`).
+`result` formda secildiyse o (Durum kutusu), yoksa paranin isaretinden, o da yoksa fiyat
+hareketinin yonunden (`apply_close`, `result_of`). Giris/cikis fiyati zorunlu degil; giris zamani
+her kayitta, cikis zamani kapali kayitta zorunlu.
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ log = logging.getLogger(__name__)
 TSI = timezone(timedelta(hours=3))
 
 RESULT_LABELS = {"win": "Win", "loss": "Loss", "breakeven": "Breakeven"}
+
+# Yeni / duzenle formundaki Durum kutusu (25.09): tablodaki DURUM sutunuyla ayni dort deger.
+STATUS_OPTIONS = (("open", "Açık"), ("win", "Win"), ("loss", "Loss"), ("breakeven", "Breakeven"))
+STATUS_LABELS = dict(STATUS_OPTIONS)
 
 # Takvim: hafta Pazartesi baslar (donem ozetiyle ayni kural).
 WEEKDAY_LABELS = ("Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz")
@@ -223,13 +229,16 @@ def apply_plan(t: PaperTrade, form: dict) -> list[str]:
     t.strategy = t.strategy or "other"
     t.source = t.source or "manual"
 
+    # Giris fiyati zorunlu DEGIL, giris zamani ZORUNLU (25.09, kullanici karari): kimi zaman yalniz
+    # sonuc ve K/Z kaydediliyor ama tarih her zaman bilinmeli -- takvim, donem ozeti ve tarih
+    # filtresi ona bakiyor; bos zamani "simdi" saymak gecmis islemi bugune yaziyordu.
     entry = parse_num(form.get("entry_price"))
-    if entry is None:
-        errors.append("Giriş fiyatı gerekli.")
     t.entry_price = entry
-    t.entered_at = parse_dt(form.get("entered_at")) or t.entered_at or now_utc()
-    # Para: miktar girilirse K/Z fiyat farkindan hesaplanir; kur kaydin kendi alaninda durur.
-    t.qty = parse_num(form.get("qty"))
+    entered_at = parse_dt(form.get("entered_at"))
+    if entered_at is None:
+        errors.append("Giriş zamanı gerekli.")
+    t.entered_at = entered_at or t.entered_at
+    # Miktar formda yok (25.09, yerine K/Z geldi); ice aktarilan kaydin miktari korunur.
     t.currency = ((form.get("currency") or t.currency or DEFAULT_CURRENCY).strip().upper() or
                   DEFAULT_CURRENCY)
     if t.qty and entry is not None:
@@ -238,12 +247,31 @@ def apply_plan(t: PaperTrade, form: dict) -> list[str]:
     return errors
 
 
+def apply_status(t: PaperTrade, form: dict) -> list[str]:
+    """Formdaki Durum kutusu: Acik ise islem acik kalir (kapaliysa geri acilir), Win/Loss/BE ise
+    o sonucla kapanir. Acik secilip K/Z ya da cikis fiyati girildiyse hata -- sessizce yok
+    saymak girilen tutari kaybederdi."""
+    status = (form.get("status") or "open").lower()
+    if status not in STATUS_LABELS:
+        status = "open"
+    if status == "open":
+        if parse_num(form.get("pnl_amount")) is not None or parse_num(form.get("exit_price")) is not None:
+            return ["K/Z ya da çıkış fiyatı girdin ama durum Açık — işlem kapandıysa Win/Loss/Breakeven seç."]
+        if t.status == "closed":
+            reopen(t)
+        return []
+    return apply_close(t, {**form, "result": status})
+
+
 def apply_close(t: PaperTrade, form: dict) -> list[str]:
-    """Kapanis. Sonuc (win/loss) K/Z'den hesaplanir, elle girilmez."""
+    """Kapanis. Cikis fiyati zorunlu degil, cikis zamani ZORUNLU. Sonuc: formda secildiyse o, yoksa
+    K/Z'nin isaretinden, o da yoksa giris -> cikis yonunden; hicbiri yoksa hata."""
     exit_price = parse_num(form.get("exit_price"))
-    if exit_price is None:
-        return ["Çıkış fiyatı gerekli."]
-    closed_at = parse_dt(form.get("closed_at")) or now_utc()
+    closed_at = parse_dt(form.get("closed_at"))
+    if closed_at is None:
+        return ["Çıkış zamanı gerekli."]
+    if t.entered_at is not None and closed_at < t.entered_at:
+        return ["Çıkış zamanı girişten önce olamaz."]
     t.exit_price = exit_price
     t.exit_reason = "manual"
     t.closed_at = closed_at
@@ -252,11 +280,15 @@ def apply_close(t: PaperTrade, form: dict) -> list[str]:
         t.fees = fees
     explicit = parse_num(form.get("pnl_amount"))
     t.pnl_amount = explicit if explicit is not None else computed_pnl(t, exit_price)
-    if t.pnl_amount is not None and t.notional:
+    # Ice aktarilan kayitta getiri % borsanin rakami; duzenleme onu ezmesin.
+    if t.pnl_amount is not None and t.notional and not t.ext_source:
         t.return_pct = round(t.pnl_amount / float(t.notional) * 100, 2)
-    t.result = result_for(t)
-    if t.entered_at:
-        t.duration_hours = round(max(0.0, (closed_at - t.entered_at).total_seconds() / 3600.0), 2)
+    chosen = (form.get("result") or "").lower()
+    t.result = chosen if chosen in RESULT_LABELS else result_for(t)
+    if t.result is None:
+        return ["Sonuç belirlenemedi — K/Z, çıkış fiyatı ya da durum (Win/Loss/Breakeven) gir."]
+    t.duration_hours = (round(max(0.0, (closed_at - t.entered_at).total_seconds() / 3600.0), 2)
+                        if t.entered_at else None)
     t.status = "closed"
     t.updated_at = now_utc()
     return []
