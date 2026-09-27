@@ -1,7 +1,37 @@
 <!-- Sidebar -->
-<aside class="w-56 bg-dark-800 border-r border-dark-600 flex flex-col min-h-screen shrink-0">
-    <!-- Logo -->
-    <div class="p-4 border-b border-dark-600">
+{# Menu gizle/goster (27.09, kullanici istegi -- telefonda menu ekranin yarisini kapliyordu).
+   Telefonda (< 768 px) menu varsayilan KAPALI, butonla icerigin USTUNE kayar; masaustunde acik
+   baslar, buton gizler ve tercih localStorage'da kalir. Davranis burada, tek dosyada: butun sayfalar
+   bu parcayi ayni `flex` satirinda include ediyor. Stil duz CSS (Tailwind derlemesine bagli degil). #}
+<style>
+    #tr-nav-toggle { position: fixed; top: .6rem; left: .6rem; z-index: 50; width: 2.25rem; height: 2.25rem;
+        display: flex; align-items: center; justify-content: center; border-radius: .5rem;
+        background: #161925; border: 1px solid #272b40; color: #cbd5e1; }
+    #tr-nav-toggle:hover { color: #fff; background: #1e2235; }
+    #tr-nav-backdrop { display: none; position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .55); }
+    @media (max-width: 767px) {
+        #tr-sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 40; overflow-y: auto;
+            transform: translateX(-100%); transition: transform .2s ease; }
+        body.tr-nav-open #tr-sidebar { transform: none; }
+        body.tr-nav-open #tr-nav-backdrop { display: block; }
+        main { padding-top: 2.75rem; }           /* sabit buton icerigin ustune binmesin */
+        main table th, main table td { padding: .4rem .5rem !important; }   /* tablolar telefonda sikisik */
+        /* Ilk sutun (cogu tabloda sembol) yatay kaydirmada sabit kalsin */
+        main table th:first-child, main table td:first-child { position: sticky; left: 0; z-index: 1;
+            background: #161925; box-shadow: 1px 0 0 #272b40; }
+    }
+    @media (min-width: 768px) {
+        body.tr-nav-collapsed #tr-sidebar { display: none; }
+        body.tr-nav-collapsed main { padding-left: 2.5rem; }
+    }
+</style>
+<button id="tr-nav-toggle" type="button" aria-label="Toggle menu" aria-controls="tr-sidebar">
+    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+</button>
+<div id="tr-nav-backdrop"></div>
+<aside id="tr-sidebar" class="w-56 bg-dark-800 border-r border-dark-600 flex flex-col min-h-screen shrink-0">
+    <!-- Logo (solda buton icin yer) -->
+    <div class="p-4 pl-14 border-b border-dark-600">
         <div class="flex items-center gap-2.5">
             <div class="w-8 h-8 rounded-lg bg-accent-blue/20 flex items-center justify-center">
                 <svg class="w-4 h-4 text-accent-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -94,3 +124,19 @@
         </div>
     </div>
 </aside>
+<script>
+(function () {
+    var body = document.body, KEY = "tr-nav-collapsed";
+    var mobile = function () { return window.matchMedia("(max-width: 767px)").matches; };
+    try { if (!mobile() && localStorage.getItem(KEY) === "1") body.classList.add("tr-nav-collapsed"); } catch (e) {}
+    function closeMobile() { body.classList.remove("tr-nav-open"); }
+    document.getElementById("tr-nav-toggle").addEventListener("click", function () {
+        if (mobile()) { body.classList.toggle("tr-nav-open"); return; }
+        var c = body.classList.toggle("tr-nav-collapsed");
+        try { localStorage.setItem(KEY, c ? "1" : "0"); } catch (e) {}
+    });
+    document.getElementById("tr-nav-backdrop").addEventListener("click", closeMobile);
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeMobile(); });
+    document.querySelectorAll("#tr-sidebar a").forEach(function (a) { a.addEventListener("click", closeMobile); });
+})();
+</script>
