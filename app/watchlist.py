@@ -202,17 +202,30 @@ async def _p_shadow(db: AsyncSession) -> Progress:
 
 
 async def _p_retrace(db: AsyncSession) -> Progress:
-    """Cozulmus KAZANAN setup sayisi (karar girdisi; esik 60)."""
-    t = _journal_table()
-    n = await db.scalar(
-        select(func.count()).select_from(t).where(_journal_col("retrace").is_not(None))
-    ) or 0
+    """first_bar'li (26.09+, yanlissiz) cozulmus KAZANAN setup, C2 kapali donmus (esik 30; 27.09'da yeniden tanimlandi)."""
+    t = SetupJournal.__table__
+    base = [
+        t.c.retrace.is_not(None), t.c.first_bar.is_not(None), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
+        or_(t.c.strategy == "1h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+    ]
+    n = await db.scalar(select(func.count()).select_from(t).where(*base)) or 0
     win = await db.scalar(
-        select(func.count()).select_from(t)
-        .where(_journal_col("retrace").like('%"tp_first":true%'))
+        select(func.count()).select_from(t).where(*base, t.c.retrace.like('%"tp_first":true%'))
     ) or 0
-    return Progress(bars=[Bar("çözülmüş kazanan setup", win, 60)],
-                    due=date(2026, 9, 28), note=f"{n} setup ölçekte")
+    return Progress(bars=[Bar("first_bar'lı çözülmüş kazanan", win, 30)],
+                    due=date(2026, 10, 3), note=f"{n} first_bar'lı setup ölçekte")
+
+
+async def _p_market_fee(db: AsyncSession) -> Progress:
+    """first_bar'li (26.09+) cozulmus gercek setup, C2 kapali donmus (market vs limit karar dilimi, esik 100)."""
+    t = SetupJournal.__table__
+    n = await db.scalar(select(func.count()).select_from(t).where(
+        t.c.retrace.is_not(None), t.c.first_bar.is_not(None), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
+        or_(t.c.strategy == "1h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+        or_(t.c.retrace.like('%"tp_first":true%'), t.c.retrace.like('%"tp_first":false%'),
+            t.c.retrace.like('%"done":true%')),
+    )) or 0
+    return Progress(bars=[Bar("first_bar'lı çözülmüş setup", n, 100)], due=date(2026, 10, 3))
 
 
 async def _p_entry_models(db: AsyncSession) -> Progress:
@@ -309,6 +322,22 @@ async def _p_c2_open_fill(db: AsyncSession) -> Progress:
         )
     ) or 0
     return Progress(bars=[Bar("karşılaştırılabilir 4H setup", n, 30)], due=date(2026, 10, 3))
+
+
+async def _p_zone_presence(db: AsyncSession) -> Progress:
+    """Karar dilimi (C2 kapali donmus, skor >= 7, RR >= 2) cozulmus Journal setupu: bolgeli / bolgesiz (esik 30)."""
+    t = SetupJournal.__table__
+    pal = func.json_extract(t.c.parts_at_levels, "$.score")
+    base = [
+        t.c.entries.is_not(None), t.c.outcome.in_(("win", "loss")), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
+        pal >= 7, func.json_extract(t.c.entries, "$.chosen.rr") >= 2,
+        or_(t.c.strategy == "1h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+    ]
+    has_zone = or_(func.json_extract(t.c.entries, "$.bpr_near").is_not(None),
+                   func.json_extract(t.c.entries, "$.ifvg_near").is_not(None))
+    var = await db.scalar(select(func.count()).select_from(t).where(*base, has_zone)) or 0
+    yok = await db.scalar(select(func.count()).select_from(t).where(*base, ~has_zone)) or 0
+    return Progress(bars=[Bar("bölgeli (IFVG/BPR)", var, 30), Bar("bölgesiz", yok, 30)], due=date(2026, 10, 3))
 
 
 async def _p_week_gap(db: AsyncSession) -> Progress:
@@ -611,9 +640,10 @@ ITEMS: list[WatchItem] = [
     ),
     WatchItem(
         key="retrace", status="open", started="18.09", onem=1,
-        title="Geri çekilme derinliği — limit emri nereden dolar",
-        trigger="60 çözülmüş kazanan setup (ilk okuma 28.09.2026)",
-        measure="python scripts/retrace_stat.py",
+        title="Limit giriş seviyesi — CISD/MSS mi IFVG/BPR mi, stop %100/%80/%60",
+        trigger="03.10.2026 ya da 30 first_bar'lı kazanan: bir varyant/stop aynı setuplarda bugünkü girişi "
+                "+0.15 R/setup geçerse mum re-track'i (market girişi ayrı konu)",
+        measure="python tmp/tmp_limit_variant_depth.py · python scripts/retrace_stat.py",
         md="Geri çekilme derinliği — limit emri hangi seviyeden dolar? (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
         progress_fn=_p_retrace,
     ),
@@ -667,6 +697,24 @@ ITEMS: list[WatchItem] = [
         measure="python scripts/deleted_gate_stat.py · /setup-journal (kapı week_gap)",
         md="Hafta boşluğu kapısı — hafta sonunu aşan setup dirilmesin (canlıya alındı 21.09.2026)",
         progress_fn=_p_week_gap,
+    ),
+    WatchItem(
+        key="market_vs_limit_fee", status="open", started="27.09", onem=1,
+        title="Market vs limit giriş — komisyonsuz / komisyonlu",
+        trigger="03.10.2026 ya da 100 first_bar'lı setup: market kolu NET (komisyonlu) limiti +0.15 R/setup ve iki "
+                "zaman yarısında geçerse mum re-track'i (kısmi kâr + BE)",
+        measure="python scripts/market_vs_limit_stat.py [--fee-market 0.10 --fee-limit 0.07]",
+        md="Market vs limit giriş — komisyonsuz / komisyonlu (27.09.2026, ⏰ 03.10)",
+        progress_fn=_p_market_fee,
+    ),
+    WatchItem(
+        key="zone_presence", status="open", started="27.09", onem=1,
+        title="Bölgesiz setup daha çok mu stop oluyor?",
+        trigger="03.10.2026 ya da her grupta 30 çözülmüş (C2 kapalı, skor ≥ 7, RR ≥ 2): bölgesizin SL oranı "
+                "≥ 10 puan ve R/setup ≥ 0.25 kötüyse bölge şartı/cezası önerilir",
+        measure="python scripts/zone_presence_stat.py · setup_journal.entries",
+        md="Bölgesiz setup daha çok mu stop oluyor? (ölçüm 27.09.2026, ⏰ 03.10)",
+        progress_fn=_p_zone_presence,
     ),
     WatchItem(
         key="c2_open_fill_4h", status="open", started="27.09", onem=1,
