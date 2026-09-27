@@ -671,7 +671,13 @@ class BingXMarketData:
                     self._symbols = current
                     self._d1h_symbols = current_d1h
                     self._h1_5m_symbols = current_h1
+                    day_before = self._last_1d_day
                     await self.bootstrap()
+                    # bootstrap _last_1d_day'i bugune ceker: gun de donduyse asagidaki gun
+                    # donumu dali bugun hic calismaz, karne satiri bir gun gecikirdi
+                    # (Cumartesi / Pazartesi 00:00 UTC evren degisimi, 26.09).
+                    if day_before is not None and day_before != self._last_1d_day:
+                        await self._refresh_bias_journal()
                 else:
                     # Gun degistiyse yalnizca 1D veriyi yenile.
                     today = datetime.now(timezone.utc).date()

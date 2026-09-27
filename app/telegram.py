@@ -214,7 +214,7 @@ async def send_signal_active(sig: Signal) -> Optional[int]:
     if not is_configured():
         return None
     text = _format_active_signal(sig)
-    # 1D potansiyel bildirimi gittiyse ACTIVE onun devami olarak gelir.
+    # 1D potansiyel / 4H-1H waiting bildirimi gittiyse ACTIVE onun devami olarak gelir.
     mid = await _send_message(text, reply_to_message_id=getattr(sig, "tg_potential_id", None))
     if mid:
         log.info("Telegram: active signal sent for %s %s (mid=%s)", sig.symbol, sig.direction, mid)
@@ -383,19 +383,64 @@ async def send_signal_potential(
     return mid
 
 
-def _format_potential_cancel(symbol: str, direction: str, reason: str) -> str:
+def _format_signal_waiting(sig: Signal) -> str:
+    """4H/1H: sinyal waiting_entry oldu (limit emri entry'de bekliyor). 27.09 kullanici istegi:
+    dolmadan once de takip edebilsin (BCH 4H #128). 1D'de bu is POTANSIYEL zincirinde."""
+    direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
+    rr = (
+        f"1:{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
+        if sig.planned_rr is not None else "-"
+    )
+    model = _ENTRY_MODEL_LABELS.get(getattr(sig, "entry_model", None) or "cisd", "CISD")
     return (
-        f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>\n"
+        f"⏳ <b>WAITING ENTRY – {sig.symbol} ({_strategy_label(sig)})</b>\n"
+        f"\n"
+        f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
+        f" | <b>R:R:</b> {rr}\n"
+        f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>  ·  {model}\n"
+        f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
+        f"\U00002705 <b>Take Profit:</b> <code>{sig.take_profit}</code>\n"
+        f"\U0001f4c8 <b>1D Bias:</b> {sig.htf_bias or 'NEUTRAL'}  ·  <b>1W:</b> {sig.weekly_bias or 'NEUTRAL'}\n"
+        f"\U0001f552 <b>CISD:</b> {_fmt_tsi(sig.cisd_time)}\n"
+        f"\n"
+        f"ℹ️ Motor limit emri entry'de bekliyor; seviyeler dolana kadar güncellenebilir. Dolarsa "
+        f"ACTIVE, dolmadan silinirse İPTAL mesajı buna yanıt olarak gelir."
+    )
+
+
+async def send_signal_waiting(sig: Signal) -> Optional[int]:
+    """4H/1H waiting_entry bildirimi; message_id doner (ACTIVE / IPTAL buna reply olur)."""
+    if not is_configured():
+        return None
+    mid = await _send_message(_format_signal_waiting(sig))
+    if mid:
+        log.info("Telegram: waiting sent for %s %s %s (mid=%s)",
+                 _strategy_label(sig), sig.symbol, sig.direction, mid)
+    return mid
+
+
+def _format_potential_cancel(symbol: str, direction: str, reason: str, strategy: str | None = None) -> str:
+    if strategy and strategy != "1d":
+        label = {"1h": "1H-5M"}.get(strategy, "4H-15M")
+        title = f"❌ <b>WAITING İPTAL – {symbol} ({label})</b>"
+    else:
+        title = f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>"
+    return (
+        f"{title}\n"
         f"\n"
         f"\U0001f4cd <b>{direction}</b> | <b>Neden:</b> {_POTENTIAL_CANCEL_REASONS.get(reason, reason)}"
     )
 
 
-async def send_potential_cancel(symbol: str, direction: str, reason: str, reply_to: int) -> bool:
-    """Potansiyel setup sinyale donusmeden silindi: ilk mesaja reply."""
+async def send_potential_cancel(
+    symbol: str, direction: str, reason: str, reply_to: int, strategy: str | None = None,
+) -> bool:
+    """Potansiyel (1D) ya da waiting (4H/1H) setup sinyale donusmeden silindi: zincire reply."""
     if not is_configured():
         return False
-    mid = await _send_message(_format_potential_cancel(symbol, direction, reason), reply_to_message_id=reply_to)
+    mid = await _send_message(
+        _format_potential_cancel(symbol, direction, reason, strategy), reply_to_message_id=reply_to,
+    )
     if mid:
         log.info("Telegram: potential cancel sent for %s %s (%s, reply_to=%s)", symbol, direction, reason, reply_to)
     return mid is not None

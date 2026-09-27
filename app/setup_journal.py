@@ -220,6 +220,24 @@ def _entries_init(rec: dict) -> dict | None:
     return out or None
 
 
+_LTF_DELTA = {"4h": timedelta(minutes=15), "1d": timedelta(hours=1), "1h": timedelta(minutes=5)}
+
+
+def _bar_before_levels(rec: dict, bar_ts) -> bool:
+    """Mum (acilis `bar_ts`) seviyeler donmadan ONCE mi? -> takip onu saymaz.
+
+    26.09'a kadar kural `bar_ts < levels_at` idi: levels_at mum acilisindan birkac saniye sonra
+    oldugu icin sinyal aninda OLUSAN ilk mum hep atlaniyordu, oysa motor o mumda dolum yapabiliyor
+    (AVAX 4H #84, XMR #103) ve sinyal sonrasi olagan retest cogu zaman o mumda. `first_bar`
+    satirlarinda yalniz donmadan once KAPANMIS mum atlanir (scanner._bar_closed_before ile ayni).
+    Eski satirlar eski kuralla surer: suren olcumlerin tanimi ortadan degismesin.
+    """
+    la = rec["levels_at"]
+    if rec.get("first_bar"):
+        return bar_ts + _LTF_DELTA.get(rec.get("strategy"), timedelta(minutes=15)) <= la
+    return bar_ts < la
+
+
 def _horizon(rec: dict) -> timedelta:
     return HORIZON.get(rec.get("strategy"), timedelta(hours=48))
 
@@ -400,7 +418,7 @@ def _retrace_active(rec: dict, bar_ts=None) -> bool:
     if not r or r.get("done") or rec.get("levels_at") is None:
         return False
     if bar_ts is not None:
-        if bar_ts < rec["levels_at"]:
+        if _bar_before_levels(rec, bar_ts):
             return False
         if r.get("until") is not None and bar_ts <= r["until"]:
             return False
@@ -474,7 +492,7 @@ def _prefill_active(rec: dict, bar_ts=None) -> bool:
     if not p or p.get("done") or rec.get("levels_at") is None:
         return False
     if bar_ts is not None:
-        if bar_ts < rec["levels_at"]:
+        if _bar_before_levels(rec, bar_ts):
             return False
         if p.get("until") is not None and bar_ts <= p["until"]:
             return False
@@ -530,7 +548,7 @@ def _entries_active(rec: dict, bar_ts=None) -> bool:
     ents = rec.get("entries")
     if not ents or rec.get("levels_at") is None:
         return False
-    if bar_ts is not None and bar_ts < rec["levels_at"]:
+    if bar_ts is not None and _bar_before_levels(rec, bar_ts):
         return False
     state = ents.get(CFVG_STATE)
     if state is not None and not state.get("done") and (
@@ -681,7 +699,7 @@ def _shadow_active(rec: dict, bar_ts=None) -> bool:
     shadow = rec.get("shadow")
     if not shadow or rec.get("levels_at") is None:
         return False
-    if bar_ts is not None and bar_ts < rec["levels_at"]:
+    if bar_ts is not None and _bar_before_levels(rec, bar_ts):
         return False
     return any(
         v["o"] in TRACKING and (bar_ts is None or v.get("until") is None or bar_ts > v["until"])
@@ -752,10 +770,107 @@ def _apply_partial_arm(v: dict, long: bool, e: float, tp: float, hit_e: bool, hi
         v["cur"] = "be"
 
 
+# C2 kapanisinda yeniden dondurma (27.09). Motor bu stratejilerde C2 kapanmadan dolum yapmaz
+# (`STRATEGY_CFG[...]["require_c2_closed"]`), ama Journal setup'i ilk gordugu an -- radar
+# `c2_open` asamasinda da -- seviyeliyordu: SL o an KOSAN purge ucu, TP/skor da kesinlesmemis.
+# 4H satirlarinin ~yarisi boyle donmustu ve olcumlerden disarida kaliyordu (IZLEME.md "4H
+# seviyeleri C2 kapanisinda yeniden dondurulur"). 1D/1H C2 acikken gercekten islem actigi icin
+# oradaki C2-acik seviye sinyalin kendisidir, dokunulmaz. Esitligi tmp/tmp_c2_refreeze_check.py denetler.
+C2_REFREEZE_STRATEGIES = frozenset({"4h"})
+_RESET_KEYS = ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
+               "entry_touched_at", "tracked_until", "shadow", "entries", "entry_cands",
+               "retrace", "prefill", "parts_at_levels", "features_at_levels", "first_bar")
+
+
+def _iso(ts) -> str | None:
+    return ts.isoformat() if isinstance(ts, datetime) else ts
+
+
+def _levels_c2_open(rec: dict) -> bool:
+    """Seviyeler C2 acikken mi donmus? Bellekte dondurma anindaki bayrak, restart sonrasi
+    `parts_at_levels.c2_closed` (4H'te C2 kapaliysa 1, aciksa 0)."""
+    if "_lv_c2_open" in rec:
+        return bool(rec["_lv_c2_open"])
+    return (rec.get("parts_at_levels") or {}).get("c2_closed") == 0
+
+
+def _refreeze_at_c2_close(rec: dict, stage: str, now) -> None:
+    """Eski (C2 acik) seviyeleri `pre_c2`'ye yedekle, seviyeleri/takipleri/best_stage'i sifirla.
+
+    Ardindan `note` ayni cagrida seviyeleri C2 kapanisindaki haliyle dondurur (seviye tasiyorsa;
+    tasimiyorsa -- or. bias kapisi seviyeden once eler -- sonraki seviyeli degerlendirmede).
+    best_stage da C2 kapanisindaki kapidan yeniden baslar: C2 acikken gecilen kapilar kosan
+    seviyelerle olculdu, motor onlari C2 kapaninca yeniden sorar.
+    """
+    outcome = rec.get("outcome")
+    rec["pre_c2"] = {
+        "at": _iso(now),
+        "entry": rec.get("entry"), "sl": rec.get("sl"), "tp": rec.get("tp"), "rr": rec.get("rr"),
+        "levels_at": _iso(rec.get("levels_at")),
+        # Seviyeler hangi asamada dondu? "c2_open" = CISD onayli + butun kapilar gecmis (radar
+        # `c2_open`): "C2 acikken CISD onayliysa dolum olsun mu?" sorusunun temiz karsi-olgusu.
+        # Restart oncesi donmus satirda bilinmez (None).
+        "stage_at_levels": rec.get("_lv_stage"),
+        "best_stage": rec.get("best_stage"), "best_stage_at": _iso(rec.get("best_stage_at")),
+        "outcome": outcome, "outcome_at": _iso(rec.get("outcome_at")),
+        "entry_touched_at": _iso(rec.get("entry_touched_at")),
+        # C2-acik islemin DEVAMI (27.09): C2 icinde dolduysa ("filled") C2 kapanisindan sonra da
+        # ayni seviyelerle TP/SL/ufka kadar izlenir (`_apply_pre_c2`); dolmadiysa C2 penceresinde
+        # dolum yok demektir ("no_c2_fill"). Duz TP/SL, kismi kar/BE yok.
+        "o": "filled" if outcome == "filled" else ("no_c2_fill" if outcome == "pending" else outcome),
+        "until": _iso(rec.get("tracked_until")),
+    }
+    for k in _RESET_KEYS:
+        rec[k] = None
+    rec.pop("_lv_c2_open", None)
+    rec.pop("_lv_stage", None)
+    rec["best_stage"], rec["best_stage_at"] = stage, now
+
+
+def _ts(v):
+    if v is None or isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(v)
+    except Exception:
+        return None
+
+
+def _pre_c2_active(rec: dict, bar_ts=None) -> bool:
+    p = rec.get("pre_c2")
+    if not p or p.get("o") != "filled" or p.get("entry") is None:
+        return False
+    if bar_ts is None:
+        return True
+    until = _ts(p.get("until"))
+    return until is None or bar_ts > until
+
+
+def _apply_pre_c2(rec: dict, bar_ts, high: float, low: float) -> None:
+    """C2 icinde dolmus (karsi-olgu) islemi C2 kapanisindan sonra da izle -- `_apply_bar`in
+    `filled` dali. Ufuk eski seviyelerin donma anindan (ayni cetvel)."""
+    p = rec["pre_c2"]
+    long = rec["direction"] == "LONG"
+    hit_tp = high >= p["tp"] if long else low <= p["tp"]
+    hit_sl = low <= p["sl"] if long else high >= p["sl"]
+    p["until"] = _iso(bar_ts)
+    if hit_tp and hit_sl:
+        p["o"], p["o_at"] = "ambiguous", _iso(bar_ts)
+    elif hit_tp:
+        p["o"], p["o_at"] = "win", _iso(bar_ts)
+    elif hit_sl:
+        p["o"], p["o_at"] = "loss", _iso(bar_ts)
+    else:
+        lv = _ts(p.get("levels_at"))
+        if lv is not None and bar_ts >= lv + HORIZON.get(rec["strategy"], timedelta(hours=48)):
+            p["o"], p["o_at"] = "open", _iso(bar_ts)
+
+
 _COLUMNS = (
     "market_type", "crt_bar_time", "first_seen", "last_seen", "last_stage", "best_stage", "best_stage_at",
     "detail", "score", "htf_bias", "weekly_bias", "c2_closed", "model", "entry", "sl", "tp", "rr", "levels_at",
     "deleted_reason", "deleted_at", "outcome", "outcome_at", "entry_touched_at", "tracked_until",
+    "first_bar",
 )
 
 
@@ -847,10 +962,18 @@ def note(
         ):
             # Ayni anahtar (yon + C2) once elenen aday olarak -- belki farkli C1 ile -- kaydedildi;
             # artik motorun setup'i: izleme onun seviyeleriyle yeniden baslar.
-            for k in ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
-                      "entry_touched_at", "tracked_until", "shadow", "entries", "entry_cands",
-                      "retrace", "prefill", "parts_at_levels", "features_at_levels"):
+            for k in _RESET_KEYS:
                 rec[k] = None
+            rec.pop("_lv_c2_open", None)
+            changed = True
+        if (
+            key[0] in C2_REFREEZE_STRATEGIES
+            and c2_closed is True
+            and rec.get("levels_at") is not None
+            and rec.get("pre_c2") is None
+            and _levels_c2_open(rec)
+        ):
+            _refreeze_at_c2_close(rec, stage, now)
             changed = True
         if market:
             rec["market_type"] = market
@@ -885,6 +1008,9 @@ def note(
                        rr=float(rr) if rr is not None else None, levels_at=now,
                        c1=float(c1) if c1 is not None else None,
                        entry_cands=dict(entries) if entries else None)
+            rec["first_bar"] = True      # 26.09: ilk mum da sayilir (bkz. _bar_before_levels)
+            rec["_lv_c2_open"] = c2_closed is False
+            rec["_lv_stage"] = stage
             rec["shadow"] = _shadow_init(rec)
             rec["entries"] = _entries_init(rec)
             rec["retrace"] = _retrace_init(rec)
@@ -1009,7 +1135,7 @@ def _apply_bar(rec: dict, bar_ts, high: float, low: float) -> None:
 def _is_tracking(rec: dict, bar_ts) -> bool:
     if rec.get("outcome") not in TRACKING or rec.get("levels_at") is None:
         return False
-    if bar_ts < rec["levels_at"]:
+    if _bar_before_levels(rec, bar_ts):
         return False
     return rec.get("tracked_until") is None or bar_ts > rec["tracked_until"]
 
@@ -1037,6 +1163,9 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float) -> No
             if _prefill_active(rec, bar_ts):
                 _apply_prefill(rec, bar_ts, float(high), float(low))
                 touched = True
+            if _pre_c2_active(rec, bar_ts):
+                _apply_pre_c2(rec, bar_ts, float(high), float(low))
+                touched = True
             if touched:
                 _DIRTY.add(key)
     except Exception:
@@ -1048,12 +1177,27 @@ def _merge_row(rec: dict, row: SetupJournal) -> None:
     rec["id"] = row.id
     if row.first_seen and (rec.get("first_seen") is None or row.first_seen < rec["first_seen"]):
         rec["first_seen"] = row.first_seen
-    if stage_rank(row.best_stage) > stage_rank(rec.get("best_stage")):
+    # C2 kapanisinda yeniden dondurma (27.09): bir taraf yeniden dondurulmus, digeri degilse
+    # yeniden dondurulmus taraf dogrudur -- DB'deki C2-acik seviye/best_stage onu ezmesin.
+    row_pre = _parts_load(getattr(row, "pre_c2", None))
+    if rec.get("pre_c2") is not None and row_pre is None:
+        stale_row = True
+    else:
+        stale_row = False
+        if row_pre is not None and rec.get("pre_c2") is None:
+            rec["pre_c2"] = row_pre
+            for k in _RESET_KEYS:
+                rec[k] = None
+            rec.pop("_lv_c2_open", None)
+            rec["best_stage"], rec["best_stage_at"] = row.best_stage, row.best_stage_at
+    if not stale_row and stage_rank(row.best_stage) > stage_rank(rec.get("best_stage")):
         rec["best_stage"], rec["best_stage_at"] = row.best_stage, row.best_stage_at
-    if row.levels_at is not None and (rec.get("levels_at") is None or row.levels_at <= rec["levels_at"]):
+    if not stale_row and row.levels_at is not None and (
+        rec.get("levels_at") is None or row.levels_at <= rec["levels_at"]
+    ):
         for k in ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at", "entry_touched_at",
-                  "tracked_until"):
-            rec[k] = getattr(row, k)
+                  "tracked_until", "first_bar"):
+            rec[k] = getattr(row, k, None)
         rec["shadow"] = _shadow_load(row.shadow) or _shadow_init(rec)
         rec["entries"] = _entries_load(row.entries) or rec.get("entries")
         rec["retrace"] = _retrace_load(row.retrace) or rec.get("retrace")
@@ -1064,6 +1208,8 @@ def _merge_row(rec: dict, row: SetupJournal) -> None:
     for k, raw in (("score_parts", row.score_parts), ("features", row.features),
                    ("parts_at_levels", row.parts_at_levels),
                    ("features_at_levels", row.features_at_levels)):
+        if k.endswith("_at_levels") and stale_row:
+            continue
         if rec.get(k) is None:
             rec[k] = _parts_load(raw)
     if rec.get("outcome") != "signal" and row.outcome == "signal":
@@ -1088,7 +1234,7 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
             key = _key(row.strategy, row.symbol, row.direction, row.purge_time)
             rec = _CACHE.get(key)
             if rec is None:
-                rec = {c: getattr(row, c) for c in _COLUMNS}
+                rec = {c: getattr(row, c, None) for c in _COLUMNS}
                 rec.update(id=row.id, strategy=row.strategy, symbol=row.symbol, direction=row.direction,
                            purge_time=row.purge_time, _flushed_seen=row.last_seen)
                 rec["shadow"] = _shadow_load(row.shadow)
@@ -1099,6 +1245,7 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                 rec["features"] = _parts_load(row.features)
                 rec["parts_at_levels"] = _parts_load(row.parts_at_levels)
                 rec["features_at_levels"] = _parts_load(row.features_at_levels)
+                rec["pre_c2"] = _parts_load(getattr(row, "pre_c2", None))
                 _CACHE[key] = rec
             else:
                 _merge_row(rec, row)
@@ -1110,6 +1257,7 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                     rec.get("outcome") not in TRACKING
                     and not _shadow_active(rec) and not _entries_active(rec)
                     and not _retrace_active(rec) and not _prefill_active(rec)
+                    and not _pre_c2_active(rec)
                 ):
                     continue
                 try:
@@ -1136,6 +1284,9 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                         hit = True
                     if _prefill_active(rec, bar_ts):
                         _apply_prefill(rec, bar_ts, float(bar["high"]), float(bar["low"]))
+                        hit = True
+                    if _pre_c2_active(rec, bar_ts):
+                        _apply_pre_c2(rec, bar_ts, float(bar["high"]), float(bar["low"]))
                         hit = True
                     if hit:
                         _DIRTY.add(key)
@@ -1177,6 +1328,7 @@ async def flush(session) -> None:
             row.features = _json_dump(rec.get("features"))
             row.parts_at_levels = _parts_dump(rec.get("parts_at_levels"))
             row.features_at_levels = _json_dump(rec.get("features_at_levels"))
+            row.pre_c2 = _json_dump(rec.get("pre_c2"))
             rec["_flushed_seen"] = rec.get("last_seen")
         await session.commit()
         for key in keys:
@@ -1201,5 +1353,6 @@ def _prune() -> None:
     cutoff = _now() - KEEP
     for key in [k for k, r in _CACHE.items()
                 if r.get("last_seen") and r["last_seen"] < cutoff and r.get("outcome") not in TRACKING
-                and not _shadow_active(r) and not _prefill_active(r) and k not in _DIRTY]:
+                and not _shadow_active(r) and not _prefill_active(r) and not _pre_c2_active(r)
+                and k not in _DIRTY]:
         _CACHE.pop(key, None)

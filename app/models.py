@@ -183,6 +183,13 @@ class SetupJournal(Base):
     # terimi d'den bagimsiz sabittir; optimumun yerini yalniz kazananlar belirler.
     retrace = Column(String, nullable=True)
     prefill = Column(String, nullable=True)      # dolum oncesi TP yolunda gidilen en uzak nokta
+    # 26.09: True ise butun takipler sinyal aninda olusan ilk LTF mumunu da sayar (motorun
+    # `_bar_closed_before` kurali). Eski satirlarda NULL: o mum atlaniyordu, tanimlari degismesin.
+    first_bar = Column(Boolean, nullable=True)
+    # 27.09: 4H'te seviyeler C2 acikken dondurulduysa (SL kosan purge ucu) C2 kapanisindaki ilk
+    # degerlendirmede YENIDEN dondurulur; eski seviyeler + eski sonuc/best_stage burada (JSON).
+    # Dolu satir = seviyeler ve takipler C2 kapanisindan; NULL = ilk dondurma (eski kural).
+    pre_c2 = Column(String, nullable=True)
 
     # Golge izleme (14.09, dar stop sorusu; 4H/1D/1H): ayni setup farkli SL kesirleriyle izlenir.
     # JSON: {"1": {...}, "0.75": {...}, "0.5": {...}} -> sl, rr, o (outcome), e (entry), at, until.

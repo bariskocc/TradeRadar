@@ -281,6 +281,36 @@ async def _p_1d_c2_open(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("C2 açıkken dolan kapalı 1D işlem", n, 10)], due=date(2026, 10, 3))
 
 
+async def _p_nearest_zone(db: AsyncSession) -> Progress:
+    """Restart sonrasi (28.09+) bolge girisli (ifvg/bpr) kapali sinyal (karar esigi 10)."""
+    n = await _closed_count(
+        db, Signal.entry_model.in_(("ifvg", "bpr")), Signal.created_at >= datetime(2026, 9, 28),
+    )
+    return Progress(bars=[Bar("bölge girişli kapalı sinyal (28.09+)", n, 10)], due=date(2026, 10, 3))
+
+
+async def _p_c2_refreeze(db: AsyncSession) -> Progress:
+    """C2 kapanisinda yeniden dondurulan 4H satiri (restart sonrasi dolmaya baslar)."""
+    t = SetupJournal.__table__
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(t.c.strategy == "4h", t.c.pre_c2.is_not(None))
+    ) or 0
+    return Progress(bars=[Bar("yeniden dondurulan 4H satırı", n, 50)], due=date(2026, 10, 3))
+
+
+async def _p_c2_open_fill(db: AsyncSession) -> Progress:
+    """4H: C2 acikken CISD onayli + kapilari gecmis donmus, C2-acik kolu sonuclanmis satir (esik 30)."""
+    t = SetupJournal.__table__
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(
+            t.c.strategy == "4h", t.c.pre_c2.is_not(None),
+            func.json_extract(t.c.pre_c2, "$.stage_at_levels") == "c2_open",
+            func.json_extract(t.c.pre_c2, "$.o").in_(("win", "loss", "open", "no_c2_fill")),
+        )
+    ) or 0
+    return Progress(bars=[Bar("karşılaştırılabilir 4H setup", n, 30)], due=date(2026, 10, 3))
+
+
 async def _p_week_gap(db: AsyncSession) -> Progress:
     """Hafta boslugu kapisinda elenen setup sayisi (karar esigi 10)."""
     t = _journal_table()
@@ -637,6 +667,33 @@ ITEMS: list[WatchItem] = [
         measure="python scripts/deleted_gate_stat.py · /setup-journal (kapı week_gap)",
         md="Hafta boşluğu kapısı — hafta sonunu aşan setup dirilmesin (canlıya alındı 21.09.2026)",
         progress_fn=_p_week_gap,
+    ),
+    WatchItem(
+        key="c2_open_fill_4h", status="open", started="27.09", onem=1,
+        title="4H'te C2 açıkken dolum olsun mu?",
+        trigger="03.10.2026 ya da 30 çift: C2 açıkken CISD onaylı dolum (A) bugünkü kuralı (B) +0.15 R/setup "
+                "geçerse 4H require_c2_closed=False önerilir",
+        measure="python scripts/c2_open_fill_stat.py · setup_journal.pre_c2",
+        md="4H'te C2 açıkken dolum olsun mu? (27.09.2026, restart bekliyor)",
+        progress_fn=_p_c2_open_fill,
+    ),
+    WatchItem(
+        key="c2_refreeze", status="open", started="27.09", onem=2,
+        title="4H seviyeleri C2 kapanışında yeniden dondurulur",
+        trigger="03.10.2026 ya da 50 yeniden dondurulmuş 4H satırı: kapıları geçmiş kullanılabilir küme "
+                "büyüdü mü, yeni 4H satırlarında C2 açık seviyeyle kalan 'geçmiş' satır var mı",
+        measure="python tmp/tmp_gate_passed_depth.py · setup_journal.pre_c2",
+        md="4H seviyeleri C2 kapanışında yeniden dondurulur (27.09.2026, restart bekliyor)",
+        progress_fn=_p_c2_refreeze,
+    ),
+    WatchItem(
+        key="nearest_zone", status="open", started="27.09", onem=2,
+        title="Birden çok IFVG'de fiyata en yakın bölge",
+        trigger="03.10.2026 ya da restart sonrası 10 kapalı bölge girişli sinyal: dolum oranı arttı ve R/işlem "
+                "0.3R'den fazla düşmediyse kural kalır",
+        measure="signals (entry_model ifvg/bpr, created_at ≥ 28.09) vs 21–27.09",
+        md="Birden çok IFVG'de fiyata en yakın bölge (27.09.2026, restart bekliyor)",
+        progress_fn=_p_nearest_zone,
     ),
     WatchItem(
         key="rules_0925", status="open", started="25.09", onem=1,

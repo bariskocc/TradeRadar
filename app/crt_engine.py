@@ -1381,13 +1381,34 @@ def detect_ltf_ifvg(
     crt_bar_time=None,
     c2_hours: float | None = None,
 ) -> Optional[IFVGZone]:
+    """En son olusan acik IFVG (varlik / skor kalemi icin). Adaylarin hepsi:
+    `detect_ltf_ifvgs`. Entry secimi bu fonksiyonu KULLANMAZ -- 27.09'dan beri
+    `scanner._maybe_ifvg_entry` fiyata en yakin adayi secer."""
+    zones = detect_ltf_ifvgs(
+        df_ltf, direction, purge_time,
+        crt_low=crt_low, crt_high=crt_high,
+        crt_bar_time=crt_bar_time, c2_hours=c2_hours,
+    )
+    return zones[-1] if zones else None
+
+
+def detect_ltf_ifvgs(
+    df_ltf: Optional[pd.DataFrame],
+    direction: str,
+    purge_time,
+    *,
+    crt_low: float | None = None,
+    crt_high: float | None = None,
+    crt_bar_time=None,
+    c2_hours: float | None = None,
+) -> list[IFVGZone]:
     """CRT C1 icindeki, invert edilmis, henuz mitigate edilmemis LTF IFVG.
 
     LONG: bear FVG invert (close zone ustu) + bolge acik.
     SHORT: bull FVG invert (close zone alti) + bolge acik.
     FVG, CRT mumunun acilisindan itibaren aranir. Mid'in C1 high-low icinde
     olmasi sarti 25.09'da kalkti (REQUIRE_IFVG_MID_IN_C1): purge fitilindeki FVG
-    de sayilir. Birden fazla aday varsa en son (guncel) acik bolge secilir.
+    de sayilir. Butun acik adaylar FVG olusum sirasiyla doner (en son olusan sonda).
     Inversion purge sonrasi. C2 HTF mumu icindeki LTF ekstrem mitigasyon
     sayilmaz (purge fitili IFVG'yi iptal etmez).
 
@@ -1395,12 +1416,12 @@ def detect_ltf_ifvg(
     MIN_IFVG_GAP_RANGE_FRAC katindan kucukse aday elenir (gurultu filtresi).
     """
     if df_ltf is None or df_ltf.empty or purge_time is None:
-        return None
+        return []
     if crt_low is None or crt_high is None:
-        return None
+        return []
     work = _drop_forming_bar(df_ltf.sort_index())
     if work is None or len(work) < 3:
-        return None
+        return []
     if work.index.tz is None:
         work = work.copy()
         work.index = work.index.tz_localize("UTC")
@@ -1421,7 +1442,7 @@ def detect_ltf_ifvg(
     if crt_ts is not None:
         # Sol mum CRT baslangicindan once olmasin (3'lu FVG).
         start_i = max(1, int(work.index.searchsorted(crt_ts, side="left")) + 1)
-    picked: Optional[IFVGZone] = None
+    picked: list[IFVGZone] = []
     for i in range(start_i, n - 1):
         a = work.iloc[i - 1]
         b = work.iloc[i + 1]
@@ -1472,14 +1493,14 @@ def detect_ltf_ifvg(
         if mitigated:
             continue
         inv_ts = work.index[inverted_k]
-        picked = IFVGZone(
+        picked.append(IFVGZone(
             low=round(z_lo, 8),
             high=round(z_hi, 8),
             mid=round((z_lo + z_hi) / 2.0, 8),
             inverted_time=inv_ts.to_pydatetime(),
             kind=kind,
             gap_frac=round((z_hi - z_lo) / _avg_range, 4) if _avg_range > 0 else None,
-        )
+        ))
     return picked
 
 

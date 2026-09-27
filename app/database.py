@@ -56,6 +56,8 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("entries", "ALTER TABLE setup_journal ADD COLUMN entries VARCHAR"),
         ("retrace", "ALTER TABLE setup_journal ADD COLUMN retrace VARCHAR"),
         ("prefill", "ALTER TABLE setup_journal ADD COLUMN prefill VARCHAR"),
+        ("first_bar", "ALTER TABLE setup_journal ADD COLUMN first_bar BOOLEAN"),
+        ("pre_c2", "ALTER TABLE setup_journal ADD COLUMN pre_c2 VARCHAR"),
     ],
 }
 

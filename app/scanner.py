@@ -44,6 +44,7 @@ from app.crt_engine import (
     detect_displacement_fvg,
     detect_ltf_bpr,
     detect_ltf_ifvg,
+    detect_ltf_ifvgs,
 )
 from app.database import async_session
 from app.event_log import record_event
@@ -65,7 +66,7 @@ from app import setup_journal as journal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_partial, send_signal_result
-from app.telegram import send_potential_cancel, send_signal_potential
+from app.telegram import send_potential_cancel, send_signal_potential, send_signal_waiting
 from app.crt_engine import build_rejected_setup
 
 log = logging.getLogger(__name__)
@@ -605,6 +606,7 @@ def _note_deleted(s: Signal, reason: str) -> None:
             _POTENTIAL_OUTBOX.append({
                 "symbol": s.symbol, "direction": s.direction,
                 "reason": reason, "reply_to": int(mid),
+                "strategy": getattr(s, "timeframe", None),
             })
     except Exception:
         log.exception("potential cancel queue failed for %s", getattr(s, "symbol", "?"))
@@ -620,7 +622,9 @@ async def _flush_potential_outbox(session: AsyncSession | None = None) -> None:
     sent: list[int] = []
     for it in items:
         try:
-            await send_potential_cancel(it["symbol"], it["direction"], it["reason"], it["reply_to"])
+            await send_potential_cancel(
+                it["symbol"], it["direction"], it["reason"], it["reply_to"], it.get("strategy"),
+            )
             sent.append(int(it["reply_to"]))
         except Exception:
             log.warning("telegram potential cancel failed for %s", it["symbol"])
@@ -1315,6 +1319,76 @@ def _fill_within_backfill_window(
     return len(after) <= max_bars
 
 
+def _last_closed_ltf_ts(df_ltf: pd.DataFrame | None) -> datetime | None:
+    """Store'daki son KAPANMIS LTF mumunun acilis zamani (forming son bar haric)."""
+    work = _closed_ltf_bars(df_ltf) if df_ltf is not None and not df_ltf.empty else None
+    if work is None or work.empty:
+        return None
+    ts = work.index[-1]
+    return _as_utc(ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts)
+
+
+def _resting_fill_ts(sig: Signal, df_ltf: pd.DataFrame | None, cfg: dict) -> datetime | None:
+    """Bekleyen (waiting) sinyalin DINLENEN emri kayittan sonra kapanan bir mumda doldu mu?
+
+    `manage_symbol_on_price`'in waiting dalinin kurallariyla birebir: kayittan once
+    kapanmis mum ve CISD onay mumu (ve oncesi) sayilmaz; SL once gorulurse emir dolmadan
+    olmustur, TP once gorulurse firsat kacmistir (ikisinde de emir yok, None);
+    require_c2_closed'da C2 kapanisindan once acilan mum dolum sayilmaz. Dolum mumunun
+    acilis zamanini doner.
+    """
+    if sig.entry_price is None or sig.take_profit is None or sig.cisd_time is None:
+        return None
+    if df_ltf is None or df_ltf.empty:
+        return None
+    work = _slice_ltf_after(df_ltf, sig.cisd_time, closed_only=True)
+    if work.empty:
+        return None
+    ltf = cfg["ltf"]
+    entry = float(sig.entry_price)
+    tp = float(sig.take_profit)
+    sl_raw = sig.initial_stop_loss if sig.initial_stop_loss is not None else sig.stop_loss
+    sl = float(sl_raw) if sl_raw is not None else None
+    inv = float(sig.invalidation_level) if sig.invalidation_level is not None else None
+    c2_end = None
+    if cfg.get("require_c2_closed"):
+        c2_open = _as_utc(sig.purge_time)
+        if c2_open is not None:
+            c2_end = c2_open + timedelta(hours=float(cfg["c2_hours"]))
+    for ts, row in work.iterrows():
+        bar_ts = _as_utc(ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts)
+        if _bar_closed_before(bar_ts, sig.created_at, ltf):
+            continue
+        high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
+        if sl is not None and _hits_sl(sig.direction, high, low, sl):
+            return None
+        ev = _waiting_event(
+            sig.direction, high, low, entry, tp,
+            invalidation_level=inv, close=close, bar_closed=True,
+        )
+        if ev in ("invalidated", "missed"):
+            return None
+        if ev != "fill":
+            continue
+        if cfg.get("require_c2_closed") and (
+            not sig.c2_closed or (c2_end is not None and bar_ts < c2_end)
+        ):
+            continue
+        return bar_ts
+    return None
+
+
+def _keep_resting_entry(cisd, sig: Signal):
+    """Tespitin yeni girisi yerine bekleyen sinyalin dinlenen emrini koru (yerinde yazar)."""
+    cisd.entry_price = float(sig.entry_price)
+    cisd.entry_model = sig.entry_model or "cisd"
+    if cisd.entry_model in ("ifvg", "bpr"):
+        # Emrin geldigi bolge: onu mitigate eden mumla yapilan tespitte artik yok.
+        cisd.ifvg_low, cisd.ifvg_high = sig.ifvg_low, sig.ifvg_high
+        cisd.bpr_low, cisd.bpr_high = sig.bpr_low, sig.bpr_high
+    return cisd
+
+
 async def _replay_after_fill(
     session: AsyncSession,
     display_symbol: str,
@@ -1391,6 +1465,30 @@ def _c2_hours_for_setup(setup: CRTSetup) -> float:
     return 4.0
 
 
+def _zone_candidates(setup: CRTSetup, df_ltf: pd.DataFrame | None, c2_hours: float):
+    """Acik IFVG'ler ve BPR'leri, FIYATA EN YAKIN once (27.09).
+
+    Donus: (zones, bprs, pairs) -- zones: IFVGZone listesi; bprs: (bpr, kaynak IFVG)
+    listesi; pairs: (IFVG, BPR|None). LONG'da giris yuksekten asagi, SHORT'ta
+    dusukten yukari siralanir.
+    """
+    zones = detect_ltf_ifvgs(
+        df_ltf, setup.direction, setup.purge_time,
+        crt_low=setup.key_level_low,
+        crt_high=setup.key_level_high,
+        crt_bar_time=setup.crt_bar_time,
+        c2_hours=c2_hours,
+    )
+    long = setup.direction == "LONG"
+    zones.sort(key=lambda z: z.entry_for(setup.direction), reverse=long)
+    pairs = [(z, detect_ltf_bpr(df_ltf, setup.direction, z)) for z in zones]
+    bprs = sorted(
+        [(b, z) for z, b in pairs if b is not None],
+        key=lambda bz: bz[0].entry_for(setup.direction), reverse=long,
+    )
+    return zones, bprs, pairs
+
+
 def _maybe_ifvg_entry(
     cisd,
     setup: CRTSetup,
@@ -1414,8 +1512,19 @@ def _maybe_ifvg_entry(
     icin entry daha derin, RR daha iyi, dolum olasiligi bir miktar dusuktur --
     bu yuzden once BPR denenir, olmazsa IFVG, o da olmazsa CISD/MSS kalir.
 
+    Birden cok acik IFVG (27.09, kullanici karari): eskiden EN SON olusan bolge
+    seciliyordu, bu da cogu zaman fiyata en UZAK olani demekti ve fiyat oraya
+    gelmiyordu (ETH 1D 24.09: 2672.90-2678.36 yerine 2648.43-2654.30). Artik
+    her aile icinde FIYATA EN YAKIN aday (LONG'da en yuksek, SHORT'ta en dusuk
+    giris) secilir. Sira degismedi: once BPR adaylari, sonra IFVG, sonra CISD/MSS.
+    Yakin aday min RR'nin altinda kaliyorsa, esigi gecen bir sonraki (daha uzak)
+    aday denenir -- yakin bolge yuzunden setup `low_rr` ile olmesin. Hicbiri
+    esigi gecmiyorsa eski koruma: CISD'den kotu olmayan en oncelikli aday.
+    Tek bolgeli setupta davranis aynen eskisi.
+
     Zone bilgisi (ifvg_low/high, bpr_low/high) entry olarak kullanilmasa bile cisd
-    uzerine yazilir; UI'daki IFVG / BPR rozeti bunu gosterir.
+    uzerine yazilir; UI'daki IFVG / BPR rozeti bunu gosterir. Yazilan bolge
+    kullanilan bolgedir; bolge kullanilmadiysa fiyata en yakin aday.
     """
     planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     hours = c2_hours if c2_hours is not None else _c2_hours_for_setup(setup)
@@ -1423,28 +1532,29 @@ def _maybe_ifvg_entry(
     # olarak kullan" kararini etkiler. Eskiden erken return yuzunden
     # detect_ltf_ifvg hic cagrilmiyordu ve UI'daki IFVG sutunu "var mi" yerine
     # "var VE kullanilabilir" gosteriyordu (C2 formasyondayken hep "-").
-    zone = detect_ltf_ifvg(
-        df_ltf, setup.direction, setup.purge_time,
-        crt_low=setup.key_level_low,
-        crt_high=setup.key_level_high,
-        crt_bar_time=setup.crt_bar_time,
-        c2_hours=hours,
-    )
-    bpr = detect_ltf_bpr(df_ltf, setup.direction, zone)
-    if zone is not None:
+    zones, bprs, pairs = _zone_candidates(setup, df_ltf, hours)
+    bpr_of = {id(z): b for z, b in pairs}
+
+    def _show(zone) -> None:
+        # Bolge ve kendi BPR'si birlikte yazilir (rozet baska bolgenin BPR'sini gostermesin).
+        if zone is None:
+            return
         cisd.ifvg_low = zone.low
         cisd.ifvg_high = zone.high
-    if bpr is not None:
-        cisd.bpr_low = bpr.low
-        cisd.bpr_high = bpr.high
-        cisd.bleg_low = bpr.leg_low      # yalniz olcum (Journal `entries` -> bfvg_*)
-        cisd.bleg_high = bpr.leg_high
+        bpr = bpr_of.get(id(zone))
+        cisd.bpr_low = bpr.low if bpr is not None else None
+        cisd.bpr_high = bpr.high if bpr is not None else None
+        cisd.bleg_low = bpr.leg_low if bpr is not None else None   # yalniz olcum (Journal -> bfvg_*)
+        cisd.bleg_high = bpr.leg_high if bpr is not None else None
+
+    # Varsayilan gosterim: en yakin IFVG (+ kendi BPR'si).
+    _show(zones[0] if zones else None)
     if not allow_ifvg:
         return cisd, planned
-    # Guclu olan once: BPR -> IFVG. Ikisi de ayni RR korumasina tabi.
-    for cand, model in ((bpr, "bpr"), (zone, "ifvg")):
-        if cand is None:
-            continue
+    # Guclu olan once: BPR -> IFVG. Hepsi ayni RR korumasina tabi.
+    cands = [(b, "bpr", z) for b, z in bprs] + [(z, "ifvg", z) for z in zones]
+    ok: list = []
+    for cand, model, zone in cands:
         cand_entry = cand.entry_for(setup.direction)
         if not _entry_between_stops(
             setup.direction, cand_entry, float(cisd.stop_loss), float(cisd.take_profit),
@@ -1453,10 +1563,17 @@ def _maybe_ifvg_entry(
         cand_rr = _calc_planned_rr(cand_entry, cisd.stop_loss, cisd.take_profit)
         if cand_rr is None or (planned is not None and cand_rr < planned):
             continue  # bolge girisi RR'yi kotulestiriyor -> bir sonraki adaya / CISD'ye kal
-        cisd.entry_price = cand_entry
-        cisd.entry_model = model
-        return cisd, cand_rr
-    return cisd, planned
+        ok.append((cand, model, zone, cand_entry, cand_rr))
+    if not ok:
+        return cisd, planned
+    min_rr = _min_rr_for_market(getattr(setup, "market_type", None))
+    cand, model, zone, cand_entry, cand_rr = next(
+        (c for c in ok if c[4] >= min_rr), ok[0],
+    )
+    _show(zone)
+    cisd.entry_price = cand_entry
+    cisd.entry_model = model
+    return cisd, cand_rr
 
 
 def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
@@ -1625,14 +1742,9 @@ def _preview_trade_levels(
     """Radar icin setup sonrasi RR / entry / IFVG. Seviye yoksa kismi dict."""
     if df_ltf is None or df_ltf.empty:
         return {}
-    zone = detect_ltf_ifvg(
-        df_ltf, setup.direction, setup.purge_time,
-        crt_low=setup.key_level_low,
-        crt_high=setup.key_level_high,
-        crt_bar_time=setup.crt_bar_time,
-        c2_hours=c2_hours,
-    )
-    bpr_zone = detect_ltf_bpr(df_ltf, setup.direction, zone)
+    zones, bprs, _pairs = _zone_candidates(setup, df_ltf, c2_hours)
+    zone = zones[0] if zones else None
+    bpr_zone = bprs[0][0] if bprs else None
     allow_ifvg = _ifvg_allowed(setup, cfg)
     # `ifvg` / `bpr` = bolge VAR MI (varlik). Kullanilip kullanilmadigi ayri bir soru;
     # onu `model` cevaplar. Eskiden allow_ifvg ile AND'lendigi icin C2
@@ -1654,7 +1766,7 @@ def _preview_trade_levels(
             "bpr": bpr,
             "model": getattr(cisd, "entry_model", None) or "cisd",
             "features": _level_features(cisd.entry_price, cisd.stop_loss, df_ltf),
-            "entries": _entry_candidates(setup, cisd, df_ltf, zone=zone, bpr=bpr_zone) or None,
+            "entries": _entry_candidates(setup, cisd, df_ltf) or None,  # bolgeler cisd'de
             "cisd_confirmed": bool(getattr(cisd, "confirmed", False)),
             "cisd_time": getattr(cisd, "cisd_time", None),
         }
@@ -1663,10 +1775,9 @@ def _preview_trade_levels(
         tp = float(
             setup.key_level_high if setup.direction == "LONG" else setup.key_level_low
         )
-        # CISD onayi yokken de guclu olan once: BPR kesisimi, yoksa IFVG.
-        for cand, model in ((bpr_zone, "bpr"), (zone, "ifvg")):
-            if cand is None:
-                continue
+        # CISD onayi yokken de guclu olan once: BPR kesisimi, yoksa IFVG; her ailede
+        # fiyata en yakin aday (27.09).
+        for cand, model in [(b, "bpr") for b, _z in bprs] + [(z, "ifvg") for z in zones]:
             z_entry = cand.entry_for(setup.direction)
             if not _entry_between_stops(setup.direction, z_entry, sl, tp):
                 continue
@@ -2250,6 +2361,29 @@ async def _detect_and_create_waiting_locked(
         allow_ifvg=_ifvg_allowed(setup, cfg),
     )
     planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
+    # Dinlenen emir (26.09): bekleyen sinyalin girisine kayittan sonra kapanan bir mum
+    # dokunduysa limit emri o mumda doldu. Tespit ayni mumla seviyeyi yeniden hesaplayinca
+    # emir kayiyordu: bolgeyi boydan boya gecen mum bolgeyi mitigate sayip siliyor, giris
+    # CISD'ye dusuyor ve manage dolumu YENI seviyeden yapiyordu (FIL 4H #105: BPR 0.9889
+    # -> CISD 0.9828; 09-26.09 loglarinda 8 vaka). Ters yonde, dokunulan mumda beliren
+    # bolge girisi derinlestirip dolumu kaciriyordu. Emir yerinde kalir; SL/TP ve
+    # asagidaki kapilar her zamanki gibi.
+    if (
+        existing_pending is not None
+        and existing_pending.status == WAITING_STATUS
+        and existing_pending.direction == setup.direction
+        and existing_pending.entry_price is not None
+        and float(existing_pending.entry_price) != float(cisd.entry_price)
+        and _resting_fill_ts(existing_pending, df_ltf, cfg) is not None
+    ):
+        log.info(
+            "RESTING ENTRY: %s %s emir %s (%s) yerinde; tespit %s (%s) onerdi.",
+            setup.symbol, setup.direction,
+            existing_pending.entry_price, existing_pending.entry_model or "cisd",
+            cisd.entry_price, getattr(cisd, "entry_model", "cisd"),
+        )
+        cisd = _keep_resting_entry(cisd, existing_pending)
+        planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     if planned_rr is None or planned_rr < min_rr:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "low_rr")
@@ -2461,6 +2595,17 @@ async def _detect_and_create_waiting_locked(
     )
     if not can_wait:
         backfill_ts = None
+    # Bekleyen (waiting) kaydin girisine SON KAPANAN mum dokunduysa bu canli dolumdur;
+    # tespit manage'den once calistigi icin backfill dalindan gecer. "Gecmis retest"
+    # (BACKFILL FILL) yalniz daha eski mum ya da yeni kayit icin: eskiden hepsi oyle
+    # yaziliyor, Engine Report / Dashboard BACKFILL sayisi sisiyordu (26.09: 09-26.09
+    # loglarindaki 32 BACKFILL FILL satirinin 6'si gercek gecmis dolum).
+    live_fill = (
+        backfill_ts is not None
+        and existing_pending is not None
+        and existing_pending.status == WAITING_STATUS
+        and backfill_ts == _last_closed_ltf_ts(df_ltf)
+    )
     # Gecmis retest dogrulandiysa sinyal dogrudan active dogar (entry_filled_time
     # o retest mumudur); aksi halde normal waiting/pending.
     if backfill_ts is not None:
@@ -2501,7 +2646,8 @@ async def _detect_and_create_waiting_locked(
             signal.entry_filled_time = backfill_ts
             await record_event(
                 "filled",
-                f"Entry {cisd.entry_price} gecmis retest ile dolduruldu ({backfill_ts})",
+                f"Entry {cisd.entry_price} dolduruldu (kapanis retest)" if live_fill
+                else f"Entry {cisd.entry_price} gecmis retest ile dolduruldu ({backfill_ts})",
                 symbol=setup.symbol, direction=setup.direction,
                 market_type=setup.market_type, level="success", session=session,
             )
@@ -2553,10 +2699,16 @@ async def _detect_and_create_waiting_locked(
     )
 
     if backfill_ts is not None:
-        log.info(
-            "BACKFILL FILL: %s %s entry %s @ %s (gecmis retest, ihlal=%s)",
-            setup.symbol, setup.direction, cisd.entry_price, backfill_ts, breach_ts,
-        )
+        if live_fill:
+            log.info(
+                "FILLED: %s %s entry %s (closed bar, tespit)",
+                setup.symbol, setup.direction, cisd.entry_price,
+            )
+        else:
+            log.info(
+                "BACKFILL FILL: %s %s entry %s @ %s (gecmis retest, ihlal=%s)",
+                setup.symbol, setup.direction, cisd.entry_price, backfill_ts, breach_ts,
+            )
         if tg_configured():
             try:
                 mid = await send_signal_active(signal)
@@ -2572,8 +2724,31 @@ async def _detect_and_create_waiting_locked(
     # bildirimi (C2 acik: pending, C2 kapali: waiting). Motor davranisini degistirmez.
     if strategy == STRATEGY_1D and status != "active" and cisd.confirmed:
         await _notify_potential_1d(session, signal, cfg)
+    # 4H/1H: waiting_entry olan sinyal Telegram'a bir kez bildirilir (27.09, kullanici istegi --
+    # BCH 4H #128 gibi dolmayan sinyalleri de takip edebilsin). ACTIVE ve IPTAL, 1D'deki gibi
+    # `tg_potential_id` uzerinden bu mesaja reply olur. 1D'de ayni isi POTANSIYEL zinciri yapiyor.
+    elif strategy != STRATEGY_1D and signal.status == WAITING_STATUS:
+        await _notify_waiting(session, signal)
 
     return signal
+
+
+async def _notify_waiting(session: AsyncSession, sig: Signal) -> None:
+    """4H/1H waiting_entry bildirimi -- sinyal basina bir kez (`tg_potential_id` / `_state`)."""
+    try:
+        if sig.tg_potential_id or getattr(sig, "tg_potential_state", None) == "waiting":
+            return
+        if not tg_configured():
+            return
+        mid = await send_signal_waiting(sig)
+        if not mid:
+            return
+        sig.tg_potential_id = mid
+        sig.tg_potential_state = "waiting"
+        await session.commit()
+        log.info("WAITING NOTICE: %s %s %s (mid=%s)", sig.timeframe, sig.symbol, sig.direction, mid)
+    except Exception:
+        log.exception("waiting notify failed for %s", getattr(sig, "symbol", "?"))
 
 
 # ──────────────────── Fiyat guncellemesi yonetimi ────────────────────
