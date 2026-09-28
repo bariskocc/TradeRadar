@@ -320,6 +320,19 @@ async def _p_1d_c2_open(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("C2 açıkken dolan kapalı 1D işlem", n, 10)], due=date(2026, 10, 3), either=True)
 
 
+async def _p_purge_threshold(db: AsyncSession) -> Progress:
+    """Restart sonrasi esik alti supurmeli (features.sweep_pct < 0.05), sonuclanmis Journal satiri (esik 30)."""
+    t = SetupJournal.__table__
+    n = await db.scalar(
+        select(func.count()).select_from(t).where(
+            t.c.first_seen >= datetime(2026, 9, 28),
+            func.json_extract(t.c.features, "$.sweep_pct") < 0.05,
+            t.c.outcome.in_(("win", "loss")),
+        )
+    ) or 0
+    return Progress(bars=[Bar("eşik altı sonuçlanmış setup", n, 30)], due=date(2026, 10, 3), either=True)
+
+
 async def _p_nearest_zone(db: AsyncSession) -> Progress:
     """Restart sonrasi (28.09+) bolge girisli (ifvg/bpr) kapali sinyal (karar esigi 10)."""
     n = await _closed_count(
@@ -605,6 +618,18 @@ async def _p_score_parts_1d(db: AsyncSession) -> Progress:
                     note=f"1D: {n} sonuçlanmış setup · C2/renk kalemleri için 25.09 sonrası {n25}")
 
 
+async def _p_w1_live(db: AsyncSession) -> Progress:
+    """1W-4H (28.09): Journal'da gorulen 1W setup + acilan/kapanan 1W sinyal (tarihli madde: sayilar note'ta)."""
+    t = _journal_table()
+    seen = await db.scalar(select(func.count()).select_from(t).where(
+        t.c.strategy == "1w", t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)))) or 0
+    sigs = await db.scalar(select(func.count()).select_from(Signal).where(Signal.timeframe == "1w")) or 0
+    closed = await _closed_count(db, Signal.timeframe == "1w")
+    wk = await _closed_count(db, Signal.timeframe == "1w", Signal.exit_reason == "week_close")
+    return Progress(due=date(2026, 10, 3),
+                    note=f"{seen} 1W setup görüldü · {sigs} sinyal · {closed} kapandı ({wk} Cuma kapanışıyla)")
+
+
 async def _p_htf_bonus(db: AsyncSession) -> Progress:
     """W40 (28.09+), skor bandi 0-6, sonuclanmis: TF basina htf +2 / htf 0 kovalari (karar haftasi, esik 50/50).
 
@@ -613,7 +638,8 @@ async def _p_htf_bonus(db: AsyncSession) -> Progress:
     htf = func.json_extract(t.c.parts_at_levels, "$.htf")
     sc = func.json_extract(t.c.parts_at_levels, "$.score")
     parts = []
-    for tf in ("4h", "1d", "1h"):
+    # 1H 28.09'da kapandi (W40'ta veri gelmez); 1W'nin `htf` kalemi aylik bias -- ayri soru.
+    for tf in ("4h", "1d"):
         base = [t.c.strategy == tf, t.c.parts_at_levels.is_not(None), t.c.outcome.in_(("win", "loss")),
                 t.c.first_seen >= datetime(2026, 9, 28), sc <= 6]
         n2 = await db.scalar(select(func.count()).select_from(t).where(*base, htf == 2)) or 0
@@ -790,10 +816,19 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c2_refreeze,
     ),
     WatchItem(
+        key="purge_threshold", status="open", started="28.09", onem=1,
+        title="Purge eşiği kaldırıldı (%0.05 → 0)",
+        trigger="03.10.2026 ya da restart sonrası 30 sonuçlanmış eşik altı (sweep_pct < 0.05) setup: "
+                "eşik altı ≥ 0.3 R/setup kötüyse eşik geri gelir (C1 aralığına oranlı)",
+        measure="setup_journal.features.sweep_pct · outcome (düz TP/SL)",
+        md="Purge eşiği kaldırıldı (28.09.2026, restart bekliyor)",
+        progress_fn=_p_purge_threshold,
+    ),
+    WatchItem(
         key="nearest_zone", status="open", started="27.09", onem=2,
-        title="Birden çok IFVG'de fiyata en yakın bölge",
+        title="Birden çok IFVG'de fiyata en yakın bölge (+28.09: RR ≥ 2 bölge CISD'den sığ olsa da seçilir)",
         trigger="03.10.2026 ya da restart sonrası 10 kapalı bölge girişli sinyal: dolum oranı arttı ve R/işlem "
-                "0.3R'den fazla düşmediyse kural kalır",
+                "0.3R'den fazla düşmediyse kural kalır (iki değişiklik birlikte okunur)",
         measure="signals (entry_model ifvg/bpr, created_at ≥ 28.09) vs 21–27.09",
         md="Birden çok IFVG'de fiyata en yakın bölge (27.09.2026, restart bekliyor)",
         progress_fn=_p_nearest_zone,
@@ -957,10 +992,20 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_parts_1d,
     ),
     WatchItem(
+        key="w1_live", status="open", started="28.09", onem=2,
+        title="1W-4H stratejisi canlıda (1H-5M'in yerine)",
+        trigger="03.10.2026: ilk hafta — no_data yok mu (veri derinliği), kaç setup/sinyal, Cuma kapanışı kaç 1W "
+                "işlemi kesti; skor eşiği 6 ve aylık bias +2 için yalnız 'veri birikiyor' notu",
+        measure="/radar?tf=1w · /setup-journal?strategy=1w · log: “1w” satırları",
+        md="1W-4H stratejisi canlıda (28.09.2026, restart bekliyor, ⏰ 03.10)",
+        progress_fn=_p_w1_live,
+    ),
+    WatchItem(
         key="htf_bonus", status="open", started="28.09", onem=1,
         title="1D bias: hizalı setup'a +2 puan hak ediliyor mu?",
-        trigger="03.10.2026: W40'ta (bant 0–6) htf +2 ile htf 0 farkı, TF bazında (4H/1D/1H) × market — 4H W38 +5.8 / "
-                "W39 −7.5 (salınım kriptodan), 1H −0.6 / +5.1; 1D hafta şartsız havuz 50/50 (28.09: 27/36). "
+        trigger="03.10.2026: W40'ta (bant 0–6) htf +2 ile htf 0 farkı, TF bazında (4H/1D) × market — 4H W38 +5.8 / "
+                "W39 −7.5 (salınım kriptodan); 1H 28.09'da kapandı (W38–39: −0.6 / +5.1, karar dışı); "
+                "1D hafta şartsız havuz 50/50 (28.09: 27/36). "
                 "Ters (−2) = hard filtre doğru mu da aynı tabloda (4H filtre kripto dışında güçlü); kural IZLEME.md'de",
         measure="python tmp/tmp_htf_bonus_weeks.py  (--md: IZLEME tablosu)",
         md="1D bias: hizalı setup'a +2 puan hak ediliyor mu? (28.09.2026, ⏰ 03.10)",
@@ -1007,7 +1052,9 @@ ITEMS: list[WatchItem] = [
                "“Kısmi kâr vs BE-only” (17.09), bias “1D bias tahmin karnesi” (18.09).",
     ),
     WatchItem(
-        key="be_1d_1h", status="open", started="09.09", onem=1,  # 28.09: 2 -> 1, dogrudan kural sorusu
+        key="be_1d_1h", status="done", started="09.09", onem=1,
+        result="(28.09) SORU KALMADI: 1D'de BE + kısmi kâr 11.09'dan beri açık, yeni 1W-4H'te de açık; "
+               "1H-5M 28.09'da kapatıldı. 1H geri açılırsa madde yeniden açılır.",
         title="1D/1H'te BE açılsın mı?",
         trigger="4H'te BE @ TP %50 yeterli veri biriktirince karar ver",
         measure="BE tetiklenen işlemlerin kaçı 0R'de kapandı, kaçı TP'ye yürüdü",
@@ -1025,7 +1072,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c2_penalty,
     ),
     WatchItem(
-        key="trail_90", status="open", started="09.09", onem=1,  # 28.09: 3 -> 1, trail esigi kurali
+        key="trail_90", status="done", started="09.09", onem=1,
+        result="(28.09) SORU KALMADI: trail yalnız 1H-5M'de açıktı, strateji 28.09'da kapatıldı; 4H/1D/1W'de "
+               "trail kapalı. 1H geri açılırsa madde yeniden açılır.",
         title="Trail arm eşiği %90 — kazananları kesiyor mu?",
         trigger="Trail çıkışlarının ortalama R'si < 1R olursa",
         measure="/logs → Engine Report → çıkış türü dağılımı",

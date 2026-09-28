@@ -20,7 +20,7 @@
                     <div>
                         <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
                         <select name="tf" class="w-32 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
-                            {% for key, label in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1h', '1H-5M')] %}
+                            {% for key, label in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H'), ('1h', '1H-5M (off)')] %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
@@ -148,8 +148,8 @@
                             <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.last_seen|fmt_date_tsi }}</td>
                             <td class="px-2 py-2 whitespace-nowrap">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
-                                    {% if r.strategy == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.strategy == '1h' %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">
-                                    {{ {'4h': '4H-15M', '1d': '1D-1H', '1h': '1H-5M'}.get(r.strategy, r.strategy) }}
+                                    {% if r.strategy == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.strategy in ('1h', '1w') %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">
+                                    {{ {'4h': '4H-15M', '1d': '1D-1H', '1w': '1W-4H', '1h': '1H-5M'}.get(r.strategy, r.strategy) }}
                                 </span>
                             </td>
                             <td class="px-2 py-2 text-sm font-medium text-white whitespace-nowrap">{{ fmt_ui_symbol(r.symbol, r.market_type) }}</td>

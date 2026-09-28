@@ -22,7 +22,12 @@ log = logging.getLogger(__name__)
 
 MIN_RANGE_ATR_RATIO = 0.4
 MAX_RANGE_ATR_RATIO = 3.0
-PURGE_THRESHOLD_PCT = 0.0005
+# Purge esigi 28.09'da KALDIRILDI (0.0005 -> 0, kullanici karari): C1 ucunu ham olarak delen her
+# C2 purge sayilir. Esik tum marketlerde ayni yuzdeydi; FX'te C1 araliginin ~%13'u ediyordu
+# (USDJPY 4H 28.09: 2 pip supurme, esik 8 pip, setup TP). Journal'da esik altinda elenen adaylar
+# diger adaylardan kotu degildi (kapi kosullariyla 18 setup +0.28 vs gecmisler +0.06 R/setup).
+# `sweep_small` dali 0'da ulasilmaz kalir; esik geri gelirse calisir.
+PURGE_THRESHOLD_PCT = 0.0
 REVERSAL_BODY_PCT = 0.25
 CRT_PURGE_SEARCH = 3  # C1'den sonra purge/C2 aramak icin bakilacak mum sayisi (1-3)
 # C1 aday penceresi: son HTF bar (forming) haric geriye. 4H/1D: 4 aday.
@@ -34,6 +39,17 @@ DOJI_BODY_RATIO_MAX = 0.10
 # kalkti, yanlis renk yalniz skorda (base 0) ceza olur. 4H/1H'te guclu yanlis renk
 # C1'i elemeye devam eder.
 C2_COLOR_HARD_FILTER_TFS = frozenset({"4h", "1h"})
+# 1W-4H stratejisi (28.09, kullanici karari; 1H-5M'in yerine). HTF haftalik mum, 1D'den
+# sentezlenir (`daily_to_weekly_bars`). Skor tablosu farkli (`_calc_live_setup_bias`):
+#   - 1D bias kalemi (htf, +2/-2) yerine AYLIK bias (`compute_monthly_bias`); hard filtre degil.
+#   - 1W uyumu (weekly, +1) yok -- HTF'nin kendisi.
+#   - PD: PDH/PDL/PWH/PWL sayilmaz (haftalik C2 onceki haftanin ucunu tanim geregi supurur,
+#     kalem bedava +1 olurdu); `pd_major` = PMH/PML, `pd_monthly` = 0, FVG/OB haftalik mumlarda.
+#   - Tavan 8 (4H/1D'de 9), acilma esigi 6 (`MIN_QUALITY_SCORE_1W`, scanner).
+W1_TIMEFRAME = "1w"
+W1_C2_HOURS = 168.0
+W1_SCORE_CAP = 8
+_W1_TAUTOLOGICAL_PD = frozenset({"PDH", "PDL", "PWH", "PWL"})
 # IFVG'nin mid'i C1 araliginda olmali mi (25.09 kapatildi, kullanici karari): purge
 # fitilinin icindeki FVG'nin inversiyonu da gecerli IFVG. True eski davranis.
 REQUIRE_IFVG_MID_IN_C1 = False
@@ -372,6 +388,65 @@ def daily_to_weekly_ohlcv(df_1d: pd.DataFrame) -> pd.DataFrame:
     return weekly
 
 
+def daily_to_weekly_bars(df_1d: pd.DataFrame) -> pd.DataFrame:
+    """1W-4H stratejisinin HTF serisi: 1D -> haftalik mum, index = haftanin ILK 1D barinin zamani.
+
+    `daily_to_weekly_ohlcv`'den farki yalniz index: o Pazartesi 00:00 UTC etiketi basar (bias
+    ve PWH/PWL icin yeterli), burada ise haftanin GERCEK acilisi gerekir -- purge_time + C2
+    suresi LTF'de C2 penceresini kesiyor ve seans sembollerinde hafta Pazar 21:00/22:00 UTC'de
+    aciliyor; Pazartesi etiketi Pazar gecesinin 4H mumlarini C1 haftasina yazardi.
+    Gruplama `daily_to_weekly_ohlcv` ile ayni (islem gunune kaydirilmis ISO hafta).
+    """
+    cols = ["open", "high", "low", "close", "volume"]
+    if df_1d is None or df_1d.empty:
+        return pd.DataFrame(columns=cols)
+    d = df_1d.sort_index()
+    idx = d.index
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    d = d.set_axis(idx)
+    iso = (idx + _trading_day_shift(idx)).isocalendar()
+    key = iso["year"].astype(int).values * 100 + iso["week"].astype(int).values
+    agg: dict[str, str] = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if "volume" in d.columns:
+        agg["volume"] = "sum"
+    g = d.assign(_wk=key, _t=idx).groupby("_wk", sort=True)
+    out = g.agg({**agg, "_t": "first"})
+    out = out.set_index("_t").sort_index()
+    out.index.name = None
+    return out
+
+
+def daily_to_monthly_ohlcv(df_1d: pd.DataFrame) -> pd.DataFrame:
+    """1D -> takvim ayi mumlari (seans kovalari islem gunune kaydirilir; index ay basi)."""
+    if df_1d is None or df_1d.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close"])
+    d = df_1d.sort_index().copy()
+    d.index = d.index.tz_localize("UTC") if d.index.tz is None else d.index.tz_convert("UTC")
+    d.index = d.index + _trading_day_shift(d.index)
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    return d.resample("MS").agg(agg).dropna(how="any")
+
+
+def compute_monthly_bias(df_1d: pd.DataFrame, now: pd.Timestamp | None = None) -> str:
+    """Aylik bias -- 1W-4H skorunda 1D bias'in yerini alir (hizali +2 / karsi -2).
+
+    `compute_weekly_bias`'in aylik karsiligi: olusan ay dusulur, son iki KAPALI aya
+    `compute_ict_bias`. 1W'de hard filtre degil (kullanici karari 28.09).
+    """
+    monthly = daily_to_monthly_ohlcv(df_1d)
+    if monthly.empty or len(monthly) < 2:
+        return "NEUTRAL"
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    cur = now + _trading_day_shift(df_1d.index)
+    cur_key = (int(cur.year), int(cur.month))
+    closed = monthly[[(int(t.year), int(t.month)) != cur_key for t in monthly.index]]
+    if len(closed) < 2:
+        return "NEUTRAL"
+    return compute_ict_bias(closed, drop_forming_day=False)
+
+
 def compute_weekly_bias(df_1d: pd.DataFrame, now: pd.Timestamp | None = None) -> str:
     """Haftalik bias — ICT/purge; kalite skorunda uyumda +1 (hard filter degil).
 
@@ -503,7 +578,7 @@ SCORE_PART_KEYS = (
 # sorgulamak icin saklanir. "0 puan" ile "bakilamadi" ayrimi da burada (*_checked / *_possible).
 SCORE_FEATURE_KEYS = (
     "wick_frac", "c2_body_frac", "reclaim_pct", "ifvg_gap_frac", "c2_range_frac",
-    "range_atr", "stop_range_mult", "stop_pct",
+    "range_atr", "stop_range_mult", "stop_pct", "sweep_pct", "sweep_frac",
     "ifvg_checked", "bias_checked", "smt_possible",
 )
 
@@ -612,6 +687,9 @@ def _calc_live_setup_bias(
 
     Ham toplam 13'e cikabilir; SMT'siz tavan 9. SMT +2 ile max 11 (premium).
 
+    1W (`W1_TIMEFRAME`): 1D hiza yerine AYLIK bias (+2/-2), weekly kalemi 0, PD'de yalniz
+    PMH/PML (`pd_major`) + haftalik FVG/OB; tavan 8, SMT ile 10.
+
     `with_parts=True` ise kalem kalem kirilim (SCORE_PART_KEYS) VE kalemlerin arkasindaki
     SUREKLI olcumler (SCORE_FEATURE_KEYS: wick orani, C2 gövde orani, geri donus %, IFVG bosluk
     orani + uygunluk bayraklari) doner. Sureklileri saklamanin sebebi: bir kalemin esigini
@@ -640,21 +718,31 @@ def _calc_live_setup_bias(
     # olabiliyor; 4H/1H'te yalniz Journal'in elenen aday skorunu etkiler).
     base_score = 2 if correct_c2 else (1 if doji_c2 else 0)
 
+    tf = (timeframe or "4h").lower()
+    is_w1 = tf == W1_TIMEFRAME
     labels = list(pd_labels) if pd_labels is not None else ([] if not pd_hit else ["FVG"])
-    pd_score = _pd_array_score(labels)
     label_set = {str(x).upper() for x in labels}
-    pd_major_score = 1 if label_set & _PD_MAJOR_LABELS else 0
-    pd_monthly_score = 1 if label_set & _PD_MONTHLY_LABELS else 0
+    if is_w1:
+        # 1W: onceki gun/hafta seviyeleri tanim geregi supurulur -> sayilmaz; "major" = ay.
+        label_set -= _W1_TAUTOLOGICAL_PD
+        pd_major_score = 1 if label_set & _PD_MONTHLY_LABELS else 0
+        pd_monthly_score = 0
+        major_set = _PD_MONTHLY_LABELS
+    else:
+        pd_major_score = 1 if label_set & _PD_MAJOR_LABELS else 0
+        pd_monthly_score = 1 if label_set & _PD_MONTHLY_LABELS else 0
+        major_set = _PD_MAJOR_LABELS | _PD_MONTHLY_LABELS
     pd_struct_score = 1 if label_set & _PD_STRUCT_LABELS else 0
+    pd_score = pd_major_score + pd_monthly_score + pd_struct_score
 
     try:
-        daily_bias = (
-            compute_daily_bias(df_1d)
-            if df_1d is not None and not df_1d.empty
-            else (htf_bias or "NEUTRAL")
-        )
+        # 1W'de "htf" kalemi aylik bias'tir (1D bias yok, kullanici karari 28.09).
+        if df_1d is not None and not df_1d.empty:
+            daily_bias = compute_monthly_bias(df_1d) if is_w1 else compute_daily_bias(df_1d)
+        else:
+            daily_bias = "NEUTRAL" if is_w1 else (htf_bias or "NEUTRAL")
     except Exception:
-        daily_bias = htf_bias or "NEUTRAL"
+        daily_bias = "NEUTRAL" if is_w1 else (htf_bias or "NEUTRAL")
     htf_aligned = (
         (direction == "LONG" and daily_bias == "BULLISH")
         or (direction == "SHORT" and daily_bias == "BEARISH")
@@ -663,9 +751,7 @@ def _calc_live_setup_bias(
         (direction == "LONG" and daily_bias == "BEARISH")
         or (direction == "SHORT" and daily_bias == "BULLISH")
     )
-    has_major_pd = bool(
-        {str(x).upper() for x in labels} & (_PD_MAJOR_LABELS | _PD_MONTHLY_LABELS)
-    )
+    has_major_pd = bool(label_set & major_set)
     reversal_at_pd = (
         (not htf_aligned)
         and (not htf_contrary)
@@ -682,7 +768,7 @@ def _calc_live_setup_bias(
     try:
         weekly_bias = (
             compute_weekly_bias(df_1d)
-            if df_1d is not None and not df_1d.empty
+            if df_1d is not None and not df_1d.empty and not is_w1
             else "NEUTRAL"
         )
     except Exception:
@@ -713,8 +799,10 @@ def _calc_live_setup_bias(
     ifvg_checked = df_ltf is not None and not df_ltf.empty
     if ifvg_checked:
         purge_ts = df_4h.index[purge_idx]
-        tf = (timeframe or "4h").lower()
-        c2_h = 24.0 if tf == "1d" else (1.0 if tf == "1h" else 4.0)
+        c2_h = (
+            W1_C2_HOURS if is_w1
+            else 24.0 if tf == "1d" else (1.0 if tf == "1h" else 4.0)
+        )
         ifvg_zone = detect_ltf_ifvg(
             df_ltf, direction, purge_ts,
             crt_low=float(crt["low"]),
@@ -730,10 +818,10 @@ def _calc_live_setup_bias(
         + c2_closed_score + pd_score + wick_score + ifvg_score
         + reclaim_score
     )
-    # SMT'siz tavan 9; +SMT 2 ile max 11 (premium).
-    score = max(0, min(9, raw))
+    # SMT'siz tavan 9 (1W: 8); +SMT 2 ile max 11 / 10 (premium).
+    score = max(0, min(W1_SCORE_CAP if is_w1 else 9, raw))
 
-    if score >= 7:
+    if score >= (6 if is_w1 else 7):
         bias = "BULLISH" if direction == "LONG" else "BEARISH"
     elif score <= 3:
         bias = "BEARISH" if direction == "LONG" else "BULLISH"
@@ -757,6 +845,10 @@ def _calc_live_setup_bias(
         "score": score,    # tavanli (motorun kullandigi)
     }
     rev_range = float(rev["high"] - rev["low"])
+    sweep = (
+        float(rev["high"]) - float(crt["high"]) if direction == "SHORT"
+        else float(crt["low"]) - float(rev["low"])
+    )
     features = {
         # Kalemlerin arkasindaki ham olcumler: esikleri sonradan veriyle sorgulamak icin.
         "wick_frac": round(_purge_wick_ratio(crt_range, rev, direction), 4),
@@ -765,6 +857,10 @@ def _calc_live_setup_bias(
         "reclaim_pct": round(reclaim, 2) if reclaim is not None else None,
         "ifvg_gap_frac": ifvg_zone.gap_frac if ifvg_zone is not None else None,
         "c2_range_frac": round(rev_range / crt_range, 4),
+        # C2'nin C1 ucunu ne kadar astigi: fiyatin %'si ve C1 araliginin kesri. Purge esigi
+        # 28.09'da kalkti (0.05%); esik altindaki setuplari ayirmak icin (sweep_pct < 0.05).
+        "sweep_pct": round(sweep / float(crt["high"] if direction == "SHORT" else crt["low"]) * 100, 4),
+        "sweep_frac": round(sweep / crt_range, 4),
         # "0 puan" ile "bakilamadi"yi ayirmak icin uygunluk bayraklari (bkz. score_parts).
         "ifvg_checked": int(ifvg_checked),
         "bias_checked": int(df_1d is not None and not df_1d.empty),
@@ -1636,6 +1732,9 @@ def _build_crt_setup(
     )
 
     pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j)
+    if (timeframe or "").lower() == W1_TIMEFRAME:
+        # 1W: onceki gun/hafta seviyeleri skor almaz; pd_array'e (UI + skor-esik kapisi) de girmez.
+        pd_labels = [x for x in pd_labels if str(x).upper() not in _W1_TAUTOLOGICAL_PD]
     bias, score, score_parts, score_features = _calc_live_setup_bias(
         df_4h, live_i, direction, htf_bias,
         pd_labels=pd_labels, purge_idx=purge_j, df_1d=df_1d,

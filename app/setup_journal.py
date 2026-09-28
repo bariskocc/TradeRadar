@@ -80,8 +80,11 @@ OUTCOME_LABELS = {
     "signal": "Became a signal",
 }
 TRACKING = ("pending", "filled")
-HORIZON = {"4h": timedelta(hours=48), "1d": timedelta(hours=120), "1h": timedelta(hours=12)}
-LTF_OF = {"4h": "15m", "1d": "1h", "1h": "5m"}
+# 1W (28.09): 9 gun -- C2'nin kalani + C3 haftasi; KEEP'in (10 gun, restart'ta yuklenen pencere)
+# altinda kalsin ki izleme restart'ta kopmasin.
+HORIZON = {"4h": timedelta(hours=48), "1d": timedelta(hours=120), "1h": timedelta(hours=12),
+           "1w": timedelta(days=9)}
+LTF_OF = {"4h": "15m", "1d": "1h", "1h": "5m", "1w": "4h"}
 KEEP = timedelta(days=10)
 # Yalnizca last_seen ilerlediyse bu kadar bekleyip yaz (her 15 dk'da her satiri yazmamak icin).
 _TOUCH_EVERY = timedelta(minutes=30)
@@ -91,7 +94,8 @@ _TOUCH_EVERY = timedelta(minutes=30)
 # ayrica izlenir; k=1 bugunku kural (sinyale donusen setup'ta ana izleme durdugu icin temel cizgi
 # burada tutulur). Duz TP/SL: 4H/1D'deki kismi kar + BE yok. Degerlendirme ve karar kurali:
 # IZLEME.md "Dar stop — golge izleme".
-SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5)}
+SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5),
+             "1w": (1.0, 0.75, 0.5)}
 # JSON'a yazilirken/okunurken datetime'a cevrilecek alanlar. Golgede "e" dolum ani; entry
 # varyantlarinda "e" ENTRY FIYATI olduğu icin dolum ani ayri alanda ("t") tutulur.
 _SHADOW_TS = ("e", "at", "until", "pa")
@@ -220,7 +224,8 @@ def _entries_init(rec: dict) -> dict | None:
     return out or None
 
 
-_LTF_DELTA = {"4h": timedelta(minutes=15), "1d": timedelta(hours=1), "1h": timedelta(minutes=5)}
+_LTF_DELTA = {"4h": timedelta(minutes=15), "1d": timedelta(hours=1), "1h": timedelta(minutes=5),
+              "1w": timedelta(hours=4)}
 
 
 def _bar_before_levels(rec: dict, bar_ts) -> bool:

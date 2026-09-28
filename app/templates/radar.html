@@ -19,7 +19,7 @@
                     <div class="flex items-center gap-1 mt-3">
                         <a href="/radar?tf=4h" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '4h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">4H-15M</a>
                         <a href="/radar?tf=1d" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '1d' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1D-1H</a>
-                        <a href="/radar?tf=1h" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '1h' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1H-5M</a>
+                        <a href="/radar?tf=1w" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == '1w' %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">1W-4H</a>
                     </div>
                 </div>
                 <div class="text-right">
@@ -124,7 +124,7 @@ function biasBadge(bias) {
 
 function smtBadge(smt) {
     if (!smt) return '<span class="text-gray-600">-</span>';
-    const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : '15M');
+    const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : (currentTf === '1w' ? '4H' : '15M'));
     return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-purple bg-accent-purple/10" title="${ltf} SMT divergence: ${smt}">✓ ${smt}</span>`;
 }
 
@@ -135,7 +135,7 @@ function pdBadge(pd) {
 
 function c2Badge(closed) {
     if (closed === null || closed === undefined) return '<span class="text-gray-600">-</span>';
-    const htf = currentTf === '1h' ? '1H' : (currentTf === '1d' ? '1D' : '4H');
+    const htf = currentTf === '1h' ? '1H' : (currentTf === '1d' ? '1D' : (currentTf === '1w' ? '1W' : '4H'));
     if (closed) {
         return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-green-400 bg-green-500/15" title="Purge (C2) ${htf} candle is closed">Closed</span>`;
     }
@@ -145,7 +145,7 @@ function c2Badge(closed) {
 // BPR = IFVG + ayni yonlu FVG kesisimi (IFVG'nin guclu hali) -> ayri sutun yerine
 // ayni sutunda "BPR" yazilir.
 function ifvgBadge(ifvg, bpr) {
-    const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : '15M');
+    const ltf = currentTf === '1h' ? '5M' : (currentTf === '1d' ? '1H' : (currentTf === '1w' ? '4H' : '15M'));
     if (bpr) return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-emerald-400 bg-emerald-500/10" title="${ltf} BPR: inverted FVG overlapping a same-side FVG">BPR</span>`;
     if (!ifvg) return '<span class="text-gray-600">-</span>';
     return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-purple bg-accent-purple/10" title="${ltf} inverted FVG exists (may not be used as entry)">✓</span>`;
@@ -195,9 +195,9 @@ async function loadRadar() {
             subEl.title =
                 'Tek WS baglantisi, tum stratejiler ortak:\n' +
                 `  15m x ${b['15m']}  (4H evreni, LTF)\n` +
-                `  4h  x ${b['4h']}   (yalniz kripto - ${b.session_symbols} FX/metal/endeks 1H'ten sentezleniyor)\n` +
-                `  1h  x ${b['1h']}   (1D-1H LTF + 1H-5M HTF + seans sentezi)\n` +
-                `  5m  x ${b['5m']}   (1H-5M LTF)`;
+                `  4h  x ${b['4h']}   (4H HTF + 1W-4H LTF; yalniz kripto - ${b.session_symbols} FX/metal/endeks 1H'ten sentezleniyor)\n` +
+                `  1h  x ${b['1h']}   (1D-1H LTF + seans sentezi)\n` +
+                `  5m  x ${b['5m']}   (1H-5M kapali)`;
         }
         document.getElementById('last-update').textContent = data.last_update || '-';
 

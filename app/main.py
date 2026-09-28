@@ -104,7 +104,7 @@ scan_state: dict = {"running": False, "last_run": None, "last_result": None}
 
 def _parse_tf(raw: str | None) -> str:
     v = (raw or "").strip().lower()
-    if v in ("1d", "1h"):
+    if v in ("1d", "1h", "1w"):
         return v
     return "4h"
 
@@ -114,6 +114,8 @@ def _tf_label(tf: str) -> str:
         return "1D-1H"
     if tf == "1h":
         return "1H-5M"
+    if tf == "1w":
+        return "1W-4H"
     return "4H-15M"
 
 
@@ -122,6 +124,8 @@ def _tf_filter(tf: str):
         return Signal.timeframe == "1d"
     if tf == "1h":
         return Signal.timeframe == "1h"
+    if tf == "1w":
+        return Signal.timeframe == "1w"
     return or_(Signal.timeframe == "4h", Signal.timeframe.is_(None))
 
 # Radar state code -> display (label / color / sort rank)
@@ -345,7 +349,8 @@ _TSI = timezone(TSI_OFFSET)
 # Dashboard "Dikkat" panosu olcumu hatirlatir (scripts/partial_vs_be.py). Karar kurali ve sinirlar:
 # IZLEME.md -> "Kismi kar vs BE-only". Olcum yapilinca esigi yukselt ya da hatirlatmayi kaldir.
 PARTIAL_REVIEW_MIN_TRADES = 25
-_DASH_TFS = ("4h", "1d", "1h")
+# 1H-5M 28.09'da kapandi (1W-4H geldi); gecmis 1H islemleri Signals sayfasinda duruyor.
+_DASH_TFS = ("4h", "1d", "1w")
 # "FX" = kripto disi tum seans sembolleri (fx/metal/endeks/petrol).
 _DASH_MARKETS = (
     ("crypto", "Crypto", ("crypto",)),
@@ -774,7 +779,7 @@ async def _render_signals_page(
 
     # Tek sayfada uc strateji (TF sutunu); tf yalniz istege bagli filtre (14.09).
     tf = (tf or "all").strip().lower()
-    tf = tf if tf in ("4h", "1d", "1h") else "all"
+    tf = tf if tf in ("4h", "1d", "1w", "1h") else "all"
     arrival_date_col = Signal.created_at
 
     # Arrival date varsayilani: bu haftanin Pazartesi'si (TSI). Parametre HIC yoksa uygulanir;
@@ -1008,9 +1013,9 @@ async def signals_page(
 # gecmisi (TF bazli, sayfali) gosterir; burasi "su an ne acik" sorusu icin.
 
 _OPEN_STATUSES = ("active", "waiting_entry", "pending_cisd")
-_OPEN_TF_LABELS = {"4h": "4H-15M", "1d": "1D-1H", "1h": "1H-5M"}
-_OPEN_LTF = {"4h": "15m", "1d": "1h", "1h": "5m"}
-_OPEN_C2_HOURS = {"4h": 4, "1d": 24, "1h": 1}
+_OPEN_TF_LABELS = {"4h": "4H-15M", "1d": "1D-1H", "1w": "1W-4H", "1h": "1H-5M"}
+_OPEN_LTF = {"4h": "15m", "1d": "1h", "1w": "4h", "1h": "5m"}
+_OPEN_C2_HOURS = {"4h": 4, "1d": 24, "1w": 168, "1h": 1}
 
 
 def _last_ltf_price(signal) -> float | None:
@@ -1052,7 +1057,7 @@ def _fmt_age(ts) -> str:
 
 async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
     tab = tab if tab in ("all", "active", "waiting") else "all"
-    tf = tf if tf in ("all", "4h", "1d", "1h") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1w", "1h") else "all"
     result = await db.execute(select(Signal).where(Signal.status.in_(_OPEN_STATUSES)))
     open_signals = result.scalars().all()
 
@@ -1225,7 +1230,7 @@ async def setup_journal_page(
     from app import setup_journal as journal
     from app.models import SetupJournal
 
-    tf = tf if tf in ("all", "4h", "1d", "1h") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1w", "1h") else "all"
     stage = stage if stage in journal.STAGE_LABELS else "all"
     days = days if days in (1, 3, 7, 30, 90) else 7
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
@@ -1680,7 +1685,11 @@ async def recalc_scores(request: Request, db: AsyncSession = Depends(get_db)):
                 bingx_symbol, _market = from_display_symbol(sig.symbol)
 
                 from app.scanner import STRATEGY_CFG, STRATEGY_4H
-                cfg = STRATEGY_CFG.get(sig.timeframe or STRATEGY_4H, STRATEGY_CFG[STRATEGY_4H])
+                # Kapali strateji (1H) baska stratejinin ayariyla skorlanmasin; 1W'nin HTF'si REST'te
+                # yok (haftalik mum 1D'den sentez) -- ikisi de atlanir.
+                if (sig.timeframe or STRATEGY_4H) not in STRATEGY_CFG or sig.timeframe == "1w":
+                    continue
+                cfg = STRATEGY_CFG[sig.timeframe or STRATEGY_4H]
                 htf = cfg["htf"]
                 ltf = cfg["ltf"]
                 smt_hours = float(cfg["smt_window_hours"])

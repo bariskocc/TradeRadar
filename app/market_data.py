@@ -26,6 +26,8 @@ from app.config import (
     BOOTSTRAP_LIMITS,
     MAINTENANCE_INTERVAL_SEC,
     SESSION_1H_BARS,
+    W1_DAILY_BARS,
+    W1_SESSION_1H_BARS,
 )
 from app.database import async_session
 from app.event_log import record_event
@@ -36,6 +38,7 @@ from app.exchange import (
     get_d1h_symbols_flat,
     get_h1_5m_symbols,
     is_session_symbol,
+    is_w1_symbol,
     market_of,
     to_display_symbol,
 )
@@ -186,9 +189,7 @@ class BingXMarketData:
                         self._last_ts[(sym, tf)] = last_ms
                 # 1D (HTF bias + 1D CRT): WS ile akmiyor; store'da tutulur, gunluk yenilenir.
                 try:
-                    df1d = await fetch_ohlcv(sym, "1d", limit=BOOTSTRAP_LIMITS["1d"], client=client)
-                    if not df1d.empty:
-                        self.store.set_df(sym, "1d", df1d)
+                    await self._bootstrap_crypto_1d(sym, client)
                 except Exception as e:
                     log.warning("1D bootstrap basarisiz %s: %s", sym, e)
                 if sym in d1h_set:
@@ -209,9 +210,7 @@ class BingXMarketData:
                         await self._bootstrap_session_symbol(sym, client, with_ltf=False)
                         continue
                     try:
-                        df1d = await fetch_ohlcv(sym, "1d", limit=BOOTSTRAP_LIMITS["1d"], client=client)
-                        if not df1d.empty:
-                            self.store.set_df(sym, "1d", df1d)
+                        await self._bootstrap_crypto_1d(sym, client)
                     except Exception as e:
                         log.warning("1D bootstrap basarisiz %s: %s", sym, e)
                     try:
@@ -239,6 +238,20 @@ class BingXMarketData:
         log.info("Bootstrap tamamlandi.")
         self._bootstrap_done_at = datetime.now(timezone.utc)
 
+    async def _bootstrap_crypto_1d(self, sym: str, client) -> None:
+        """Kripto 1D bootstrap'i. 1W evreninde (BTC/ETH) ayni istek uzun cekilir (ek istek yok):
+        tamami "1d_deep"e (haftalik HTF + aylik bias), son BOOTSTRAP_LIMITS["1d"] bari "1d"ye --
+        1D bias/PD hesaplari eskisiyle ayni uzunlukta seri gorur.
+        """
+        w1 = is_w1_symbol(sym)
+        limit = max(W1_DAILY_BARS, BOOTSTRAP_LIMITS["1d"]) if w1 else BOOTSTRAP_LIMITS["1d"]
+        df1d = await fetch_ohlcv(sym, "1d", limit=limit, client=client)
+        if df1d.empty:
+            return
+        if w1:
+            self.store.set_df(sym, "1d_deep", df1d)
+        self.store.set_df(sym, "1d", df1d.tail(BOOTSTRAP_LIMITS["1d"]))
+
     async def _bootstrap_session_symbol(self, sym: str, client, with_ltf: bool = True) -> None:
         """FX/metal/endeks/petrol bootstrap'i.
 
@@ -256,10 +269,20 @@ class BingXMarketData:
             except Exception as e:
                 log.warning("15M bootstrap basarisiz %s: %s", sym, e)
         try:
-            df1h = await fetch_ohlcv_deep(sym, "1h", bars=SESSION_1H_BARS, client=client)
+            # 1W: uzun 1D gecmisi yalniz ilk bootstrap'ta (store'da yoksa) -- Pazartesi evren
+            # gecisindeki yeniden bootstrap'lar eski sayfa sayisiyla calisir; kisa seri "1d_deep"
+            # ile birlestirilerek uzar (scanner._w1_daily).
+            deep = is_w1_symbol(sym) and self.store.get_df(sym, "1d_deep").empty
+            bars = max(W1_SESSION_1H_BARS, SESSION_1H_BARS) if deep else SESSION_1H_BARS
+            df1h = await fetch_ohlcv_deep(sym, "1h", bars=bars, client=client)
             if df1h.empty:
                 log.warning("1H derin bootstrap bos dondu: %s", sym)
                 return
+            if deep:
+                d1 = fx_session.resample_from_1h(df1h, "1d", sym)
+                if not d1.empty:
+                    self.store.set_df(sym, "1d_deep", d1)
+                df1h = df1h.tail(SESSION_1H_BARS)
             self._last_ts[(sym, "1h")] = int(df1h.index[-1].value // 1_000_000)
             self.store.set_df(sym, "1h", df1h)
             self._rebuild_session_htf(sym, full=True)

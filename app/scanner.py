@@ -40,6 +40,8 @@ from app.crt_engine import (
     compute_ict_bias,
     htf_bias_with_age,
     compute_weekly_bias,
+    compute_monthly_bias,
+    daily_to_weekly_bars,
     detect_crt_setup,
     detect_displacement_fvg,
     detect_ltf_bpr,
@@ -57,7 +59,9 @@ from app.exchange import (
     get_d1h_markets,
     get_h1_markets,
     get_h1_symbols_flat,
+    get_w1_markets,
     is_session_symbol,
+    is_w1_symbol,
     market_of,
     to_display_symbol,
 )
@@ -77,6 +81,9 @@ FX_MIN_RR_RATIO = 2.0       # FX: 1:2
 MIN_QUALITY_SCORE = 7  # 7 alti sinyal acilmaz (SMT bonusu sonrasi skor)
 SMT_QUALITY_BONUS = 2  # Korele parite ile 15M SMT divergence varsa +2
 MAX_QUALITY_SCORE = 11  # baz tavan 9 + SMT 2
+# 1W-4H (28.09): 1D bias (+2) ve 1W uyumu (+1) yerine aylik bias (+2); tavan 8, esik 6.
+MIN_QUALITY_SCORE_1W = 6
+MAX_QUALITY_SCORE_1W = 10  # baz tavan 8 + SMT 2
 PREMIUM_QUALITY_SCORE = 11  # yalnizca 11 = Premium
 
 # CRT %60 invalidation ("fiyat bizi almadan kacti" kontrolu).
@@ -135,7 +142,9 @@ MIN_FILL_BAR_AGE_SEC_1H = 20
 
 STRATEGY_4H = "4h"
 STRATEGY_1D = "1d"
-STRATEGY_1H = "1h"
+STRATEGY_1H = "1h"  # 28.09 KAPALI (config.H1_5M_ENABLED); kayitlar ve kod duruyor
+STRATEGY_1W = "1w"
+MIN_FILL_BAR_AGE_SEC_1W = 300
 # Ortak risk kapilari: C2 kapanmadan fill yok, +1R BE, erken trail.
 # SL tamponu KALDIRILDI: C2 kapanmadan fill olmadigi icin C2 sonrasi yeni bir
 # ekstrem beklemiyoruz; SL dogrudan purge ucudur (bkz. _check_*_cisd).
@@ -224,29 +233,85 @@ STRATEGY_CFG = {
         "require_c2_closed": False,
         "ifvg_requires_c2_closed": False,
     },
-    STRATEGY_1H: {
-        "htf": "1h",
-        "ltf": "5m",
-        "c2_hours": 1.0,
-        "smt_window_hours": 1.0,
-        "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1H,
+    # 1H-5M 28.09'da KAPATILDI (kullanici karari, yerine 1W-4H). Geri acmak icin bu blogu ac
+    # ve config.H1_5M_ENABLED = True yap (5m abonelikleri + bootstrap + tespit geri gelir).
+    # STRATEGY_1H: {
+    #     "htf": "1h",
+    #     "ltf": "5m",
+    #     "c2_hours": 1.0,
+    #     "smt_window_hours": 1.0,
+    #     "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1H,
+    #     **_RISK_GATES,
+    #     # 1H'te C2 yalnizca 1 saat; kapanisini beklemek CISD onayindan sonra
+    #     # 45 dk'ya kadar olu bekleme demek ve retest tipik olarak o pencerede
+    #     # olusuyor (US100 08.09: 17:20 CISD -> 17:25 retest -> 18:00 C2 kapanis).
+    #     # Ters donus kanitini zaten CISD onayi veriyor; kapanmamis C2'nin skorda
+    #     # -1 bedeli var. IFVG girisi ise C2 kapanmadan HALA kapali (_RISK_GATES):
+    #     # C2 penceresinde daima daha saglam olan CISD/MSS kullanilir.
+    #     # Takas: daha cok firsat, karsiliginda C2 icinde yeni dip/tepe olursa
+    #     # tamponsuz SL yenebilir.
+    #     # NOT: score7 kapisi acik kalir; _score7_strict_ok icindeki C2 sarti
+    #     # require_c2_closed'a bagli oldugu icin 1H'te otomatik dusuyor
+    #     # (CISD entry + PD array sarti aynen duruyor).
+    #     "require_c2_closed": False,
+    #     "be_arm_r": None,
+    #     "trail_arm_r": None,
+    # },
+    STRATEGY_1W: {
+        # 1W-4H (28.09, kullanici karari): haftalik CRT + 4H CISD. Evren 1D ile ayni (BTC/ETH +
+        # FX/metal/endeks/petrol); yeni abonelik yok -- 4H kriptoda WS, seansta 1H sentezi;
+        # haftalik mum uzun 1D gecmisinden (`_w1_frames`). Skor: `crt_engine.W1_TIMEFRAME`.
+        "htf": "1w",
+        "ltf": "4h",
+        "c2_hours": 168.0,
+        "smt_window_hours": 168.0,
+        "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1W,
         **_RISK_GATES,
-        # 1H'te C2 yalnizca 1 saat; kapanisini beklemek CISD onayindan sonra
-        # 45 dk'ya kadar olu bekleme demek ve retest tipik olarak o pencerede
-        # olusuyor (US100 08.09: 17:20 CISD -> 17:25 retest -> 18:00 C2 kapanis).
-        # Ters donus kanitini zaten CISD onayi veriyor; kapanmamis C2'nin skorda
-        # -1 bedeli var. IFVG girisi ise C2 kapanmadan HALA kapali (_RISK_GATES):
-        # C2 penceresinde daima daha saglam olan CISD/MSS kullanilir.
-        # Takas: daha cok firsat, karsiliginda C2 icinde yeni dip/tepe olursa
-        # tamponsuz SL yenebilir.
-        # NOT: score7 kapisi acik kalir; _score7_strict_ok icindeki C2 sarti
-        # require_c2_closed'a bagli oldugu icin 1H'te otomatik dusuyor
-        # (CISD entry + PD array sarti aynen duruyor).
+        "cluster_window_hours": 168.0,
+        "min_score": MIN_QUALITY_SCORE_1W,
+        "max_score": MAX_QUALITY_SCORE_1W,
+        # 1D gibi: C2 butun bir hafta -- kapanisini beklemek FX'te Cuma kapanisiyla islemi
+        # imkansiz kilar. Bedeli skorda (acik C2 c2_closed kalemini almaz).
         "require_c2_closed": False,
+        "ifvg_requires_c2_closed": False,
+        # 1D bias hard filtresi YOK; aylik bias yalniz skorda (+2/-2).
+        "require_bias_align": False,
+        # Koruma 4H/1D ile ayni (kullanici karari): yarisi TP yolunun %50'sinde + BE, trail kapali.
         "be_arm_r": None,
         "trail_arm_r": None,
+        "be_arm_tp_fraction": 0.50,
+        "partial_close_fraction": 0.50,
+        "trail_arm_tp_fraction": None,
     },
 }
+
+ENABLED_STRATEGIES = tuple(STRATEGY_CFG)
+
+
+def _min_score(cfg: dict | None) -> int:
+    """Stratejinin acilma esigi (1W: 6, digerleri MIN_QUALITY_SCORE)."""
+    return int((cfg or {}).get("min_score", MIN_QUALITY_SCORE))
+
+
+def _w1_daily(bingx_symbol: str, store: object | None, df_1d: pd.DataFrame | None) -> pd.DataFrame | None:
+    """1W icin uzun 1D serisi: store "1d_deep" (bootstrap'ta bir kez) + guncel "1d" (o kazanir).
+
+    "1d" kisa ama canli (forming gun dahil); "1d_deep" uzun ama bootstrap aninda donmus. Ikisi
+    her zaman ortusur ("1d" en az 60 gun), birlesim kayipsizdir.
+    """
+    deep = None
+    if store is not None:
+        try:
+            deep = store.get_df(bingx_symbol, "1d_deep")
+        except Exception:
+            deep = None
+    if deep is None or deep.empty:
+        return df_1d
+    if df_1d is None or df_1d.empty:
+        return deep.copy()
+    old = deep[deep.index < df_1d.index[0]]
+    return pd.concat([old, df_1d]).sort_index()
+
 
 # Trail offset (tum TF): SL, MFE'nin max(1R, 1.3x LTF range) gerisine cekilir.
 # Arm esigi STRATEGY_CFG (trail_arm_tp_fraction / trail_arm_r) ile gelir.
@@ -1439,7 +1504,7 @@ def _quality_score_asof(
     bias = htf_bias
     if d1 is not None and not d1.empty:
         try:
-            bias = compute_daily_bias(d1)
+            bias = compute_monthly_bias(d1, now=asof) if strategy == STRATEGY_1W else compute_daily_bias(d1)
         except Exception:
             pass
     setup = detect_crt_setup(
@@ -1458,6 +1523,8 @@ def _entry_between_stops(direction: str, entry: float, sl: float, tp: float) -> 
 
 def _c2_hours_for_setup(setup: CRTSetup) -> float:
     tf = (getattr(setup, "timeframe", None) or "4h").lower()
+    if tf == STRATEGY_1W:
+        return float(STRATEGY_CFG[STRATEGY_1W]["c2_hours"])
     if tf == "1d":
         return 24.0
     if tf == "1h":
@@ -1497,14 +1564,15 @@ def _maybe_ifvg_entry(
     *,
     allow_ifvg: bool = True,
 ):
-    """LTF IFVG varsa ve RR'yi kotulestirmiyorsa onu kullan; yoksa CISD/MSS.
+    """LTF IFVG/BPR varsa ve min RR'yi geciyorsa onu kullan; yoksa CISD/MSS.
 
     CISD/MSS adayi check_cisd_confirmation icinde zaten daha iyi RR ile secilir.
-    IFVG mid'i SL-TP arasinda OLMALI ve CISD adayindan daha kotu RR VERMEMELI:
-    LONG'da mid CISD entry'sinin ustunde (SHORT'ta altinda) kalirsa stop genisler,
-    RR duser; boyle bir IFVG "daha iyi giris" degildir.
-    (US100 08.09 1H: CISD 29485.74 -> RR 2.46 iken IFVG 29519.79 -> RR 1.31.)
-    Mutlak RR esigi burada uygulanmaz (cagiran min_rr ile eler).
+    Bolge girisi SL-TP arasinda OLMALI. 28.09'a kadar ayrica CISD adayindan daha
+    kotu RR VERMEMELIYDI (US100 08.09 1H: CISD 29485.74 -> RR 2.46 iken IFVG
+    29519.79 -> RR 1.31). Artik min RR'yi gecen bolge CISD'den sig olsa da secilir
+    (kullanici karari; Journal'da 32 setupta bolge +0.28 R/setup); bu koruma yalniz
+    hicbir bolge min RR'yi gecmediginde devrede. Esigi gecmeyen secimi cagiran
+    min_rr ile eler.
 
     BPR (21.09, kullanici istegi) ayni ailenin daha guclu hali: invert olmus FVG
     ile donus hamlesinin biraktigi AYNI YONLU FVG kesisiyorsa entry KESISIM
@@ -1551,9 +1619,14 @@ def _maybe_ifvg_entry(
     _show(zones[0] if zones else None)
     if not allow_ifvg:
         return cisd, planned
-    # Guclu olan once: BPR -> IFVG. Hepsi ayni RR korumasina tabi.
+    # Guclu olan once: BPR -> IFVG.
+    # Min RR'yi gecen bolge, CISD'den SIG olsa da secilir (28.09, kullanici karari): CISD bolgenin
+    # altinda (LONG) kaldiginda fiyat oraya nadiren iniyor. NZDUSD 4H #133: CISD 0.56531 RR 5.62,
+    # IFVG 0.5657 RR 2.43 -- fiyat IFVG'ye dokunup gitti. Hicbir bolge min RR'yi gecmiyorsa eski
+    # koruma: CISD'den kotu olmayan en oncelikli bolge, o da yoksa CISD/MSS.
     cands = [(b, "bpr", z) for b, z in bprs] + [(z, "ifvg", z) for z in zones]
-    ok: list = []
+    min_rr = _min_rr_for_market(getattr(setup, "market_type", None))
+    valid: list = []
     for cand, model, zone in cands:
         cand_entry = cand.entry_for(setup.direction)
         if not _entry_between_stops(
@@ -1561,15 +1634,15 @@ def _maybe_ifvg_entry(
         ):
             continue
         cand_rr = _calc_planned_rr(cand_entry, cisd.stop_loss, cisd.take_profit)
-        if cand_rr is None or (planned is not None and cand_rr < planned):
-            continue  # bolge girisi RR'yi kotulestiriyor -> bir sonraki adaya / CISD'ye kal
-        ok.append((cand, model, zone, cand_entry, cand_rr))
-    if not ok:
+        if cand_rr is None:
+            continue
+        valid.append((cand, model, zone, cand_entry, cand_rr))
+    pick = next((c for c in valid if c[4] >= min_rr), None)
+    if pick is None:
+        pick = next((c for c in valid if planned is None or c[4] >= planned), None)
+    if pick is None:
         return cisd, planned
-    min_rr = _min_rr_for_market(getattr(setup, "market_type", None))
-    cand, model, zone, cand_entry, cand_rr = next(
-        (c for c in ok if c[4] >= min_rr), ok[0],
-    )
+    cand, model, zone, cand_entry, cand_rr = pick
     _show(zone)
     cisd.entry_price = cand_entry
     cisd.entry_model = model
@@ -1603,7 +1676,8 @@ def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
     cfg = cfg or {}
     if not cfg.get("score7_requires_cisd_pd"):
         return True
-    if int(setup.bias_score or 0) != 7:
+    # Sinir skor stratejinin esigidir (1W: 6).
+    if int(setup.bias_score or 0) != _min_score(cfg):
         return True
     model = getattr(cisd, "entry_model", None) or "cisd"
     c2_ok = bool(setup.c2_closed) or not cfg.get("require_c2_closed")
@@ -2017,8 +2091,9 @@ async def _apply_smt_bonus(
     client: object | None,
     ltf: str = "15m",
     window_hours: float = 4.0,
+    max_score: int = MAX_QUALITY_SCORE,
 ) -> bool:
-    """Korele parite ile LTF SMT divergence varsa setup skorunu +SMT_QUALITY_BONUS (max 11) yap.
+    """Korele parite ile LTF SMT divergence varsa setup skorunu +SMT_QUALITY_BONUS (max 11; 1W 10) yap.
 
     SMT bulunursa setup.smt_pair'e korele paritenin gosterim adi yazilir.
     """
@@ -2039,7 +2114,7 @@ async def _apply_smt_bonus(
         return False
 
     setup.smt_pair = to_display_symbol(corr)
-    new_score = min(MAX_QUALITY_SCORE, int(setup.bias_score or 0) + SMT_QUALITY_BONUS)
+    new_score = min(max_score, int(setup.bias_score or 0) + SMT_QUALITY_BONUS)
     setup.bias_score = new_score
     if isinstance(setup.score_parts, dict):
         # Olcum kirilimi: SMT motorda skora sonradan ekleniyor, kirilim da izlesin.
@@ -2069,14 +2144,23 @@ async def detect_and_create_waiting(
     strategy='1d' → 1D CRT + 1H CISD, hard filter 1D bias (1W bilgi).
     strategy='1h' → 1H CRT + 5M CISD, hard filter 1D bias (XAU/EUR/US100/BTC).
     """
-    cfg = STRATEGY_CFG.get(strategy, STRATEGY_CFG[STRATEGY_4H])
+    if strategy not in STRATEGY_CFG:
+        return None  # kapali strateji (1H-5M, 28.09)
+    cfg = STRATEGY_CFG[strategy]
     if strategy == STRATEGY_1H and bingx_symbol not in get_h1_symbols_flat():
+        return None
+    if strategy == STRATEGY_1W and not is_w1_symbol(bingx_symbol):
         return None
     htf_key = cfg["htf"]
     ltf_key = cfg["ltf"]
-    df_htf = frames.get(htf_key)
     df_ltf = frames.get(ltf_key)
     df_1d = frames.get("1d")
+    if strategy == STRATEGY_1W:
+        # Haftalik HTF + aylik bias uzun 1D gecmisinden (store "1d_deep" + canli "1d").
+        df_1d = _w1_daily(bingx_symbol, store, df_1d)
+        df_htf = daily_to_weekly_bars(df_1d) if df_1d is not None and not df_1d.empty else None
+    else:
+        df_htf = frames.get(htf_key)
 
     market = market_of(bingx_symbol)
     display_sym = to_display_symbol(bingx_symbol)
@@ -2114,6 +2198,9 @@ async def _detect_and_create_waiting_locked(
         return None
 
     structure_bias, structure_age, ict_bias, htf_bias, weekly_bias = await _cpu(_htf_biases, df_1d)
+    if strategy == STRATEGY_1W:
+        # 1W: "bias" sutunu/kaydi aylik bias'tir (skor kalemi `htf`); 1D bias kullanilmaz.
+        htf_bias = await _cpu(compute_monthly_bias, df_1d)
 
     filter_bias = htf_bias
 
@@ -2191,8 +2278,11 @@ async def _detect_and_create_waiting_locked(
     #              setup.symbol, setup.direction)
     #     return None
 
-    # Hard filter: uc stratejide de 1D bias. 1W hicbirinde hard degil.
-    if REQUIRE_HTF_BIAS_ALIGN and not _bias_aligned(setup.direction, filter_bias):
+    # Hard filter: 4H/1D'de 1D bias. 1W-4H stratejisinde yok (aylik bias yalniz skorda).
+    if (
+        REQUIRE_HTF_BIAS_ALIGN and cfg.get("require_bias_align", True)
+        and not _bias_aligned(setup.direction, filter_bias)
+    ):
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "bias_mismatch")
         _radar("bias_mismatch", direction=setup.direction,
@@ -2209,6 +2299,7 @@ async def _detect_and_create_waiting_locked(
     await _apply_smt_bonus(
         setup, df_ltf, bingx_symbol, store, client,
         ltf=ltf_key, window_hours=cfg["smt_window_hours"],
+        max_score=int(cfg.get("max_score", MAX_QUALITY_SCORE)),
     )
 
     if getattr(setup, "target_consumed", False):
@@ -2228,7 +2319,8 @@ async def _detect_and_create_waiting_locked(
         await _gated("target_taken")
         return None
 
-    if int(setup.bias_score or 0) < MIN_QUALITY_SCORE:
+    min_score = _min_score(cfg)
+    if int(setup.bias_score or 0) < min_score:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "low_quality")
         _radar("low_quality", direction=setup.direction,
@@ -2260,10 +2352,10 @@ async def _detect_and_create_waiting_locked(
             df_htf, df_ltf, df_1d, setup.symbol, market, strategy,
             _as_utc(open_sig.entry_filled_time), filter_bias,
         )
-        if q_fill is not None and q_fill < MIN_QUALITY_SCORE:
+        if q_fill is not None and q_fill < min_score:
             await record_event(
                 "cancelled",
-                f"Retest aninda skor {q_fill} (< {MIN_QUALITY_SCORE}), sonradan fill gecersiz",
+                f"Retest aninda skor {q_fill} (< {min_score}), sonradan fill gecersiz",
                 symbol=setup.symbol, direction=setup.direction,
                 market_type=setup.market_type, level="warning", session=session,
             )
@@ -2544,7 +2636,7 @@ async def _detect_and_create_waiting_locked(
                 df_htf, df_ltf, df_1d, setup.symbol, market, strategy,
                 fill_ts, filter_bias,
             )
-            if q_at_fill is None or q_at_fill < MIN_QUALITY_SCORE:
+            if q_at_fill is None or q_at_fill < min_score:
                 if existing_pending is not None:
                     await _delete_pending(session, existing_pending, "missed_quality")
                 _radar(
@@ -2557,7 +2649,7 @@ async def _detect_and_create_waiting_locked(
                 )
                 log.info(
                     "SKIPPED (MISSED QUALITY): %s %s retest %s skor=%s (< %s), fill yok.",
-                    setup.symbol, setup.direction, fill_ts, q_at_fill, MIN_QUALITY_SCORE,
+                    setup.symbol, setup.direction, fill_ts, q_at_fill, min_score,
                 )
                 return None
 
@@ -3543,7 +3635,15 @@ async def reconcile_open_signals(
                             df = store.get_df(bingx_symbol, ltf)
                         except Exception:
                             df = None
-                    rest_df = await fetch_ohlcv(bingx_symbol, ltf, limit=50, client=client)
+                    if ltf == "4h" and is_session_symbol(bingx_symbol):
+                        # 1W seans: ham BingX 4H UTC'ye hizali, motorun 4H'i NY anchor'ina --
+                        # REST 1H'ten ayni kovalar sentezlenir (olu seans da elenir).
+                        rest_df = fx_session.resample_from_1h(
+                            await fetch_ohlcv(bingx_symbol, "1h", limit=200, client=client),
+                            "4h", bingx_symbol,
+                        )
+                    else:
+                        rest_df = await fetch_ohlcv(bingx_symbol, ltf, limit=50, client=client)
                     if rest_df is not None and not rest_df.empty:
                         # REST ham seriyi dondurur: seans sembollerinde olu
                         # seans barlari geri sizmasin (hafta sonu wick'i acik
@@ -3619,7 +3719,9 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
 
     4H-15M: 4h/15m kapanisi → 4H CRT + 15M CISD.
     1D-1H: 1d/1h kapanisi → 1D CRT + 1H CISD.
-    1H-5M: 1h/5m kapanisi → 1H CRT + 5M CISD (XAU/EUR/US100/BTC).
+    1W-4H: 4h/1d kapanisi → 1W CRT + 4H CISD (BTC/ETH + FX/metal/endeks/petrol). 4h burada
+           hem 4H stratejisinin HTF'si hem 1W'nin LTF'sidir.
+    1H-5M: 28.09'dan beri kapali (get_h1_symbols_flat bos).
     Tum veriler store'dan okunur; REST'e gidilmez.
     """
     strategies: list[str] = []
@@ -3627,6 +3729,8 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
         strategies.append(STRATEGY_4H)
     if timeframe in ("1d", "1h"):
         strategies.append(STRATEGY_1D)
+    if timeframe in ("4h", "1d") and is_w1_symbol(bingx_symbol):
+        strategies.append(STRATEGY_1W)
     if timeframe in ("1h", "5m") and bingx_symbol in get_h1_symbols_flat():
         strategies.append(STRATEGY_1H)
     if not strategies:
@@ -3637,8 +3741,11 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
         ltf_strategy = {
             "15m": STRATEGY_4H,
             "1h": STRATEGY_1D,
+            "4h": STRATEGY_1W,
             "5m": STRATEGY_1H,
         }.get(timeframe)
+        if ltf_strategy not in strategies:
+            ltf_strategy = None  # ör. 4h kapanisi 1W evreni disindaki altcoinde
         async with async_session() as session:
             await journal.ensure_loaded(session, store, _journal_bingx)
             for strategy in strategies:
@@ -3680,13 +3787,29 @@ async def on_price_update(
     """BingX WS: forming mum guncellemesi (aktif TP/SL/trail; fill yok)."""
     display_symbol = to_display_symbol(bingx_symbol)
     if ltf == "5m":
-        strategy = STRATEGY_1H
+        strategies = [STRATEGY_1H]
     elif ltf == "1h":
-        strategy = STRATEGY_1D
+        # 1W'nin LTF'si 4h ama forming 4h mesaji yok (seansta 1H'ten sentez): aktif 1W islemin
+        # TP/SL/BE'si 1h forming mumlariyla izlenir -- fiyat ayni, yalniz daha sik. Fill yok.
+        strategies = [STRATEGY_1D, STRATEGY_1W]
     else:
-        strategy = STRATEGY_4H
-    if not has_open_symbol(display_symbol, timeframe=strategy):
-        return
+        strategies = [STRATEGY_4H]
+    strategies = [
+        s_ for s_ in strategies
+        if s_ in STRATEGY_CFG and has_open_symbol(display_symbol, timeframe=s_)
+    ]
+    for strategy in strategies:
+        await _manage_forming(bingx_symbol, display_symbol, candle, store, ltf, strategy)
+
+
+async def _manage_forming(
+    bingx_symbol: str,
+    display_symbol: str,
+    candle: dict,
+    store: object,
+    ltf: str,
+    strategy: str,
+) -> None:
     try:
         high = float(candle["high"])
         low = float(candle["low"])
@@ -3697,7 +3820,7 @@ async def on_price_update(
         avg_range = None
         if store is not None:
             try:
-                avg_range = _avg_ltf_range(store.get_df(bingx_symbol, ltf))
+                avg_range = _avg_ltf_range(store.get_df(bingx_symbol, STRATEGY_CFG[strategy]["ltf"]))
             except Exception:
                 avg_range = None
         async with async_session() as session:
@@ -3728,7 +3851,7 @@ async def run_scan(
     WS gercek zamanli calisirken bu, manuel tetikleme ve guvenlik agi gorevindedir.
     """
     if timeframe in (None, "", "all", "both"):
-        strategies = [STRATEGY_4H, STRATEGY_1D, STRATEGY_1H]
+        strategies = list(ENABLED_STRATEGIES)
     elif timeframe in STRATEGY_CFG:
         strategies = [timeframe]
     else:
@@ -3752,6 +3875,8 @@ async def run_scan(
                 markets = get_active_markets()
             elif strategy == STRATEGY_1D:
                 markets = get_d1h_markets()
+            elif strategy == STRATEGY_1W:
+                markets = get_w1_markets()
             else:
                 markets = get_h1_markets()
             scan_markets = list(markets.keys()) if market_types is None else [

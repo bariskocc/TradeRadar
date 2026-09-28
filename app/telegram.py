@@ -35,6 +35,8 @@ def _strategy_label(sig: "Signal") -> str:
         return "1D-1H"
     if tf == "1h":
         return "1H-5M"
+    if tf == "1w":
+        return "1W-4H"
     return "4H-15M"
 
 
@@ -421,7 +423,7 @@ async def send_signal_waiting(sig: Signal) -> Optional[int]:
 
 def _format_potential_cancel(symbol: str, direction: str, reason: str, strategy: str | None = None) -> str:
     if strategy and strategy != "1d":
-        label = {"1h": "1H-5M"}.get(strategy, "4H-15M")
+        label = {"1h": "1H-5M", "1w": "1W-4H"}.get(strategy, "4H-15M")
         title = f"❌ <b>WAITING İPTAL – {symbol} ({label})</b>"
     else:
         title = f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>"

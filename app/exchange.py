@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 import httpx
 import pandas as pd
 
-from app.config import BINGX_REST_BASE
+from app.config import BINGX_REST_BASE, H1_5M_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +274,13 @@ def is_d1h_symbol(bingx_symbol: str) -> bool:
     return bingx_symbol in _D1H_ALL
 
 
+# 1W-4H evreni (28.09): 1D-1H ile ayni -- BTC/ETH + FX/metal/endeks/petrol, altcoin yok.
+# Veri de ayni: 4H kripto WS'ten, seansta 1H'ten sentez; haftalik mum 1D'den.
+get_w1_markets = get_d1h_markets
+get_w1_symbols_flat = get_d1h_symbols_flat
+is_w1_symbol = is_d1h_symbol
+
+
 # Kripto-disi (FX/metal/endeks/petrol) semboller: gercek piyasa seansina tabi,
 # BingX'in 7/24 sentetik kontratindan farkli. HTF mumlari 1H'ten NY-hizali
 # sentezlenir ve olu seans (Cuma 17:00 -> Pazar 17:00 NY) barlari elenir.
@@ -317,12 +324,16 @@ def _h1_open_now(bingx_symbol: str) -> bool:
 
 
 def get_h1_symbols_flat() -> list[str]:
-    """1H-5M CRT evreni. Hafta sonu yalnizca BTC."""
+    """1H-5M CRT evreni. Hafta sonu yalnizca BTC. Strateji kapaliyken (28.09) bos."""
+    if not H1_5M_ENABLED:
+        return []
     return [s for s in _H1_CRT if _h1_open_now(s)]
 
 
 def get_h1_5m_symbols() -> list[str]:
-    """5M WS/bootstrap: CRT + SMT esleri. Hafta sonu BTC+ETH."""
+    """5M WS/bootstrap: CRT + SMT esleri. Hafta sonu BTC+ETH. Strateji kapaliyken bos."""
+    if not H1_5M_ENABLED:
+        return []
     out: list[str] = []
     seen: set[str] = set()
     for s in _H1_CRT + _H1_SMT_EXTRA:

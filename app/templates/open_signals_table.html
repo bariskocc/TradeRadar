@@ -1,6 +1,7 @@
 {# Open Signals panosu. Sayfa ilk yuklemede include eder; /open-signals/table 30 sn'de bir ayni parcayi yeniden verir. #}
 <!-- Summary -->
-<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+<div class="hidden md:grid md:grid-cols-4 gap-4 mb-4">
+    {# Telefonda gizli (kullanıcı isteği 28.09): sayılar sekme rozetlerinde zaten var. #}
     <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
         <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Active</p>
         <p class="text-lg font-bold text-accent-blue">{{ counts.active }}</p>
@@ -44,7 +45,7 @@
         </a>
     </div>
     <div class="flex flex-wrap items-center gap-1">
-        {% for key, label in [('all', 'All TF'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1h', '1H-5M')] %}
+        {% for key, label in [('all', 'All TF'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
         <a href="/open-signals?tab={{ tab }}&tf={{ key }}" data-tf="{{ key }}"
             class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == key %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             {{ label }} <span class="ml-0.5 opacity-70">{{ counts.tf.get(key, 0) }}</span>
@@ -63,7 +64,7 @@
             <div class="flex items-center gap-1.5 min-w-0 flex-wrap">
                 <span class="text-base font-semibold text-white">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
                 <span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold
-                    {% if r.tf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.tf == '1h' %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">{{ r.tf_label }}</span>
+                    {% if r.tf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.tf in ('1h', '1w') %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">{{ r.tf_label }}</span>
                 <span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold
                     {% if s.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ s.direction }}</span>
             </div>
@@ -161,7 +162,7 @@
             <tr class="hover:bg-dark-700/50 transition-colors">
                 <td class="px-2 py-2 whitespace-nowrap">
                     <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
-                        {% if r.tf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.tf == '1h' %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">
+                        {% if r.tf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif r.tf in ('1h', '1w') %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">
                         {{ r.tf_label }}
                     </span>
                 </td>

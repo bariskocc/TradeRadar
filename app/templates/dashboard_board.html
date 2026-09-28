@@ -19,16 +19,16 @@
                 {{ m.tf(r.tf_label) }}
                 <span class="text-white font-medium w-20 truncate">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
                 <span class="w-12">{{ m.dir(s.direction) }}</span>
-                <span class="flex-1 text-gray-400 truncate">
+                {# Telefonda satır dar: durum sütunu gizlenir, bekleyen işlemde "girişe xR" yerine durum yazılır. #}
+                {% set wait_state %}{% if s.status == 'waiting_entry' %}Limit bekliyor{% elif r.c2_open %}<span class="text-accent-blue">C2 açık</span>{% else %}MSS bekliyor{% endif %}{% endset %}
+                <span class="hidden md:block flex-1 text-gray-400 truncate">
                     {% if s.status == 'active' %}<span class="text-green-400">Aktif</span>{% if r.sl_be %} · <span class="text-gray-300">SL girişte</span>{% endif %}
-                    {% elif s.status == 'waiting_entry' %}Limit bekliyor
-                    {% elif r.c2_open %}<span class="text-accent-blue">C2 açık</span>
-                    {% else %}MSS bekliyor{% endif %}
+                    {% else %}{{ wait_state }}{% endif %}
                 </span>
-                <span class="text-right w-24">
+                <span class="flex-1 md:flex-none text-right md:w-24 truncate">
                     {% if s.status == 'active' %}{{ m.rv(r.live_r) }}
-                    {% elif r.to_entry_r is not none %}<span class="text-gray-400">girişe {{ '%.2f'|format(r.to_entry_r) }}R</span>
-                    {% else %}<span class="text-gray-600">—</span>{% endif %}
+                    {% else %}<span class="md:hidden text-gray-400">{{ wait_state }}</span>
+                    <span class="hidden md:inline">{% if r.to_entry_r is not none %}<span class="text-gray-400">girişe {{ '%.2f'|format(r.to_entry_r) }}R</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</span>{% endif %}
                 </span>
                 <span class="text-right w-14 text-gray-500">{{ r.age }}</span>
             </div>

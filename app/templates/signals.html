@@ -5,7 +5,7 @@
 
 {% block body %}
 {# Eski backend (restart oncesi) bu degiskenleri gondermezse sayfa yine acilsin. #}
-{% set tf_labels = tf_labels if tf_labels is defined else {'4h': '4H-15M', '1d': '1D-1H', '1h': '1H-5M'} %}
+{% set tf_labels = tf_labels if tf_labels is defined else {'4h': '4H-15M', '1d': '1D-1H', '1w': '1W-4H', '1h': '1H-5M'} %}
 {% set filter_qs = filter_qs if filter_qs is defined else '' %}
 {% set week_start = week_start if week_start is defined else '' %}
 <div class="flex h-full">
@@ -220,7 +220,7 @@
                             </td>
                             <td class="px-2 py-2 whitespace-nowrap">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
-                                    {% if stf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif stf == '1h' %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">{{ tf_labels.get(stf, stf|upper) }}</span>
+                                    {% if stf == '1d' %}bg-accent-purple/15 text-accent-purple{% elif stf in ('1h', '1w') %}bg-amber-500/15 text-amber-400{% else %}bg-accent-blue/15 text-accent-blue{% endif %}">{{ tf_labels.get(stf, stf|upper) }}</span>
                             </td>
                             <td class="px-2 py-2 whitespace-nowrap">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-dark-700 text-gray-300">
@@ -277,7 +277,7 @@
                             </td>
                             <td class="px-2 py-2 text-center whitespace-nowrap">
                                 {% if signal.smt_pair %}
-                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="{{ '5M' if stf == '1h' else '1H' if stf == '1d' else '15M' }} SMT divergence: {{ signal.smt_pair }}">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="{{ '5M' if stf == '1h' else '1H' if stf == '1d' else '4H' if stf == '1w' else '15M' }} SMT divergence: {{ signal.smt_pair }}">
                                     ✓ {{ fmt_ui_symbol(signal.smt_pair, 'crypto') }}
                                 </span>
                                 {% else %}
@@ -295,11 +295,11 @@
                             </td>
                             <td class="px-2 py-2 text-center whitespace-nowrap">
                                 {% if signal.c2_closed %}
-                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/15 text-green-400" title="Purge (C2) {{ '1H' if stf == '1h' else '1D' if stf == '1d' else '4H' }} candle is closed">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/15 text-green-400" title="Purge (C2) {{ '1H' if stf == '1h' else '1D' if stf == '1d' else '1W' if stf == '1w' else '4H' }} candle is closed">
                                     Closed
                                 </span>
                                 {% else %}
-                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-400" title="Purge (C2) {{ '1H' if stf == '1h' else '1D' if stf == '1d' else '4H' }} candle is still open">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-400" title="Purge (C2) {{ '1H' if stf == '1h' else '1D' if stf == '1d' else '1W' if stf == '1w' else '4H' }} candle is still open">
                                     Not closed
                                 </span>
                                 {% endif %}

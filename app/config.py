@@ -50,6 +50,20 @@ BOOTSTRAP_LIMITS = {
 SESSION_1H_BARS = int(os.getenv("SESSION_1H_BARS", "2100"))
 SESSION_1H_PAGE = 1000
 
+# 1W-4H stratejisi (28.09): haftalik HTF 1D'den sentezlenir ve CRT tespiti >= 16 haftalik mum
+# + ATR14 ister; aylik bias/PMH-PML icin 2 kapali ay gerekir. Bugunku seriler yetmiyor (kripto 1D
+# 60 bar ~ 8 hafta, seans 1H 2100 bar ~ 12 hafta). Bu yuzden 1W evrenine AYRI, uzun bir 1D
+# gecmisi (store "1d_deep") tutulur; 1h/4h/1d serileri eskisiyle birebir ayni kalir.
+# - Kripto (BTC/ETH): ayni 1D istegi daha buyuk limitle (ek istek YOK), kuyrugu "1d"ye yazilir.
+# - Seans: derin 1H sayfasi yalniz "1d_deep" yoksa (acilis) cekilir (~5 sayfa, 2100'un 3'u yerine).
+W1_DAILY_BARS = int(os.getenv("W1_DAILY_BARS", "400"))
+W1_SESSION_1H_BARS = int(os.getenv("W1_SESSION_1H_BARS", "4400"))
+
+# 1H-5M stratejisi 28.09'da KAPATILDI (kullanici karari; yerine 1W-4H). Kod duruyor: True yapmak
+# 5m aboneliklerini, bootstrap'i ve 1H tespitini geri acar (scanner.STRATEGY_CFG'deki yorumlu
+# 1H blogu da acilmali).
+H1_5M_ENABLED = False
+
 # Bakim dongusu araligi (saniye): aktif sembol seti degisim kontrolu + gunluk
 # 1D yenileme burada yapilir. Periyodik REST TARAMA YOKTUR; tespit tamamen WS
 # olaylariyla (15m/4h kapanis) calisir. 0 => bakim dongusu kapali.
