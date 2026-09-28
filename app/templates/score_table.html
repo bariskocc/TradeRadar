@@ -3,15 +3,16 @@
 {# Bu sayfa TURKCE (kullanici istegi 28.09); diger sayfalar Ingilizce. #}
 {% block title %}TradeRadar - Skor Tablosu{% endblock %}
 
+{# DURUM = hukum (dogru calisiyor mu), OZET = tek cumle (h.detail) ayri sutunda. #}
 {% macro health_badge(h) %}
     {% if h.level == 'ok' %}
-        <span class="inline-flex items-center gap-1 text-xs text-accent-green">● {{ h.text }}</span>
+        <div class="text-sm font-semibold text-accent-green whitespace-nowrap">✓ {{ h.text }}</div>
     {% elif h.level == 'warn' %}
-        <span class="inline-flex items-center gap-1 text-xs text-accent-yellow">▲ {{ h.text }}</span>
+        <div class="text-sm font-semibold text-accent-yellow whitespace-nowrap">⚠ {{ h.text }}</div>
     {% elif h.level == 'bad' %}
-        <span class="inline-flex items-center gap-1 text-xs text-accent-red font-semibold">✕ {{ h.text }}</span>
+        <div class="text-sm font-semibold text-accent-red whitespace-nowrap">✕ {{ h.text }}</div>
     {% else %}
-        <span class="inline-flex items-center gap-1 text-xs text-gray-500">○ {{ h.text }}</span>
+        <div class="text-sm text-gray-500 whitespace-nowrap">○ {{ h.text }}</div>
     {% endif %}
 {% endmacro %}
 
@@ -51,15 +52,15 @@
                 </span>
                 {% if issues %}
                 <span class="px-3 py-1.5 rounded-lg bg-accent-red/10 text-accent-red border border-accent-red/20">
-                    {{ issues }} satır bozuk
+                    {{ issues }} satır hatalı
                 </span>
                 {% elif warns %}
                 <span class="px-3 py-1.5 rounded-lg bg-accent-yellow/10 text-accent-yellow border border-accent-yellow/20">
-                    Tüm satırlar çalışıyor · {{ warns }} uyarı
+                    Hatalı satır yok · {{ warns }} kalemin etkisi yok
                 </span>
                 {% else %}
                 <span class="px-3 py-1.5 rounded-lg bg-accent-green/10 text-accent-green border border-accent-green/20">
-                    Tüm satırlar çalışıyor
+                    Tüm satırlar doğru çalışıyor
                 </span>
                 {% endif %}
                 <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-500">
@@ -84,7 +85,7 @@
                     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Skor kalemleri</h3>
                     <p class="text-[11px] text-gray-500 mt-1">
                         Kalemler toplanır, toplam {{ limits.cap }}'da kesilir; SMT tavandan sonra eklenir.
-                        Canlı kontrol = motorun setup'larının kaçında kalemin puan verdiği.
+                        Durum son 7 günün setup'larından: ✓ doğru çalışıyor · ⚠ etkisi yok (hep ya da hiç puan veriyor, iyiyi kötüden ayırmıyor) · ✕ hatalı · ○ yetersiz veri.
                     </p>
                 </div>
                 <table class="w-full">
@@ -93,7 +94,8 @@
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">KALEM</th>
                             <th class="px-3 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PUAN</th>
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">NE ZAMAN</th>
-                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ÇALIŞIYOR MU?</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DURUM</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ÖZET</th>
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ÖLÇÜM</th>
                         </tr>
                     </thead>
@@ -106,7 +108,8 @@
                                 {{ r.points }}
                             </td>
                             <td class="px-3 py-2 text-xs text-gray-400">{{ r.rule }}</td>
-                            <td class="px-3 py-2 whitespace-nowrap">{{ health_badge(r.health) }}</td>
+                            <td class="px-3 py-2">{{ health_badge(r.health) }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-300">{{ r.health.detail }}</td>
                             <td class="px-3 py-2 text-xs text-gray-500">{{ r.note or '—' }}</td>
                         </tr>
                         {% endfor %}
@@ -114,7 +117,8 @@
                             <td class="px-3 py-2 text-sm text-white font-semibold whitespace-nowrap">Toplam</td>
                             <td class="px-3 py-2 text-sm text-right font-mono text-white whitespace-nowrap">≤ {{ limits.max }}</td>
                             <td class="px-3 py-2 text-xs text-gray-400">min({{ limits.max }}, min({{ limits.cap }}, ham − SMT) + SMT)</td>
-                            <td class="px-3 py-2" colspan="2">{{ health_badge(total) }}</td>
+                            <td class="px-3 py-2">{{ health_badge(total) }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-300" colspan="2">{{ total.detail }}</td>
                         </tr>
                     </tbody>
                 </table>
@@ -126,7 +130,7 @@
                     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Hard filtreler</h3>
                     <p class="text-[11px] text-gray-500 mt-1">
                         Motordaki sırayla. Filtreden geçemeyen setup skoru ne olursa olsun elenir.
-                        Canlı kontrol = bu filtrede takılıp kalan setup sayısı (Journal'da ulaştığı en ileri aşama).
+                        Durum: ✓ doğru çalışıyor (açıksa setup eliyor, kapalıysa hiç elemiyor) · ✕ hatalı (kapalıyken eledi) · ○ yetersiz veri.
                     </p>
                 </div>
                 <table class="w-full">
@@ -134,14 +138,15 @@
                         <tr class="border-b border-dark-600">
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">FİLTRE</th>
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">BU STRATEJİDE</th>
-                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ÇALIŞIYOR MU?</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DURUM</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ÖZET</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-dark-700">
                         {% for f in filters %}
                         {% if loop.first or f.group != loop.previtem.group %}
                         <tr class="bg-dark-700/40">
-                            <td colspan="3" class="px-3 py-1.5 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{{ f.group }}</td>
+                            <td colspan="4" class="px-3 py-1.5 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{{ f.group }}</td>
                         </tr>
                         {% endif %}
                         <tr class="{% if not f.on %}opacity-60{% endif %}">
@@ -153,7 +158,8 @@
                                     <span class="text-gray-500">✗ {{ f.off_note or 'Yok' }}</span>
                                 {% endif %}
                             </td>
-                            <td class="px-3 py-2 whitespace-nowrap">{{ health_badge(f.health) }}</td>
+                            <td class="px-3 py-2">{{ health_badge(f.health) }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-300">{{ f.health.detail }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>

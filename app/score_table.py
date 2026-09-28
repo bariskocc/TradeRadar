@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -223,46 +224,50 @@ def _expected_score(parts: dict, lim: dict) -> int:
 
 
 def _score_health(rows: list[dict], parts_list: list[dict], lim: dict) -> dict:
-    """Her kaleme `health` = {level: ok|warn|bad|na, text} yazar; toplam kontrolunu doner."""
+    """Her kaleme `health` = {level, text, detail} yazar; toplam kontrolunu doner.
+
+    Kullanici istegi 28.09: sutun "puan veriyor mu"yu degil **dogru calisiyor mu**yu soyler.
+    `text` = hukum (DURUM sutunu), `detail` = tek cumlelik ozet (OZET sutunu). Dort hukum:
+    ok "Doğru çalışıyor" · warn "Etkisi yok" (hep ya da hic puan -> iyiyi kotuden ayirmiyor) ·
+    bad "Hatalı" (kural disi puan / toplam-tavan tutmuyor) · na "Yetersiz veri"."""
     n = len(parts_list)
     item_keys = [r["key"] for r in rows]
     for r in rows:
         vals = [int(p.get(r["key"]) or 0) for p in parts_list]
         bad = sum(1 for v in vals if v not in r["allowed"])
-        nonzero = sum(1 for v in vals if v != 0)
+        # "Etkisi yok" = setupların >= %95'i AYNI puanı alıyor (hep 0 ya da hep +1; C2 renginde
+        # hep +2 gibi). Sifir-olmayan sayimi degil: cok degerli kalemde (+2/+1) yanlis alarm verirdi.
+        top_v, top_n = max(Counter(vals).items(), key=lambda kv: kv[1]) if vals else (0, 0)
         if bad:
-            r["health"] = {"level": "bad", "text": f"{bad} setupta beklenmeyen puan"}
-        elif r["absent"]:
-            r["health"] = {"level": "ok", "text": "Yok, hep 0 ✓" if n else "Yok"}
+            wrong = ", ".join(f"{v:+d}" for v in sorted({v for v in vals if v not in r["allowed"]}))
+            r["health"] = _h("bad", "Hatalı", f"{bad} setupa kurala aykırı puan verdi ({wrong}).")
         elif n < MIN_N:
-            r["health"] = {"level": "na", "text": f"Veri az ({n} setup)"}
-        elif nonzero == 0:
-            r["health"] = {"level": "warn", "text": "Hiç puan vermedi"}
-        elif r["key"] == "htf":
-            pos = sum(1 for v in vals if v > 0)
-            neg = sum(1 for v in vals if v < 0)
-            r["health"] = {"level": "ok", "text": f"+2: %{pos * 100 // n} · −2: %{neg * 100 // n}"}
-        elif r["key"] == "base":
-            cnt = {v: sum(1 for x in vals if x == v) for v in (2, 1, 0)}
-            r["health"] = {"level": "ok",
-                           "text": " · ".join(f"{v} puan: %{c * 100 // n}" for v, c in cnt.items() if c)}
+            r["health"] = _h("na", "Yetersiz veri", f"Son 7 günde {n} setup var, karar için en az {MIN_N} gerekli.")
+        elif r["absent"]:
+            r["health"] = _h("ok", "Doğru çalışıyor", "Bu stratejide kullanılmıyor; beklendiği gibi hiç puan vermedi.")
+        elif top_n / n >= ALWAYS_FRAC and top_v == 0:
+            r["health"] = _h("warn", "Etkisi yok",
+                             f"Neredeyse hiçbir setupa puan vermiyor ({n} setupta {n - top_n}); skoru değiştirmiyor.")
+        elif top_n / n >= ALWAYS_FRAC:
+            r["health"] = _h("warn", "Etkisi yok",
+                             f"Neredeyse her setup aynı puanı alıyor ({n} setupta {top_n} kez {top_v:+d}); "
+                             "iyiyi kötüden ayırmıyor.")
         else:
-            frac = nonzero / n
-            txt = f"Puan verdiği setup: %{round(frac * 100)}"
-            if frac >= ALWAYS_FRAC:
-                r["health"] = {"level": "warn", "text": f"{txt} — ayırt etmiyor"}
-            else:
-                r["health"] = {"level": "ok", "text": txt}
+            r["health"] = _h("ok", "Doğru çalışıyor", "Kurala uygun puan veriyor, setupları ayırıyor.")
     raw_bad = sum(
         1 for p in parts_list
         if sum(int(p.get(k) or 0) for k in item_keys) != int(p.get("raw") or 0)
     )
     score_bad = sum(1 for p in parts_list if int(p.get("score") or 0) != _expected_score(p, lim))
-    if not n:
-        return {"level": "na", "text": "Pencerede setup yok"}
+    if n < MIN_N:
+        return _h("na", "Yetersiz veri", f"Son 7 günde {n} setup var, karar için en az {MIN_N} gerekli.")
     if raw_bad or score_bad:
-        return {"level": "bad", "text": f"Toplam tutmuyor: kalem≠ham {raw_bad}, tavan≠skor {score_bad} / {n}"}
-    return {"level": "ok", "text": f"{n} setupun hepsinde kalem toplamı ve tavan doğru"}
+        return _h("bad", "Hatalı", f"{raw_bad + score_bad} setupta toplam skor kalemlerden yanlış hesaplanmış.")
+    return _h("ok", "Doğru çalışıyor", "Toplam skor her setupta kalemlerden ve tavandan doğru hesaplanıyor.")
+
+
+def _h(level: str, text: str, detail: str = "") -> dict:
+    return {"level": level, "text": text, "detail": detail}
 
 
 async def build_score_table(db: AsyncSession, strategy: str, now: datetime | None = None) -> dict:
@@ -302,14 +307,14 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
         cnt = stage_counts.get(f["stage"], 0) if f["stage"] else None
         f["count"] = cnt
         if f["stage"] is None:
-            f["health"] = {"level": "na", "text": "Journal'da sayılmıyor"}
+            f["health"] = _h("na", "Ölçülemiyor", "Journal bu kuralı ayrıca kaydetmiyor.")
         elif not f["on"]:
-            f["health"] = ({"level": "bad", "text": f"Kapalı olmalıydı ama {cnt} setup eledi"} if cnt
-                           else {"level": "ok", "text": "Kapalı, eleme yok ✓"})
+            f["health"] = (_h("bad", "Hatalı", f"Bu stratejide kapalı olmalıydı ama {cnt} setup eledi.") if cnt
+                           else _h("ok", "Doğru çalışıyor", "Bu stratejide kapalı; beklendiği gibi hiç setup elemedi."))
         elif cnt:
-            f["health"] = {"level": "ok", "text": f"{cnt} setup eledi"}
+            f["health"] = _h("ok", "Doğru çalışıyor", f"Son 7 günde {cnt} setup eledi.")
         else:
-            f["health"] = {"level": "na", "text": "Pencerede eleme yok"}
+            f["health"] = _h("na", "Yetersiz veri", "Son 7 günde bu filtreye takılan setup olmadı.")
 
     issues = (
         sum(1 for r in rows if r["health"]["level"] == "bad")
