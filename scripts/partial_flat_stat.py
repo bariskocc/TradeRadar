@@ -35,8 +35,11 @@ sys.path.insert(0, str(REPO))
 
 from app.setup_journal import PRE_SETUP_STAGES  # noqa: E402
 
-# IZLEME.md'deki onceden yazilmis esik (ana dilimde, tetiklenmis ve iki kolu da cozulmus setup).
-MIN_ARMED = 100
+# IZLEME.md'deki esik -- 28.09'dan beri TEMIZ dilimde (kullanici onayi): 4H'te seviyeleri C2 kapaliyken donmus,
+# 1D'de hepsi (1D C2 acikken de islem aciyor, oradaki seviye sinyalin kendisi). Eskiden ANA dilimde 100'du;
+# ANA'nin %77'si 4H'te C2 acikken donmus satirdi (kosan SL) ve temiz dilimle ters isaret veriyordu.
+# 100'de fark SE'si ~0.11 R (esik 0.15'e cok yakin), 200'de ~0.08.
+MIN_ARMED = 200
 BAND = 0.15            # R / tetiklenen setup; |fark| bunun altindaysa "fark yok"
 
 
@@ -174,14 +177,15 @@ def main() -> None:
 
     head("Kismi kar + BE vs duz TP/SL  (Setup Journal, k=1 golgesi)")
     print("  fark = duz - bugunku; POZITIF fark = kismi kar + BE'yi kapatmak kazandirirdi")
-    main_t = tally(setup)
-    show("ANA: motorun setup'lari", main_t)
-    show("  C2 kapaliyken donmus", tally([r for r in setup if r["c2"]]))
-    show("  RR >= 2", tally([r for r in setup if (r["rr"] or 0) >= 2]))
-    show("  skor >= 7", tally([r for r in setup if (r["score"] or 0) >= 7]))
-    show("  sinyale donusen", tally([r for r in setup if r["signal"]]))
+    clean = [r for r in setup if r["strategy"] == "1d" or r["c2"]]
+    main_t = tally(clean)
+    show("KARAR: temiz (4H C2 kapali + 1D)", main_t)
+    show("  (bilgi) tum motor setup'lari", tally(setup))
+    show("  temiz + RR >= 2", tally([r for r in clean if (r["rr"] or 0) >= 2]))
+    show("  temiz + skor >= 7", tally([r for r in clean if (r["score"] or 0) >= 7]))
+    show("  temiz + sinyale donusen", tally([r for r in clean if r["signal"]]))
     for st in ("4h", "1d"):
-        show(f"  {st}", tally([r for r in setup if r["strategy"] == st]))
+        show(f"  temiz {st}", tally([r for r in clean if r["strategy"] == st]))
     show("motorun CRT saymadigi adaylar", tally([r for r in rows if r["pre"]]))
 
     head("Canli sinyaller (dogrulama)")
@@ -190,12 +194,12 @@ def main() -> None:
     head("Karar")
     n = main_t["n"]
     if n < MIN_ARMED:
-        print(f"  ANA dilim {n}/{MIN_ARMED} -- KARAR VERME. 03.10'da hala eksikse kullaniciya sor.")
+        print(f"  Temiz dilim {n}/{MIN_ARMED} -- KARAR VERME, veri birikiyor.")
         return
     d = (main_t["flat"] - main_t["cur"]) / n
     if d > BAND:
-        print(f"  H1: fark {d:+.3f} > +{BAND} -> kismi kar + BE'yi KAPATMA ADAYI. RR >= 2 ve C2 kapali")
-        print("  dilimleri ayni isarette mi bak; degisiklikten once tek dogrulama replay'i (CLAUDE.md kural 4).")
+        print(f"  H1: fark {d:+.3f} > +{BAND} -> kismi kar + BE'yi KAPATMA ADAYI. 'temiz + RR >= 2' dilimi ve canli")
+        print("  sinyal blogu ayni isarette mi bak; degisiklikten once tek dogrulama replay'i (CLAUDE.md kural 4).")
     elif d < -BAND:
         print(f"  H2: fark {d:+.3f} < -{BAND} -> kismi kar + BE KALIR (getiri gerekcesiyle).")
     else:

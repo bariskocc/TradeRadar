@@ -345,12 +345,6 @@ _TSI = timezone(TSI_OFFSET)
 # Dashboard "Dikkat" panosu olcumu hatirlatir (scripts/partial_vs_be.py). Karar kurali ve sinirlar:
 # IZLEME.md -> "Kismi kar vs BE-only". Olcum yapilinca esigi yukselt ya da hatirlatmayi kaldir.
 PARTIAL_REVIEW_MIN_TRADES = 25
-# LONG/SHORT ayrismasi: her YONDE bu kadar kapali islem birikince Dikkat panosu olcumu hatirlatir
-# (scripts/direction_stat.py). Pencere 08.09.2026'da basliyor -- ilk kapali islem, izlemenin basi.
-# Karar kurali ve sinirlar: IZLEME.md -> "LONG/SHORT ayrismasi". Karar verilince esigi yukselt
-# ya da hatirlatmayi kaldir, yoksa surekli bagirir.
-DIRECTION_REVIEW_MIN_TRADES = 30
-DIRECTION_REVIEW_SINCE = datetime(2026, 9, 8)
 _DASH_TFS = ("4h", "1d", "1h")
 # "FX" = kripto disi tum seans sembolleri (fx/metal/endeks/petrol).
 _DASH_MARKETS = (
@@ -669,23 +663,8 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
         _add("info", None,
              f"Kısmi kâr vs sadece BE: {partial_done} işlem birikti — "
              "`python scripts/partial_vs_be.py` ile ölç, sonucu IZLEME.md'ye yaz.")
-    # LONG/SHORT ayrismasi olcumu: iki yon de esigi doldurunca hatirlat. Betik esigin altinda
-    # zaten "KARAR YOK" basar; buradaki sayac yalnizca "artik bakilabilir" demek.
-    dir_rows = await db.execute(
-        select(Signal.direction, func.count(Signal.id))
-        .where(
-            Signal.closed_at.is_not(None),
-            Signal.closed_at >= DIRECTION_REVIEW_SINCE,
-            Signal.rr_value.is_not(None),
-        )
-        .group_by(Signal.direction)
-    )
-    dir_counts = {d: n for d, n in dir_rows.all()}
-    n_long, n_short = dir_counts.get("LONG", 0), dir_counts.get("SHORT", 0)
-    if min(n_long, n_short) >= DIRECTION_REVIEW_MIN_TRADES:
-        _add("info", None,
-             f"LONG/SHORT ayrışması: {n_long} LONG / {n_short} SHORT işlem birikti — "
-             "`python scripts/direction_stat.py` ile ölç, sonucu IZLEME.md'ye yaz.")
+    # LONG/SHORT ayrismasi hatirlatmasi 28.09'da kaldirildi: madde kapandi (ayrisma ortadan kalkti),
+    # olcum istenirse `python scripts/direction_stat.py`.
     attention.sort(key=lambda a: a["ts"], reverse=True)
 
     return {
@@ -1220,7 +1199,7 @@ async def watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
-    # Karara baglanmis maddeler varsayilan olarak gizli (sayfa karisiyordu); ?done=1 geri getirir.
+    # Tamamlananlar her zaman en altta, katlanmis baslikta; ?done=1 o basligi acik getirir (28.09).
     data = await build_watchlist(db, show_done=request.query_params.get("done") == "1")
     return templates.TemplateResponse(request=request, name="watchlist.html", context={
         "user": user,

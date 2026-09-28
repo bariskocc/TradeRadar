@@ -5,7 +5,8 @@ komisyonsuz, sonra komisyon dusulunce. Limit SEVIYESI sorusu (CISD/MSS/IFVG/BPR)
 IZLEME "Geri cekilme derinligi" / tmp/tmp_limit_variant_depth.py.
 
 Kaynak `setup_journal.retrace` ekseni (mum indirmez): 0 = seviye dondugu andaki fiyat (`ref`, market girisi),
-1 = SL. Limit = `d_of.chosen` (bugunku giris). Stop kesri k: SL = x + k(1-x) (%100 bugunku purge ucu).
+1 = SL. Limit = `d_of.chosen` (bugunku giris). Stop kesri k: SL = x + k(1-x) (%100 bugunku purge ucu);
+market kollari k = %100 / %90 / %80 / %70 / %60.
   tp_first True : x <= d_tp ise dolar; d_tp < s -> TP, degilse SL; x > d_tp -> TP giristen once (0R)
   tp_first False: dolar, SL
   ufuk doldu    : d_max >= x -> dolu/sonuclanmamis (0R brut, komisyonun giris yarisi dusulur), degilse dolmadi
@@ -83,7 +84,8 @@ def trade(rec, x, k, fee_pct):
 
 
 ARMS = [("limit (bugunku)", "limit", 1.0, True)]
-for k in (1.0, 0.8, 0.6):
+# %90 / %70 (28.09, kullanici): "market + dar stop limitten kotu mu" sorusunu ara noktalarla da gormek icin.
+for k in (1.0, 0.9, 0.8, 0.7, 0.6):
     for gate in (True, False):
         ARMS.append((f"market stop %{int(k * 100)} " + ("RR>=2" if gate else "kapi yok"), "market", k, gate))
 

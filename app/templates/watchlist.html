@@ -68,15 +68,9 @@
                 <span class="px-3 py-1.5 rounded-lg text-xs bg-dark-700 text-gray-400 border border-dark-600">
                     Pasif: <strong>{{ counts.passive }}</strong>
                 </span>
-                {% if show_done %}
-                <a href="/izleme" class="px-3 py-1.5 rounded-lg text-xs bg-dark-700 text-gray-300 border border-dark-600 hover:text-white">
-                    Karara bağlandı: <strong>{{ counts.done }}</strong> · gizle
+                <a href="/izleme?done=1#tamamlanan" class="px-3 py-1.5 rounded-lg text-xs bg-accent-green/10 text-accent-green border border-accent-green/20 hover:text-white">
+                    Tamamlanan: <strong>{{ counts.done }}</strong>
                 </a>
-                {% else %}
-                <a href="/izleme?done=1" class="px-3 py-1.5 rounded-lg text-xs bg-dark-700/50 text-gray-500 border border-dark-600 hover:text-gray-300">
-                    Karara bağlananları göster
-                </a>
-                {% endif %}
             </div>
 
             {% if not md_ok %}
@@ -199,11 +193,11 @@
             </details>
             {% endif %}
 
-            <!-- 4) KARARA BAGLANANLAR: varsayilan olarak HIC basilmaz (?done=1) -->
-            {% if show_done %}
-            <details class="mb-8" open>
+            <!-- 4) TAMAMLANANLAR: en altta, varsayilan KAPALI (28.09); ?done=1 acik getirir. En yeni karar ustte. -->
+            {% if done_items %}
+            <details id="tamamlanan" class="mb-8"{% if show_done %} open{% endif %}>
                 <summary class="cursor-pointer text-sm font-semibold text-gray-400 hover:text-white select-none mb-2">
-                    Karara bağlananlar ({{ counts.done }}) ▾
+                    Tamamlanan maddeler ({{ counts.done }}) ▾
                 </summary>
                 <div class="mt-2 rounded-xl bg-dark-800 border border-dark-600 overflow-hidden">
                     <table class="w-full text-xs">

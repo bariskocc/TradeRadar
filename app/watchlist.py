@@ -78,6 +78,9 @@ class Progress:
     bars: list[Bar] = field(default_factory=list)
     due: Optional[date] = None          # takvime bagli basliklar (⏰ tarih)
     note: str = ""                      # serbest bilgi satiri (ort. R, sayac vb.)
+    # Tetik "TARIH YA DA ORNEKLEM" (trigger metninde "ya da"): hangisi once dolarsa. 28.09'a kadar
+    # yoktu; 7 madde "ya da" yazdigi halde VE ile degerlendiriliyor, ornegi dolan madde 03.10'u bekliyordu.
+    either: bool = False
 
     @property
     def days_left(self) -> Optional[int]:
@@ -87,7 +90,14 @@ class Progress:
 
     @property
     def ready(self) -> bool:
-        """Tetik doldu mu: TUM cubuklar dolmali ve (varsa) tarih gelmis olmali."""
+        """Tetik doldu mu: TUM cubuklar dolmali ve (varsa) tarih gelmis olmali.
+
+        `either`: tarih gelmesi YA DA butun cubuklarin dolmasi yeter.
+        """
+        if self.either:
+            date_ok = self.due is not None and (self.days_left or 0) <= 0
+            bars_ok = bool(self.bars) and all(b.ready for b in self.bars)
+            return date_ok or bars_ok
         if self.due is not None and (self.days_left or 0) > 0:
             return False
         if self.bars:
@@ -131,17 +141,21 @@ async def _p_partial(db: AsyncSession) -> Progress:
 
 
 async def _p_partial_flat(db: AsyncSession) -> Progress:
-    """%50'ye gelip iki kolu da cozulmus motor setup'u (4H/1D); karar kurali
-    `scripts/partial_flat_stat.py` ANA dilimiyle ayni sayar: pt temiz, ayni mum/ufuk disi haric."""
+    """%50'ye gelip iki kolu da cozulmus motor setup'u; `scripts/partial_flat_stat.py` KARAR (temiz) dilimiyle
+    ayni sayar: pt temiz, ayni mum/ufuk disi haric, 4H'te seviyeleri C2 kapaliyken donmus + 1D.
+
+    28.09 (kullanici onayi): eski sayac tum 4H/1D'yi sayiyordu (118), %77'si C2 acikken donmus 4H satiriydi
+    (kosan SL) ve temiz dilim (27) ters isaret veriyordu. Esik 100 -> 200, tarih yok (orneklem tetigi)."""
     t = SetupJournal.__table__
     k1 = lambda f: func.json_extract(t.c.shadow, f'$."1".{f}')  # noqa: E731
     n = await db.scalar(
         select(func.count()).select_from(t).where(
             t.c.shadow.is_not(None), t.c.strategy.in_(("4h", "1d")),
             t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
-            k1("pa").is_not(None), k1("cur").in_(("tp", "be")), k1("o").in_(("win", "loss")))
+            or_(t.c.strategy == "1d", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+            k1("pt") == 1, k1("pa").is_not(None), k1("cur").in_(("tp", "be")), k1("o").in_(("win", "loss")))
     ) or 0
-    return Progress(bars=[Bar("%50'ye gelip çözülmüş setup", n, 100)], due=date(2026, 10, 3))
+    return Progress(bars=[Bar("%50'ye gelip çözülmüş temiz setup", n, 200)])
 
 
 async def _p_direction(db: AsyncSession) -> Progress:
@@ -209,15 +223,26 @@ async def _p_retrace(db: AsyncSession) -> Progress:
         or_(t.c.strategy == "1h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
     ]
     n = await db.scalar(select(func.count()).select_from(t).where(*base)) or 0
+    # 28.09: kazanan = bugunku girisle DOLUP TP'ye giden (d_of.chosen <= d_tp). Eskiden `tp_first` sayiliyordu;
+    # dolmadan TP'ye gidenler de girdigi icin sayac 67/30 gosterirken esli tablolarda varyant basina 5-8 islem
+    # doluyordu -- madde erken "aksiyon bekliyor"a dustu (sayac karar kuralinin saydigini saymali).
+    d_ch = func.json_extract(t.c.retrace, "$.d_of.chosen")
     win = await db.scalar(
-        select(func.count()).select_from(t).where(*base, t.c.retrace.like('%"tp_first":true%'))
+        select(func.count()).select_from(t).where(
+            *base, func.json_extract(t.c.retrace, "$.tp_first") == 1, d_ch >= 0,
+            d_ch <= func.coalesce(func.json_extract(t.c.retrace, "$.d_tp"), 0),
+        )
     ) or 0
-    return Progress(bars=[Bar("first_bar'lı çözülmüş kazanan", win, 30)],
-                    due=date(2026, 10, 3), note=f"{n} first_bar'lı setup ölçekte")
+    return Progress(bars=[Bar("first_bar'lı dolmuş kazanan", win, 30)],
+                    due=date(2026, 10, 3), either=True, note=f"{n} first_bar'lı setup ölçekte")
 
 
 async def _p_market_fee(db: AsyncSession) -> Progress:
-    """first_bar'li (26.09+) cozulmus gercek setup, C2 kapali donmus (market vs limit karar dilimi, esik 100)."""
+    """first_bar'li (26.09+) cozulmus gercek setup, C2 kapali donmus (market vs limit karar dilimi, esik 400).
+
+    28.09: esik 100 -> 400 (kullanici "iyice emin olmak istiyorum"); 100'de okunan sonuc ara okuma sayildi.
+    Tetik yalniz orneklem: tarih yok (03.10 ara okuma note'ta), either yok -- tarih tek basina tetiklemesin.
+    """
     t = SetupJournal.__table__
     n = await db.scalar(select(func.count()).select_from(t).where(
         t.c.retrace.is_not(None), t.c.first_bar.is_not(None), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
@@ -225,7 +250,8 @@ async def _p_market_fee(db: AsyncSession) -> Progress:
         or_(t.c.retrace.like('%"tp_first":true%'), t.c.retrace.like('%"tp_first":false%'),
             t.c.retrace.like('%"done":true%')),
     )) or 0
-    return Progress(bars=[Bar("first_bar'lı çözülmüş setup", n, 100)], due=date(2026, 10, 3))
+    return Progress(bars=[Bar("first_bar'lı çözülmüş setup", n, 400)],
+                    note="28.09 ara okuma (104): her market kolu limitin altında · 03.10 ikinci ara okuma")
 
 
 async def _p_entry_models(db: AsyncSession) -> Progress:
@@ -291,7 +317,7 @@ async def _p_1d_c2_open(db: AsyncSession) -> Progress:
         Signal.purge_time.is_not(None),
         func.julianday(Signal.entry_filled_time) < func.julianday(Signal.purge_time) + 1.0,
     )
-    return Progress(bars=[Bar("C2 açıkken dolan kapalı 1D işlem", n, 10)], due=date(2026, 10, 3))
+    return Progress(bars=[Bar("C2 açıkken dolan kapalı 1D işlem", n, 10)], due=date(2026, 10, 3), either=True)
 
 
 async def _p_nearest_zone(db: AsyncSession) -> Progress:
@@ -299,7 +325,7 @@ async def _p_nearest_zone(db: AsyncSession) -> Progress:
     n = await _closed_count(
         db, Signal.entry_model.in_(("ifvg", "bpr")), Signal.created_at >= datetime(2026, 9, 28),
     )
-    return Progress(bars=[Bar("bölge girişli kapalı sinyal (28.09+)", n, 10)], due=date(2026, 10, 3))
+    return Progress(bars=[Bar("bölge girişli kapalı sinyal (28.09+)", n, 10)], due=date(2026, 10, 3), either=True)
 
 
 async def _p_c2_refreeze(db: AsyncSession) -> Progress:
@@ -308,7 +334,9 @@ async def _p_c2_refreeze(db: AsyncSession) -> Progress:
     n = await db.scalar(
         select(func.count()).select_from(t).where(t.c.strategy == "4h", t.c.pre_c2.is_not(None))
     ) or 0
-    return Progress(bars=[Bar("yeniden dondurulan 4H satırı", n, 50)], due=date(2026, 10, 3))
+    # 28.09: cubuk kaldirildi -- yeniden dondurulan satir sayisi (104) karar kumesini (kapilari gecmis kullanilabilir
+    # 4H satiri, 28.09'da 3) saymiyordu, madde erken "aksiyon"a dustu. Sayi note'ta, tetik yalniz tarih.
+    return Progress(due=date(2026, 10, 3), note=f"{n} yeniden dondurulmuş 4H satırı")
 
 
 async def _p_c2_open_fill(db: AsyncSession) -> Progress:
@@ -321,7 +349,7 @@ async def _p_c2_open_fill(db: AsyncSession) -> Progress:
             func.json_extract(t.c.pre_c2, "$.o").in_(("win", "loss", "open", "no_c2_fill")),
         )
     ) or 0
-    return Progress(bars=[Bar("karşılaştırılabilir 4H setup", n, 30)], due=date(2026, 10, 3))
+    return Progress(bars=[Bar("karşılaştırılabilir 4H setup", n, 30)], due=date(2026, 10, 3), either=True)
 
 
 async def _p_zone_presence(db: AsyncSession) -> Progress:
@@ -337,7 +365,7 @@ async def _p_zone_presence(db: AsyncSession) -> Progress:
                    func.json_extract(t.c.entries, "$.ifvg_near").is_not(None))
     var = await db.scalar(select(func.count()).select_from(t).where(*base, has_zone)) or 0
     yok = await db.scalar(select(func.count()).select_from(t).where(*base, ~has_zone)) or 0
-    return Progress(bars=[Bar("bölgeli (IFVG/BPR)", var, 30), Bar("bölgesiz", yok, 30)], due=date(2026, 10, 3))
+    return Progress(bars=[Bar("bölgeli (IFVG/BPR)", var, 30), Bar("bölgesiz", yok, 30)], due=date(2026, 10, 3), either=True)
 
 
 async def _p_week_gap(db: AsyncSession) -> Progress:
@@ -565,7 +593,8 @@ async def _score_parts_resolved(db: AsyncSession, strategy: str, since: datetime
 
 async def _p_score_parts_4h(db: AsyncSession) -> Progress:
     n = await _score_parts_resolved(db, "4h")
-    return Progress(due=date(2026, 9, 28), note=f"4H: {n} sonuçlanmış kırılımlı setup")
+    # 28.09 ilk okuma yapildi (adaylar: PD major, PD aylik, wick esigi); karar tek replay + W40 ile 03.10.
+    return Progress(due=date(2026, 10, 3), note=f"4H: {n} sonuçlanmış kırılımlı setup")
 
 
 async def _p_score_parts_1d(db: AsyncSession) -> Progress:
@@ -574,6 +603,28 @@ async def _p_score_parts_1d(db: AsyncSession) -> Progress:
     n25 = await _score_parts_resolved(db, "1d", datetime(2026, 9, 25))
     return Progress(due=date(2026, 10, 3),
                     note=f"1D: {n} sonuçlanmış setup · C2/renk kalemleri için 25.09 sonrası {n25}")
+
+
+async def _p_htf_bonus(db: AsyncSession) -> Progress:
+    """W40 (28.09+), skor bandi 0-6, sonuclanmis: TF basina htf +2 / htf 0 kovalari (karar haftasi, esik 50/50).
+
+    Tarihli madde: cubuk eklemek hatirlatmayi saklar -- sayilar note'ta (_p_score_parts_1d deseni)."""
+    t = _journal_table()
+    htf = func.json_extract(t.c.parts_at_levels, "$.htf")
+    sc = func.json_extract(t.c.parts_at_levels, "$.score")
+    parts = []
+    for tf in ("4h", "1d", "1h"):
+        base = [t.c.strategy == tf, t.c.parts_at_levels.is_not(None), t.c.outcome.in_(("win", "loss")),
+                t.c.first_seen >= datetime(2026, 9, 28), sc <= 6]
+        n2 = await db.scalar(select(func.count()).select_from(t).where(*base, htf == 2)) or 0
+        n0 = await db.scalar(select(func.count()).select_from(t).where(*base, htf == 0)) or 0
+        parts.append(f"{tf.upper()} {n2}/{n0}")
+    # 1D havuz (28.09, kullanici onayi): hafta sarti yok, tum haftalar -- tek haftada 50/50 hic dolmuyor.
+    b1 = [t.c.strategy == "1d", t.c.parts_at_levels.is_not(None), t.c.outcome.in_(("win", "loss")), sc <= 6]
+    p2 = await db.scalar(select(func.count()).select_from(t).where(*b1, htf == 2)) or 0
+    p0 = await db.scalar(select(func.count()).select_from(t).where(*b1, htf == 0)) or 0
+    parts.append(f"1D havuz {p2}/{p0}")
+    return Progress(due=date(2026, 10, 3), note="W40 bant 0–6, htf +2 / htf 0 (her biri 50): " + " · ".join(parts))
 
 
 async def _p_journal_live(db: AsyncSession) -> Progress:
@@ -641,7 +692,7 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="retrace", status="open", started="18.09", onem=1,
         title="Limit giriş seviyesi — CISD/MSS mi IFVG/BPR mi, stop %100/%80/%60",
-        trigger="03.10.2026 ya da 30 first_bar'lı kazanan: bir varyant/stop aynı setuplarda bugünkü girişi "
+        trigger="03.10.2026 ya da 30 first_bar'lı dolmuş kazanan: bir varyant/stop aynı setuplarda bugünkü girişi "
                 "+0.15 R/setup geçerse mum re-track'i (market girişi ayrı konu)",
         measure="python tmp/tmp_limit_variant_depth.py · python scripts/retrace_stat.py",
         md="Geri çekilme derinliği — limit emri hangi seviyeden dolar? (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
@@ -671,9 +722,11 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bpr,
     ),
     WatchItem(
-        key="bpr_leg", status="open", started="22.09", onem=1,
+        key="bpr_leg", status="done", started="22.09", onem=1,
         title="BPR bacağı — kesişim yerine bacağın kendisinden mi girmeli?",
         trigger="40 bacak ölçümlü setup: bfvg_near, bpr_near'ı 0,15 R/setup geçiyor mu",
+        result="KESİŞİM KALIYOR (28.09): aynı 143 setupta bacak −0.054 vs kesişim −0.051 R/setup (fark −0.004, "
+               "bant ±0.15); bacak 2 kazanç fazla dolduruyor ama düşük RR bunu siliyor. bfvg ölçüm olarak duruyor.",
         measure="python scripts/entry_model_stat.py (bölüm 2)",
         md="BPR bacağı — kesişim yerine bacağın kendisinden mi girmeli? (ölçüm başladı 22.09.2026)",
         progress_fn=_p_bpr_leg,
@@ -701,8 +754,9 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="market_vs_limit_fee", status="open", started="27.09", onem=1,
         title="Market vs limit giriş — komisyonsuz / komisyonlu",
-        trigger="03.10.2026 ya da 100 first_bar'lı setup: market kolu NET (komisyonlu) limiti +0.15 R/setup ve iki "
-                "zaman yarısında geçerse mum re-track'i (kısmi kâr + BE)",
+        trigger="400 first_bar'lı setup (28.09'da 100'den yükseltildi, kullanıcı): market kolu (stop %100/90/80/70/60) "
+                "NET limiti +0.15 R/setup ve iki zaman yarısında geçerse mum re-track'i (kısmi kâr + BE); "
+                "03.10 ara okuma, karar değil",
         measure="python scripts/market_vs_limit_stat.py [--fee-market 0.10 --fee-limit 0.07]",
         md="Market vs limit giriş — komisyonsuz / komisyonlu (27.09.2026, ⏰ 03.10)",
         progress_fn=_p_market_fee,
@@ -727,11 +781,12 @@ ITEMS: list[WatchItem] = [
     ),
     WatchItem(
         key="c2_refreeze", status="open", started="27.09", onem=2,
-        title="4H seviyeleri C2 kapanışında yeniden dondurulur",
-        trigger="03.10.2026 ya da 50 yeniden dondurulmuş 4H satırı: kapıları geçmiş kullanılabilir küme "
-                "büyüdü mü, yeni 4H satırlarında C2 açık seviyeyle kalan 'geçmiş' satır var mı",
+        title="Journal: 4H setup'ta SL/TP seviyeleri C2 kapanışında tekrar güncellenir",
+        trigger="03.10.2026: kapıları geçmiş kullanılabilir küme büyüdü mü, yeni 4H satırlarında C2 açık seviyeyle "
+                "kalan 'geçmiş' satır var mı (28.09 ara okuma: mekanizma çalışıyor, hız için yalnız 3 satır — "
+                "'50 satır' sayacı kararın kümesini saymadığı için tetik yalnız tarih)",
         measure="python tmp/tmp_gate_passed_depth.py · setup_journal.pre_c2",
-        md="4H seviyeleri C2 kapanışında yeniden dondurulur (27.09.2026, restart bekliyor)",
+        md="Journal: 4H setup'ta SL/TP seviyeleri C2 kapanışında tekrar güncellenir (27.09.2026)",
         progress_fn=_p_c2_refreeze,
     ),
     WatchItem(
@@ -744,7 +799,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_nearest_zone,
     ),
     WatchItem(
-        key="rules_0925", status="open", started="25.09", onem=1,
+        key="rules_0925", status="open", started="25.09", onem=2,  # 28.09: 1 -> 2, canliya alinan degisikligin dogrulamasi
         title="1D C2 hard filtreleri kalktı + CISD bloğu + IFVG C1 şartı",
         trigger="03.10.2026 ya da C2 açıkken dolan 10 kapalı 1D işlem: bu işlemler diğer 1D işlemlerden "
                 "0.3R+ kötüyse require_c2_closed geri açılır",
@@ -761,18 +816,21 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_pd_midnight,
     ),
     WatchItem(
-        key="bias_journal", status="open", started="18.09", onem=1,
+        key="bias_journal", status="done", started="18.09", onem=1,
         title="1D bias tahmin karnesi",
         # 21.09 ara okumasi: H1 battı (0/3 ufuk) ama hard filtre YERINDE KALDI -- karne 1-5 gun
         # olcuyor, setuplar medyan 1.2 saat yasiyor. Maddenin kalan isi iki alt soru.
         trigger="03.10: htf +2 ödülü hak edilmiş mi (hizalı −0.461 vs NEUTRAL −0.406) · "
                 "STRUCTURE_STALE_DAYS düşsün mü (bayat dal %52.0 vs taze AND %46.1)",
+        result="KAPANDI (28.09): STRUCTURE_STALE_DAYS = 7 KALIYOR — Journal karşı-olgusunda (3 strateji) hiçbir eşik "
+               "(0–∞, yalnız ict) +5R şartına yaklaşmadı; eşik setupların yalnız 0–1'ini (C2 açık dahil ≤14) "
+               "değiştiriyor. htf +2 sorusu 'Skor kalemleri — 4H'e devredildi (1H'te +2 kanıtlı). Karne ölçümü sürüyor.",
         measure="python scripts/bias_stat.py",
         md="1D bias tahmin karnesi (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
         progress_fn=_p_bias_journal,
     ),
     WatchItem(
-        key="bias_fidelity", status="open", started="24.09", onem=1,
+        key="bias_fidelity", status="open", started="24.09", onem=2,  # 28.09: 1 -> 2, 24.09 duzeltmesinin dogrulamasi
         title="1D bias hesap doğruluğu — motor doğru günün bias'ını mı kullanıyor?",
         trigger="03.10: restart sonrası gün dönümünde yanlış bias 0 mı (düzeltme 24.09)",
         measure="python scripts/bias_fidelity_stat.py",
@@ -780,9 +838,11 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_fidelity,
     ),
     WatchItem(
-        key="prefill", status="open", started="18.09", onem=3,
+        key="prefill", status="done", started="18.09", onem=3,
         title="Dolum öncesi koşu",
         trigger="0-25% ve >=50% kovalarının her birinde 100 dolan setup (ilk okuma 28.09.2026)",
+        result="KAPI AÇILMIYOR (28.09): hipotezin tersi — dolumdan önce TP yolunun ≥%50'sini koşan setup %41.6 "
+               "kazanıyor, 0-25% kovası %22.2 (n 166 / 2727). ENA #71 tek vaka olarak kalır.",
         measure="python scripts/prefill_stat.py",
         md="Dolum öncesi koşu (18.09.2026, restart bekliyor)",
         progress_fn=_p_prefill,
@@ -804,9 +864,12 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_dead_candidate,
     ),
     WatchItem(
-        key="direction", status="open", started="17.09",
+        key="direction", status="done", started="17.09",
         title="LONG/SHORT ayrışması + 16.09 FOMC etkisi",
         trigger="Her iki yönde de 30 kapalı işlem birikmesi",
+        result="KAPANDI (28.09, kullanıcı kararı — kural uygulanmadan): açılıştaki LONG 2/15 vs SHORT 7/12 farkı kapandı "
+               "(LONG 31 / SHORT 29 işlem, fark +2.7 puan, 4H'te ikisi de %40). Journal taban oranında SHORT 8 puan geride "
+               "= piyasa yönü. Dashboard hatırlatması kaldırıldı; rapor scripts/direction_stat.py duruyor.",
         measure="python scripts/direction_stat.py",
         md="LONG/SHORT ayrışması + 16.09 FOMC etkisi (ilk ölçüm 17.09.2026, ⏰ tetik: her yönde 30 işlem)",
         progress_fn=_p_direction,
@@ -822,7 +885,8 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="partial_flat", status="open", started="24.09", onem=1,
         title="Kısmi kâr + BE kapatılsın mı?",
-        trigger="100 setup %50'ye gelip çözülünce (Journal, 4H/1D) ve 03.10",
+        trigger="200 temiz setup %50'ye gelip çözülünce (Journal; 4H'te C2 kapalıyken donmuş + 1D) — 28.09'da "
+                "100 + 03.10'dan değişti, kullanıcı onayı",
         measure="python scripts/partial_flat_stat.py",
         md="Kısmi kâr + BE kapatılsın mı? (ölçüm başladı 24.09.2026, ⏰ tetik: 100 setup + 03.10)",
         progress_fn=_p_partial_flat,
@@ -864,9 +928,13 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_deleted_gate,
     ),
     WatchItem(
-        key="bias_1h", status="open", started="20.09", onem=1,
+        key="bias_1h", status="done", started="20.09", onem=1,
         title="1D bias 1H'te iki kez mi eliyor?",
         trigger="25 çözülmüş bias elemesi (1H, ~2/gün) — “Skor kalemleri” ile aynı oturumda",
+        result="İKİ KANAL DA KALIYOR (28.09): 1H hard filtresinin elediği 40 çözülmüş setup −0.417 R/işlem "
+               "(koruyucu); htf +2 ile 0 farkı 1H'te +8.3 puan (n 51/38, kalem kanıtlı). 4H'te +2 vs 0 farkı "
+               "+3.0 — orada karar 'Skor kalemleri — 4H' maddesinde. ⚠️ +8.3 bütün skor bantlarından; seçilimsiz bant 0–6'da "
+               "+1.6 — +2 sorusu 'hizalı setup'a +2' maddesinde yeniden okunuyor.",
         measure="python scripts/bias_1h_stat.py",
         md="1D bias 1H'te iki kez mi eliyor? (başladı 20.09.2026, ⏰ tetik: 25 çözülmüş elenen setup)",
         progress_fn=_p_bias_1h,
@@ -874,10 +942,10 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="score_parts_4h", status="open", started="16.09", onem=1,
         title="Skor kalemleri — 4H",
-        trigger="28.09.2026 ilk okuma (skor bandı 0–6, iki takvim haftası ayrı); "
-                "uzun fitil × −4 ceza hipotezi (rapor bölüm 5) 03.10'da W40 ile",
+        trigger="03.10: Journal karşı-olgusu (tmp/tmp_score_weight_cf.py) aynı kuralla yeniden — 28.09'da "
+                "temiz küme 15 işlemdi, karar yok; uzun fitil × −4 ceza hipotezi (bölüm 5) W40 ile",
         measure="python scripts/score_parts_stat.py --strategy 4h",
-        md="Skor kalemleri — 4H (ölçüm 16.09.2026, ⏰ ilk okuma 28.09.2026)",
+        md="Skor kalemleri — 4H (ölçüm 16.09.2026, ilk okuma 28.09, ⏰ 03.10.2026)",
         progress_fn=_p_score_parts_4h,
     ),
     WatchItem(
@@ -887,6 +955,16 @@ ITEMS: list[WatchItem] = [
         measure="python scripts/score_parts_stat.py --strategy 1d  (C2/renk: --since 2026-09-25)",
         md="Skor kalemleri — 1D (ölçüm 16.09.2026, ⏰ okuma 03.10.2026)",
         progress_fn=_p_score_parts_1d,
+    ),
+    WatchItem(
+        key="htf_bonus", status="open", started="28.09", onem=1,
+        title="1D bias: hizalı setup'a +2 puan hak ediliyor mu?",
+        trigger="03.10.2026: W40'ta (bant 0–6) htf +2 ile htf 0 farkı, TF bazında (4H/1D/1H) × market — 4H W38 +5.8 / "
+                "W39 −7.5 (salınım kriptodan), 1H −0.6 / +5.1; 1D hafta şartsız havuz 50/50 (28.09: 27/36). "
+                "Ters (−2) = hard filtre doğru mu da aynı tabloda (4H filtre kripto dışında güçlü); kural IZLEME.md'de",
+        measure="python tmp/tmp_htf_bonus_weeks.py  (--md: IZLEME tablosu)",
+        md="1D bias: hizalı setup'a +2 puan hak ediliyor mu? (28.09.2026, ⏰ 03.10)",
+        progress_fn=_p_htf_bonus,
     ),
     WatchItem(
         key="ws_watchdog", status="open", started="16.09", onem=3,
@@ -909,9 +987,12 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_shadow,
     ),
     WatchItem(
-        key="journal_live", status="open", started="14.09", onem=3,
+        key="journal_live", status="done", started="14.09", onem=3,
         title="Setup Journal canlıda",
         trigger="2 hafta sonra kapı × sonuç özeti (özellikle “1D bias opposite” satırı)",
+        result="ÇALIŞIYOR (28.09): günde ~260–470 satır, flush hatası yalnız 14.09/18.09'da birkaç dakikalık iki "
+               "pakette; bias kapısının elediği 452 çözülmüş setup %23 win / −0.48 R (taban %29 / −0.36). "
+               "Yan bulgu: Pazartesi evren geçişinde WS aboneliği gitmiyordu (FX 28.09 03:18'den beri kör) — düzeltildi.",
         measure="/setup-journal",
         md="Setup Journal canlıda — izlenecek (commit `c2c9fc2`, restart bekliyor)",
         progress_fn=_p_journal_live,
@@ -926,7 +1007,7 @@ ITEMS: list[WatchItem] = [
                "“Kısmi kâr vs BE-only” (17.09), bias “1D bias tahmin karnesi” (18.09).",
     ),
     WatchItem(
-        key="be_1d_1h", status="open", started="09.09",
+        key="be_1d_1h", status="open", started="09.09", onem=1,  # 28.09: 2 -> 1, dogrudan kural sorusu
         title="1D/1H'te BE açılsın mı?",
         trigger="4H'te BE @ TP %50 yeterli veri biriktirince karar ver",
         measure="BE tetiklenen işlemlerin kaçı 0R'de kapandı, kaçı TP'ye yürüdü",
@@ -944,7 +1025,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c2_penalty,
     ),
     WatchItem(
-        key="trail_90", status="open", started="09.09", onem=3,
+        key="trail_90", status="open", started="09.09", onem=1,  # 28.09: 3 -> 1, trail esigi kurali
         title="Trail arm eşiği %90 — kazananları kesiyor mu?",
         trigger="Trail çıkışlarının ortalama R'si < 1R olursa",
         measure="/logs → Engine Report → çıkış türü dağılımı",
@@ -1235,6 +1316,12 @@ def closeness(prog: Optional[Progress]) -> float:
     return min(vals) if vals else PASSIVE
 
 
+def _decided_key(result: str) -> tuple[int, int]:
+    """Sonuc metnindeki ilk 'gg.aa' (karar tarihi, ör. "KAPANDI (28.09)") -> (ay, gun); yoksa en sona."""
+    m = re.search(r"\b(\d{2})\.(\d{2})\b", result or "")
+    return (int(m.group(2)), int(m.group(1))) if m else (0, 0)
+
+
 def _started_key(started: str) -> tuple[int, int]:
     """"18.09" -> (9, 18); esitlikte EN ESKI izleme one gelsin diye."""
     m = re.match(r"(\d{1,2})\.(\d{1,2})", started or "")
@@ -1242,10 +1329,11 @@ def _started_key(started: str) -> tuple[int, int]:
 
 
 async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
-    """Dort kume: aksiyon bekleyen / acik (oncelige gore) / pasif / karara baglanmis.
+    """Dort kume: aksiyon bekleyen / acik (oncelige gore) / pasif / tamamlanan.
 
-    Karara baglananlar sayfada VARSAYILAN OLARAK gosterilmez (kullanici istegi 18.09: sayfa
-    karisiyordu) -- `?done=1` ile geri gelir, kayit kaybolmaz. Pasif kume de katlanmis durur.
+    Tamamlananlar 28.09'dan beri HER ZAMAN doner ve sayfanin en altinda KATLANMIS bir baslikta durur
+    (kullanici istegi; 18.09'da sayfa karisiyor diye hic basilmiyordu). `show_done` artik yalniz o
+    basligin acik gelip gelmeyecegini soyler (`?done=1`). En yeni karar ustte (`_decided_key`).
     """
     action, open_items, passive, done_items = [], [], [], []
     for item in ITEMS:
@@ -1300,7 +1388,7 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
         "action": action,
         "open_items": open_items,
         "passive_items": passive,
-        "done_items": done_items if show_done else [],
+        "done_items": sorted(done_items, key=lambda r: _decided_key(r["item"].result), reverse=True),
         "show_done": show_done,
         "md_ok": bool(_load_sections()),
         "counts": {"action": len(action), "open": len(open_items),

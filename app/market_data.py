@@ -154,6 +154,10 @@ class BingXMarketData:
         # Cuma kapanisi (kripto-disi pozisyonlari duzlestirme): haftada bir kez.
         self._week_close_pending = False
         self._week_close_marker: str | None = None
+        # Acik WS ve uzerindeki abonelikler: sembol seti degisince (Cumartesi / Pazartesi
+        # evren gecisi) baglanti KOPMADAN fark gonderilir (_sync_subscriptions, 28.09).
+        self._ws = None
+        self._subscribed: set[str] = set()
 
     # ──────────────── Bootstrap ────────────────
 
@@ -442,6 +446,7 @@ class BingXMarketData:
                     self._connected = True
                     self._connected_at = datetime.now(timezone.utc)
                     self._ws_connects += 1
+                    self._ws = ws
                     await self._subscribe_all(ws)
                     log.info(
                         "BingX WS baglandi, %d sembol (4H) + %d (1h) + %d (5m).",
@@ -474,8 +479,10 @@ class BingXMarketData:
                             ) from None
                         await self._handle_raw(ws, raw)
             except asyncio.CancelledError:
+                self._ws = None
                 break
             except Exception as e:
+                self._ws = None
                 self._connected = False
                 self._ws_disconnects += 1
                 self._last_disconnect_at = datetime.now(timezone.utc)
@@ -503,22 +510,56 @@ class BingXMarketData:
             + len(self._h1_5m_symbols) * len(_WS_H1_TFS)
         )
 
-    async def _subscribe_all(self, ws) -> None:
+    def _topics(self) -> list[str]:
+        """Guncel sembol setinin WS abonelikleri (`dataType`), gonderim sirasiyla."""
+        out: list[str] = []
         for sym in self._symbols:
-            for tf in self._core_tfs_for(sym):
-                msg = {"id": str(uuid.uuid4()), "reqType": "sub", "dataType": f"{sym}@{_TF_SUFFIX[tf]}"}
-                await ws.send(json.dumps(msg))
-                await asyncio.sleep(0.01)
+            out.extend(f"{sym}@{_TF_SUFFIX[tf]}" for tf in self._core_tfs_for(sym))
         for sym in self._d1h_symbols:
-            for tf in _WS_D1H_TFS:
-                msg = {"id": str(uuid.uuid4()), "reqType": "sub", "dataType": f"{sym}@{_TF_SUFFIX[tf]}"}
-                await ws.send(json.dumps(msg))
-                await asyncio.sleep(0.01)
+            out.extend(f"{sym}@{_TF_SUFFIX[tf]}" for tf in _WS_D1H_TFS)
         for sym in self._h1_5m_symbols:
-            for tf in _WS_H1_TFS:
-                msg = {"id": str(uuid.uuid4()), "reqType": "sub", "dataType": f"{sym}@{_TF_SUFFIX[tf]}"}
-                await ws.send(json.dumps(msg))
-                await asyncio.sleep(0.01)
+            out.extend(f"{sym}@{_TF_SUFFIX[tf]}" for tf in _WS_H1_TFS)
+        return list(dict.fromkeys(out))
+
+    async def _send_topics(self, ws, topics, req: str) -> None:
+        for dt in topics:
+            await ws.send(json.dumps({"id": str(uuid.uuid4()), "reqType": req, "dataType": dt}))
+            await asyncio.sleep(0.01)
+
+    async def _subscribe_all(self, ws) -> None:
+        topics = self._topics()
+        await self._send_topics(ws, topics, "sub")
+        self._subscribed = set(topics)
+
+    async def _sync_subscriptions(self) -> None:
+        """Sembol seti degisti: acik baglantiya eksik abonelikleri gonder, fazlalari kaldir.
+
+        28.09: eskiden abonelik yalniz baglanirken gidiyordu. Pazartesi evren gecisinde bootstrap
+        seriyi yukluyor ama FX/metal/endeks/petrol mumlari hic gelmiyordu -- BingX baglantiyi
+        kendiliginden koparana kadar (onceki haftalar sans eseri birkac saatte) motor bu sembollerde
+        kordu; 27.09 19:17'den beri kopmayan baglantida 28.09 03:18'den itibaren hic veri yok.
+        Baglanti yoksa bir sey yapma: yeniden baglanma zaten tum seti abone eder.
+        """
+        ws = self._ws
+        if ws is None or not self._connected:
+            return
+        want = self._topics()
+        add = [t for t in want if t not in self._subscribed]
+        drop = sorted(self._subscribed - set(want))
+        if not add and not drop:
+            return
+        try:
+            await self._send_topics(ws, drop, "unsub")
+            await self._send_topics(ws, add, "sub")
+            self._subscribed = set(want)
+            log.info("WS abonelikleri guncellendi: +%d / -%d (toplam %d).", len(add), len(drop), len(want))
+        except Exception as e:
+            # Gonderim yarida kaldiysa baglanti muhtemelen olu: kopar, yeniden baglanma hepsini abone eder.
+            log.warning("WS abonelik guncellemesi basarisiz (%s); baglanti yenilenecek.", e)
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     async def _handle_raw(self, ws, raw) -> None:
         if isinstance(raw, (bytes, bytearray)):
@@ -673,6 +714,7 @@ class BingXMarketData:
                     self._h1_5m_symbols = current_h1
                     day_before = self._last_1d_day
                     await self.bootstrap()
+                    await self._sync_subscriptions()
                     # bootstrap _last_1d_day'i bugune ceker: gun de donduyse asagidaki gun
                     # donumu dali bugun hic calismaz, karne satiri bir gun gecikirdi
                     # (Cumartesi / Pazartesi 00:00 UTC evren degisimi, 26.09).
