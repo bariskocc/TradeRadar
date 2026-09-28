@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -15,11 +14,11 @@ from sqlalchemy import select, func, desc, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR
-from app.log_report import build_report
 from app.logging_config import recent_issues, setup_logging
 from app.database import init_db, get_db
 from app.models import Signal, EventLog, SetupJournal, PaperTrade
 from app.watchlist import build_watchlist
+from app.score_table import build_score_table
 from app import paper_trades as paper
 from app import tv_import as tv
 from app.setup_journal import PRE_SETUP_STAGES
@@ -27,7 +26,6 @@ from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR, trading_se
 from app.telegram import is_configured as tg_is_configured
 from app.auth import verify_credentials, create_access_token, get_current_user
 from app.scanner import run_scan, SMT_QUALITY_BONUS, MAX_QUALITY_SCORE
-from app.scheduler import get_scheduler_status
 from app.market_data import market_data
 
 # Uvicorn app'i import eder etmez logu kur; boyle her giris noktasinda (run.py,
@@ -1213,6 +1211,21 @@ async def watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
     })
 
 
+@app.get("/skor-tablosu", response_class=HTMLResponse)
+async def score_table_page(request: Request, db: AsyncSession = Depends(get_db)):
+    """Uc stratejinin skor tablosu + hard filtreleri, satir satir canli saglik kontrolu
+    (Setup Journal'dan). Veri app/score_table.py -- skor degisince orayi da guncelle."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    data = await build_score_table(db, request.query_params.get("tf") or "4h")
+    return templates.TemplateResponse(request=request, name="score_table.html", context={
+        "user": user,
+        "active_page": "score_table",
+        **data,
+    })
+
+
 @app.get("/setup-journal", response_class=HTMLResponse)
 async def setup_journal_page(
     request: Request,
@@ -1260,25 +1273,38 @@ async def setup_journal_page(
             acc["r_if"] += float(win_rr or 0.0)
         elif outcome == "loss":
             acc["r_if"] -= n
-    summary = [
+    all_rows = [
         {"code": code, "label": label, "n": acc["n"], "oc": acc["oc"], "r_if": round(acc["r_if"], 2)}
         for code, label in journal.STAGES
         if (acc := per_stage.get(code))
     ]
-    totals = {
-        "setups": sum(a["n"] for a in per_stage.values()),
-        "win": sum(a["oc"].get("win", 0) for a in per_stage.values()),
-        "loss": sum(a["oc"].get("loss", 0) for a in per_stage.values()),
-        "tp_before_entry": sum(a["oc"].get("tp_before_entry", 0) for a in per_stage.values()),
-        "no_touch": sum(a["oc"].get("no_touch", 0) for a in per_stage.values()),
-        "tracking": sum(a["oc"].get("pending", 0) + a["oc"].get("filled", 0) for a in per_stage.values()),
-        "signal": sum(a["oc"].get("signal", 0) for a in per_stage.values()),
-        "r_if": round(sum(a["r_if"] for a in per_stage.values()), 2),
-    }
+    # Motorun CRT saymadigi adaylar (PRE_SETUP_STAGES) ozetten ve TOPLAM'dan ayri (28.09, kullanici
+    # istegi): C2 araligin disinda kapanmis "setup"lar (-700R) ozeti bogup toplami anlamsiz kiliyordu.
+    # Veri DB'de duruyor -- olcum betikleri onlari kontrol grubu olarak kullaniyor; ayri katlanmis bolumde.
+    summary = [r for r in all_rows if r["code"] not in PRE_SETUP_STAGES]
+    pre_summary = [r for r in all_rows if r["code"] in PRE_SETUP_STAGES]
+
+    def _totals(rows_: list[dict]) -> dict:
+        return {
+            "setups": sum(r["n"] for r in rows_),
+            "win": sum(r["oc"].get("win", 0) for r in rows_),
+            "loss": sum(r["oc"].get("loss", 0) for r in rows_),
+            "tp_before_entry": sum(r["oc"].get("tp_before_entry", 0) for r in rows_),
+            "no_touch": sum(r["oc"].get("no_touch", 0) for r in rows_),
+            "tracking": sum(r["oc"].get("pending", 0) + r["oc"].get("filled", 0) for r in rows_),
+            "signal": sum(r["oc"].get("signal", 0) for r in rows_),
+            "r_if": round(sum(r["r_if"] for r in rows_), 2),
+        }
+
+    totals = _totals(summary)
+    pre_totals = _totals(pre_summary)
 
     # Satir listesi: katlanmis durur; yalniz acikken (veya kapi linkiyle gelindiginde) cekilir.
     if stage != "all":
         filters.append(SetupJournal.best_stage == stage)
+    else:
+        # Satir listesi de varsayilan olarak CRT saymadigi adaylari gostermez (kapi linkiyle gelinir).
+        filters.append(SetupJournal.best_stage.notin_(tuple(PRE_SETUP_STAGES)))
     total = (await db.execute(select(func.count(SetupJournal.id)).where(*filters))).scalar() or 0
     total_pages = max(1, (total + _JOURNAL_PAGE_SIZE - 1) // _JOURNAL_PAGE_SIZE)
     page = min(max(1, page), total_pages)
@@ -1302,6 +1328,8 @@ async def setup_journal_page(
         "filter_qs": filter_qs,
         "summary": summary,
         "totals": totals,
+        "pre_summary": pre_summary,
+        "pre_totals": pre_totals,
         "tf": tf,
         "stage": stage,
         "symbol": symbol,
@@ -1399,7 +1427,6 @@ async def analytics_page(
 
 # ──────────────────── Scan Logs Page ────────────────────
 
-LOG_REPORT_WINDOWS = [(24.0, "24 saat"), (72.0, "3 gün"), (168.0, "7 gün"), (0.0, "Tümü")]
 
 
 @app.get("/logs", response_class=HTMLResponse)
@@ -1407,23 +1434,13 @@ async def logs_page(
     request: Request,
     db: AsyncSession = Depends(get_db),
     page: int = Query(default=1, ge=1),
-    view: str = Query(default="events"),
-    hours: float = Query(default=24.0, ge=0),
 ):
+    # Engine Report sekmesi 28.09'da kapatildi (saglik/BACKFILL Dashboard'da, kapi elemeleri
+    # /setup-journal'da); ayni rapor terminalde: python scripts/logstat.py. Eski ?view=report
+    # linki Events'e duser.
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
-
-    if view == "report":
-        # Motor logu (dosya): yasam dongusu, cikislar, bias, WS sagligi. Kapi elemeleri /setup-journal.
-        report = await asyncio.to_thread(build_report, None, hours or None)
-        return templates.TemplateResponse(request=request, name="log_report.html", context={
-            "user": user,
-            "report": report,
-            "hours": hours,
-            "windows": LOG_REPORT_WINDOWS,
-            "view": "report",
-        })
 
     count_result = await db.execute(select(func.count()).select_from(EventLog))
     total = count_result.scalar() or 0
@@ -1553,37 +1570,10 @@ async def api_radar(request: Request):
 
 @app.get("/scanner", response_class=HTMLResponse)
 async def scanner_page(request: Request):
-    user = get_current_user(request)
-    if not user:
-        return RedirectResponse(url="/login", status_code=303)
-
-    from app.exchange import get_active_markets, is_weekend, to_display_symbol
-    from app.telegram import is_configured as tg_configured
-
-    active_markets = get_active_markets()
-    markets_info = []
-    total_count = 0
-    for market, syms in active_markets.items():
-        display_syms = [_fmt_ui_symbol(to_display_symbol(s), market) for s in syms]
-        markets_info.append({
-            "name": market.upper(),
-            "exchange": "BingX",
-            "symbols": display_syms,
-        })
-        total_count += len(syms)
-
-    scan_mode = "Weekend (Crypto Only)" if is_weekend() else "Weekday (All Markets)"
-
-    sched_status = get_scheduler_status()
-
-    return templates.TemplateResponse(request=request, name="scanner.html", context={
-        "user": user,
-        "markets": markets_info,
-        "symbol_count": total_count,
-        "telegram_configured": tg_configured(),
-        "scheduler": sched_status,
-        "scan_mode": scan_mode,
-    })
+    """Scanner sayfasi 28.09'da kapatildi: WS durumu, Telegram testi ve sembol sayisi Dashboard
+    saglik seridinde, sembol bazli durum Radar'da. Eski yer imleri Dashboard'a gider.
+    Manuel tarama API'si (/api/scan) duruyor."""
+    return RedirectResponse(url="/", status_code=303)
 
 
 # ──────────────────── Scanner API ────────────────────

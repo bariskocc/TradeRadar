@@ -1,6 +1,6 @@
 """Motor logundan (logs/traderadar.log) ozet rapor uretir.
 
-Hem `/logs?view=report` sayfasi hem `scripts/logstat.py` bu modulu kullanir;
+`scripts/logstat.py` bu modulu kullanir (web sekmesi 28.09'da kapatildi);
 toplama mantigi tek yerde durur. Dosyayi yalnizca OKUR — DB'ye/sunucuya
 dokunmaz, sunucu kapaliyken de calisir.
 

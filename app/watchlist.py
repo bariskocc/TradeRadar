@@ -1077,7 +1077,7 @@ ITEMS: list[WatchItem] = [
                "trail kapalı. 1H geri açılırsa madde yeniden açılır.",
         title="Trail arm eşiği %90 — kazananları kesiyor mu?",
         trigger="Trail çıkışlarının ortalama R'si < 1R olursa",
-        measure="/logs → Engine Report → çıkış türü dağılımı",
+        measure="python scripts/logstat.py → çıkış türü dağılımı",
         md="4. Trail arm eşiği %90 — kazananları kesiyor muydu?",
         progress_fn=_p_trail,
     ),
@@ -1113,7 +1113,7 @@ ITEMS: list[WatchItem] = [
         key="crt60_off", status="open", started="10.09", onem=3,
         title="CRT %60 invalidation KAPATILDI",
         trigger="Breach sonrası fill'le açılan işlemlerin sonucu kötüyse kuralı geri açmayı tartış",
-        measure="/logs → Engine Report → BACKFILL etkisi",
+        measure="python scripts/logstat.py → BACKFILL etkisi",
         md="0c. CRT %60 invalidation KAPATILDI (10.09)",
     ),
     WatchItem(

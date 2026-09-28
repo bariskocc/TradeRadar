@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{# Bu sayfa TURKCE (kullanici istegi 28.09); diger sayfalar Ingilizce. #}
+{% block title %}TradeRadar - Skor Tablosu{% endblock %}
+
+{% macro health_badge(h) %}
+    {% if h.level == 'ok' %}
+        <span class="inline-flex items-center gap-1 text-xs text-accent-green">● {{ h.text }}</span>
+    {% elif h.level == 'warn' %}
+        <span class="inline-flex items-center gap-1 text-xs text-accent-yellow">▲ {{ h.text }}</span>
+    {% elif h.level == 'bad' %}
+        <span class="inline-flex items-center gap-1 text-xs text-accent-red font-semibold">✕ {{ h.text }}</span>
+    {% else %}
+        <span class="inline-flex items-center gap-1 text-xs text-gray-500">○ {{ h.text }}</span>
+    {% endif %}
+{% endmacro %}
+
+{% block body %}
+<div class="flex h-full">
+
+    {% include 'sidebar.html' %}
+
+    <main class="flex-1 overflow-auto">
+        <div class="p-3 md:p-6 max-w-5xl">
+
+            <div class="mb-4">
+                <h1 class="text-xl font-bold text-white">Skor Tablosu</h1>
+                <p class="text-sm text-gray-500 mt-0.5">
+                    Her stratejinin skor kalemleri ve hard filtreleri — her satırın çalışıp çalışmadığı Setup Journal'dan canlı kontrol edilir
+                </p>
+            </div>
+
+            <!-- Strateji sekmeleri -->
+            <div class="flex gap-1 mb-4 border-b border-dark-600">
+                {% for code, label in tabs %}
+                <a href="/skor-tablosu?tf={{ code }}"
+                   class="px-4 py-2 text-sm -mb-px border-b-2 transition
+                   {% if code == strategy %}border-accent-blue text-accent-blue font-semibold{% else %}border-transparent text-gray-400 hover:text-white{% endif %}">
+                    {{ label }}
+                </a>
+                {% endfor %}
+            </div>
+
+            <!-- Ozet cipleri -->
+            <div class="flex flex-wrap gap-2 mb-4 text-xs">
+                <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-300">
+                    Sinyal eşiği <b class="text-white">≥ {{ limits.min }}</b>
+                </span>
+                <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-300">
+                    Tavan <b class="text-white">{{ limits.cap }}</b> · SMT ile <b class="text-white">{{ limits.max }}</b>
+                </span>
+                {% if issues %}
+                <span class="px-3 py-1.5 rounded-lg bg-accent-red/10 text-accent-red border border-accent-red/20">
+                    {{ issues }} satır bozuk
+                </span>
+                {% elif warns %}
+                <span class="px-3 py-1.5 rounded-lg bg-accent-yellow/10 text-accent-yellow border border-accent-yellow/20">
+                    Tüm satırlar çalışıyor · {{ warns }} uyarı
+                </span>
+                {% else %}
+                <span class="px-3 py-1.5 rounded-lg bg-accent-green/10 text-accent-green border border-accent-green/20">
+                    Tüm satırlar çalışıyor
+                </span>
+                {% endif %}
+                <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-500">
+                    Canlı kontrol: {{ since.strftime('%d.%m %H:%M') }} UTC'den beri {{ n_setups }} setup
+                </span>
+            </div>
+
+            {% if missing_keys %}
+            <div class="mb-4 px-4 py-3 rounded-lg bg-accent-red/10 border border-accent-red/20 text-sm text-accent-red">
+                Motor bu sayfada olmayan kalem(ler) puanlıyor: <b>{{ missing_keys | join(', ') }}</b> — app/score_table.py güncellenmeli.
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="mb-4 px-4 py-3 rounded-lg bg-accent-yellow/10 border border-accent-yellow/20 text-sm text-accent-yellow">
+                Setup Journal okunamadı — canlı kontroller boş.
+            </div>
+            {% endif %}
+
+            <!-- Skor kalemleri -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto mb-6">
+                <div class="px-4 py-3 border-b border-dark-600">
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Skor kalemleri</h3>
+                    <p class="text-[11px] text-gray-500 mt-1">
+                        Kalemler toplanır, toplam {{ limits.cap }}'da kesilir; SMT tavandan sonra eklenir.
+                        Canlı kontrol = motorun setup'larının kaçında kalemin puan verdiği.
+                    </p>
+                </div>
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-dark-600">
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">KALEM</th>
+                            <th class="px-3 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PUAN</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">NE ZAMAN</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ÇALIŞIYOR MU?</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ÖLÇÜM</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for r in rows %}
+                        <tr class="{% if r.absent %}opacity-60{% endif %}">
+                            <td class="px-3 py-2 text-sm text-white whitespace-nowrap">{{ r.label }}</td>
+                            <td class="px-3 py-2 text-sm text-right font-mono whitespace-nowrap
+                                {% if r.points.startswith('−') %}text-accent-red{% elif r.points == '—' %}text-gray-500{% else %}text-accent-green{% endif %}">
+                                {{ r.points }}
+                            </td>
+                            <td class="px-3 py-2 text-xs text-gray-400">{{ r.rule }}</td>
+                            <td class="px-3 py-2 whitespace-nowrap">{{ health_badge(r.health) }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-500">{{ r.note or '—' }}</td>
+                        </tr>
+                        {% endfor %}
+                        <tr class="bg-dark-700/40">
+                            <td class="px-3 py-2 text-sm text-white font-semibold whitespace-nowrap">Toplam</td>
+                            <td class="px-3 py-2 text-sm text-right font-mono text-white whitespace-nowrap">≤ {{ limits.max }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-400">min({{ limits.max }}, min({{ limits.cap }}, ham − SMT) + SMT)</td>
+                            <td class="px-3 py-2" colspan="2">{{ health_badge(total) }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Hard filtreler -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto mb-6">
+                <div class="px-4 py-3 border-b border-dark-600">
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Hard filtreler</h3>
+                    <p class="text-[11px] text-gray-500 mt-1">
+                        Motordaki sırayla. Filtreden geçemeyen setup skoru ne olursa olsun elenir.
+                        Canlı kontrol = bu filtrede takılıp kalan setup sayısı (Journal'da ulaştığı en ileri aşama).
+                    </p>
+                </div>
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-dark-600">
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">FİLTRE</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">BU STRATEJİDE</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">ÇALIŞIYOR MU?</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for f in filters %}
+                        {% if loop.first or f.group != loop.previtem.group %}
+                        <tr class="bg-dark-700/40">
+                            <td colspan="3" class="px-3 py-1.5 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{{ f.group }}</td>
+                        </tr>
+                        {% endif %}
+                        <tr class="{% if not f.on %}opacity-60{% endif %}">
+                            <td class="px-3 py-2 text-sm text-white">{{ f.label }}</td>
+                            <td class="px-3 py-2 text-xs whitespace-nowrap">
+                                {% if f.on %}
+                                    <span class="text-accent-green font-semibold">✓ Var</span>
+                                {% else %}
+                                    <span class="text-gray-500">✗ {{ f.off_note or 'Yok' }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 py-2 whitespace-nowrap">{{ health_badge(f.health) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+        </div>
+    </main>
+</div>
+{% endblock %}
