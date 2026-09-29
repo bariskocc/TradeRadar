@@ -16,33 +16,34 @@
         <span class="text-gray-500">Bot <span class="text-gray-200 font-medium">{{ h.uptime }}</span></span>
 
         <span class="text-gray-500">WS
-            {% if h.connected %}<span class="text-green-400 font-medium">bağlı</span>{% else %}<span class="text-red-400 font-medium">bağlı değil</span>{% endif %}
-            <span class="{% if h.stale %}text-amber-400{% else %}text-gray-400{% endif %}">· son veri {{ h.last_msg_label }}</span>
+            {% if h.connected %}<span class="text-green-400 font-medium">connected</span>{% else %}<span class="text-red-400 font-medium">disconnected</span>{% endif %}
+            <span class="{% if h.stale %}text-amber-400{% else %}text-gray-400{% endif %}">· last data {{ h.last_msg_label }}</span>
         </span>
 
-        <span class="text-gray-500"><span class="text-gray-200 font-medium">{{ h.symbols }}</span> sembol · <span class="text-gray-200 font-medium">{{ h.subs }}</span> abonelik</span>
+        <span class="text-gray-500"><span class="text-gray-200 font-medium">{{ h.symbols }}</span> symbols · <span class="text-gray-200 font-medium">{{ h.subs }}</span> subscriptions</span>
 
-        <span class="text-gray-500">WS kopma <span class="{% if h.ws_disconnects %}text-amber-400{% else %}text-gray-200{% endif %} font-medium">{{ h.ws_disconnects }}</span></span>
+        <span class="text-gray-500">WS drops <span class="{% if h.ws_disconnects %}text-amber-400{% else %}text-gray-200{% endif %} font-medium">{{ h.ws_disconnects }}</span></span>
 
-        <span class="text-gray-500" title="Son 24 saat (bot başlangıcından beri tutulur)">
-            Uyarı <span class="{% if h.warnings %}text-amber-400{% else %}text-gray-200{% endif %} font-medium">{{ h.warnings }}</span>
-            · Hata <span class="{% if h.errors %}text-red-400{% else %}text-gray-200{% endif %} font-medium">{{ h.errors }}</span>
+        <span class="text-gray-500" title="Last 24 hours (tracked since bot start)">
+            Warnings <span class="{% if h.warnings %}text-amber-400{% else %}text-gray-200{% endif %} font-medium">{{ h.warnings }}</span>
+            · Errors <span class="{% if h.errors %}text-red-400{% else %}text-gray-200{% endif %} font-medium">{{ h.errors }}</span>
         </span>
 
         <span class="text-gray-500 flex items-center gap-1.5">Telegram
             {% if h.telegram %}
-            <span class="text-green-400 font-medium">açık</span>
+            <span class="text-green-400 font-medium">on</span>
             <button type="button" onclick="testTelegram(this)"
                     class="px-2 py-0.5 rounded bg-dark-700 hover:bg-dark-600 text-gray-300 text-[10px] font-medium transition">Test</button>
             {% else %}
-            <span class="text-red-400 font-medium">yapılandırılmamış</span>
+            <span class="text-red-400 font-medium">not configured</span>
             {% endif %}
         </span>
 
         <span class="{% if h.fx.soon %}text-amber-400{% else %}text-gray-500{% endif %}">{{ h.fx.label }}</span>
 
-        <span class="ml-auto text-gray-500">Tüm zamanlar
-            <span class="font-semibold">{{ m.rv(h.totals_r) }}</span> · <span class="text-gray-200 font-medium">{{ h.totals_n }}</span> işlem
+        <span class="ml-auto text-gray-500">All time
+            <span class="font-semibold">{{ m.rv(h.totals_r) }}</span> · <span class="text-gray-200 font-medium">{{ h.totals_n }}</span> trades
+            · <span class="text-green-400 font-medium">{{ h.totals_w }}W</span> <span class="text-red-400 font-medium">{{ h.totals_l }}L</span> <span class="text-gray-300 font-medium">{{ h.totals_be }}BE</span>
         </span>
     </div>
 </div>

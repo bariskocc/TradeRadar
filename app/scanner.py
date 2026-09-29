@@ -468,6 +468,23 @@ def _stop_distance_pct(entry: float, stop_loss: float) -> float | None:
     return abs(float(entry) - float(stop_loss)) / abs(float(entry)) * 100.0
 
 
+def _tight_stop_info(entry, stop_loss, df_ltf, cfg: dict | None, market_type: str | None) -> dict:
+    """Dar stop kapisinin olcumu: entry <-> SL < `min_stop_range_mult` x ort. LTF range, ya da market
+    min stop %'si altinda. Kapi (detect) ve bolge secimi (`_maybe_ifvg_entry`, 29.09) ayni formulu kullanir."""
+    min_pct = _min_stop_pct(market_type)
+    stop_pct = _stop_distance_pct(entry, stop_loss)
+    stop_dist = abs(float(entry) - float(stop_loss))
+    avg_range = _avg_ltf_range(df_ltf)
+    range_mult = float((cfg or {}).get("min_stop_range_mult", MIN_STOP_RANGE_MULT))
+    tight_range = avg_range is not None and stop_dist < range_mult * avg_range
+    tight_pct = min_pct is not None and (stop_pct is None or stop_pct < min_pct)
+    return {
+        "tight": bool(tight_range or tight_pct), "tight_range": bool(tight_range),
+        "tight_pct": bool(tight_pct), "stop_dist": stop_dist, "avg_range": avg_range,
+        "range_mult": range_mult, "stop_pct": stop_pct, "min_pct": min_pct,
+    }
+
+
 async def _count_direction_cluster(
     session: AsyncSession,
     direction: str,
@@ -656,6 +673,11 @@ async def _delete_pending(
 # silinince ilk mesaja reply gider; fill olursa ACTIVE mesaji da ona reply olur.
 # Motor davranisina etkisi yok. Tekrar gonderim `tg_potential_state` (DB) ile engellenir.
 _POTENTIAL_OUTBOX: list[dict] = []
+
+# 29.09 (kullanici karari): POTANSIYEL bildirimleri KAPALI -- hem 1D POTANSIYEL zinciri hem kapida
+# elenen setup bildirimi (ELENDI). Tum stratejilerde yalniz WAITING ENTRY gider (`_notify_waiting`);
+# ACTIVE / IPTAL ona reply olur. True yapmak eski davranisi geri getirir (kod duruyor).
+POTENTIAL_NOTICES_ENABLED = False
 
 
 def _note_deleted(s: Signal, reason: str) -> None:
@@ -921,7 +943,7 @@ async def _notify_gated_potential(
     sweep_small, not_selected — buraya hic gelmez, onlar `setup is None` dalinda kaliyor),
     kapi `_GATED_NOTIFY_GATES` icinde olsun ve RR tabani gecsin.
     """
-    if strategy != STRATEGY_1D:
+    if strategy != STRATEGY_1D or not POTENTIAL_NOTICES_ENABLED:
         return
     try:
         if not preview.get("cisd_confirmed"):
@@ -969,7 +991,7 @@ async def _cancel_gated_notices(
     uretiyordu (18.09 anchor degisiminde XAU/XAG/US100/US500'de birebir goruldu).
     Yon degistiyse ya da yeni anahtarda zaten zincir varsa eski davranis: IPTAL.
     """
-    if strategy != STRATEGY_1D:
+    if strategy != STRATEGY_1D or not POTENTIAL_NOTICES_ENABLED:
         return
     try:
         keep = _as_naive(keep_purge_time)
@@ -1563,8 +1585,14 @@ def _maybe_ifvg_entry(
     c2_hours: float | None = None,
     *,
     allow_ifvg: bool = True,
+    cfg: dict | None = None,
 ):
     """LTF IFVG/BPR varsa ve min RR'yi geciyorsa onu kullan; yoksa CISD/MSS.
+
+    Dar stoplu bolge atlanir (29.09, kullanici karari; `cfg` verildiyse): bolge SL'ye yakin oldugu
+    icin stop `min_stop_range_mult` altinda kalabiliyor ve eskiden setup `tight_stop` ile TAMAMEN
+    siliniyordu -- CISD girisiyle gecerli olacak olsa bile. Artik siradaki bolge, o da yoksa
+    CISD/MSS denenir. CISD <-> MSS gecisi YOK: onay zamani secilen yapisal seviyeden hesaplaniyor.
 
     CISD/MSS adayi check_cisd_confirmation icinde zaten daha iyi RR ile secilir.
     Bolge girisi SL-TP arasinda OLMALI. 28.09'a kadar ayrica CISD adayindan daha
@@ -1636,6 +1664,10 @@ def _maybe_ifvg_entry(
         cand_rr = _calc_planned_rr(cand_entry, cisd.stop_loss, cisd.take_profit)
         if cand_rr is None:
             continue
+        if cfg is not None and _tight_stop_info(
+            cand_entry, cisd.stop_loss, df_ltf, cfg, getattr(setup, "market_type", None),
+        )["tight"]:
+            continue                      # dar stop: bu bolge setup'i oldururdu, sonrakine bak
         valid.append((cand, model, zone, cand_entry, cand_rr))
     pick = next((c for c in valid if c[4] >= min_rr), None)
     if pick is None:
@@ -1828,7 +1860,7 @@ def _preview_trade_levels(
     cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=c2_hours)
     if cisd is not None:
         cisd, planned = _maybe_ifvg_entry(
-            cisd, setup, df_ltf, c2_hours=c2_hours, allow_ifvg=allow_ifvg,
+            cisd, setup, df_ltf, c2_hours=c2_hours, allow_ifvg=allow_ifvg, cfg=cfg,
         )
         planned = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
         return {
@@ -2450,7 +2482,7 @@ async def _detect_and_create_waiting_locked(
     min_rr = _min_rr_for_market(setup.market_type)
     cisd, planned_rr = await _cpu(
         _maybe_ifvg_entry, cisd, setup, df_ltf, cfg["c2_hours"],
-        allow_ifvg=_ifvg_allowed(setup, cfg),
+        allow_ifvg=_ifvg_allowed(setup, cfg), cfg=cfg,
     )
     planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     # Dinlenen emir (26.09): bekleyen sinyalin girisine kayittan sonra kapanan bir mum
@@ -2502,17 +2534,11 @@ async def _detect_and_create_waiting_locked(
         await _gated("score7_gate")
         return None
 
-    min_pct = _min_stop_pct(setup.market_type)
-    stop_pct = _stop_distance_pct(cisd.entry_price, cisd.stop_loss)
-    stop_dist = abs(float(cisd.entry_price) - float(cisd.stop_loss))
-    avg_range = _avg_ltf_range(df_ltf)
-    range_mult = float(cfg.get("min_stop_range_mult", MIN_STOP_RANGE_MULT))
-    tight_range = (
-        avg_range is not None
-        and stop_dist < range_mult * avg_range
-    )
-    tight_pct = min_pct is not None and (stop_pct is None or stop_pct < min_pct)
-    if tight_range or tight_pct:
+    ts_info = _tight_stop_info(cisd.entry_price, cisd.stop_loss, df_ltf, cfg, setup.market_type)
+    min_pct, stop_pct = ts_info["min_pct"], ts_info["stop_pct"]
+    stop_dist, avg_range, range_mult = ts_info["stop_dist"], ts_info["avg_range"], ts_info["range_mult"]
+    tight_range = ts_info["tight_range"]
+    if ts_info["tight"]:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "tight_stop")
         _radar("tight_stop", direction=setup.direction,
@@ -2812,21 +2838,20 @@ async def _detect_and_create_waiting_locked(
         # Fill ile simdi arasindaki TP/SL/BE/trail'i yakala.
         await _replay_after_fill(session, setup.symbol, df_ltf, backfill_ts, strategy)
 
-    # 1D: CISD/MSS onayli ve buraya kadar tum kapilardan gecmis setup -> POTANSIYEL
-    # bildirimi (C2 acik: pending, C2 kapali: waiting). Motor davranisini degistirmez.
-    if strategy == STRATEGY_1D and status != "active" and cisd.confirmed:
+    # 1D POTANSIYEL zinciri 29.09'dan beri kapali (POTENTIAL_NOTICES_ENABLED).
+    if POTENTIAL_NOTICES_ENABLED and strategy == STRATEGY_1D and status != "active" and cisd.confirmed:
         await _notify_potential_1d(session, signal, cfg)
-    # 4H/1H: waiting_entry olan sinyal Telegram'a bir kez bildirilir (27.09, kullanici istegi --
-    # BCH 4H #128 gibi dolmayan sinyalleri de takip edebilsin). ACTIVE ve IPTAL, 1D'deki gibi
-    # `tg_potential_id` uzerinden bu mesaja reply olur. 1D'de ayni isi POTANSIYEL zinciri yapiyor.
-    elif strategy != STRATEGY_1D and signal.status == WAITING_STATUS:
+    # waiting_entry olan sinyal Telegram'a bir kez bildirilir (27.09 4H/1H, 29.09'dan beri tum
+    # stratejiler -- kullanici istegi, BCH 4H #128 gibi dolmayan sinyalleri de takip edebilsin).
+    # ACTIVE ve IPTAL `tg_potential_id` uzerinden bu mesaja reply olur.
+    elif signal.status == WAITING_STATUS:
         await _notify_waiting(session, signal)
 
     return signal
 
 
 async def _notify_waiting(session: AsyncSession, sig: Signal) -> None:
-    """4H/1H waiting_entry bildirimi -- sinyal basina bir kez (`tg_potential_id` / `_state`)."""
+    """waiting_entry bildirimi (tum stratejiler) -- sinyal basina bir kez (`tg_potential_id` / `_state`)."""
     try:
         if sig.tg_potential_id or getattr(sig, "tg_potential_state", None) == "waiting":
             return

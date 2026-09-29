@@ -235,12 +235,25 @@ async def logout():
 # ──────────────────── Dashboard (Stats) ────────────────────
 
 
+def _trade_outcome(s: Signal) -> str | None:
+    """Arayuz sayimi: win / loss / breakeven.
+
+    Kismi karli BE kapanisi DB'de result='win' yazilir (toplam R > 0); sayimda BE sayilir,
+    yoksa W/L/BE ve win rate TP'ye gitmemis islemi kazanc gosterir.
+    """
+    if s.result is None:
+        return None
+    if s.exit_reason == "be":
+        return "breakeven"
+    return s.result
+
+
 def _build_dashboard_stats(signals: list[Signal]) -> dict:
     closed = [s for s in signals if s.result is not None]
     active = [s for s in signals if s.status == "active"]
-    wins = [s for s in closed if s.result == "win"]
-    losses = [s for s in closed if s.result == "loss"]
-    breakevens = [s for s in closed if s.result == "breakeven"]
+    wins = [s for s in closed if _trade_outcome(s) == "win"]
+    losses = [s for s in closed if _trade_outcome(s) == "loss"]
+    breakevens = [s for s in closed if _trade_outcome(s) == "breakeven"]
 
     total_signals = len(signals)
     total_closed = len(closed)
@@ -264,7 +277,7 @@ def _build_dashboard_stats(signals: list[Signal]) -> dict:
         pair_trades[s.symbol] += 1
         if s.symbol not in pair_wins:
             pair_wins[s.symbol] = [0, 0]
-        if s.result == "win":
+        if _trade_outcome(s) == "win":
             pair_wins[s.symbol][0] += 1
         pair_wins[s.symbol][1] += 1
 
@@ -289,7 +302,7 @@ def _build_dashboard_stats(signals: list[Signal]) -> dict:
     streak = 0
     max_streak = 0
     for s in sorted(closed, key=lambda x: x.created_at):
-        if s.result == "win":
+        if _trade_outcome(s) == "win":
             streak += 1
             max_streak = max(max_streak, streak)
         else:
@@ -354,12 +367,13 @@ _DASH_MARKETS = (
     ("crypto", "Crypto", ("crypto",)),
     ("fx", "FX", ("fx", "index", "metal", "oil")),
 )
-_TR_MONTHS = ("Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-              "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık")
+# Arayuz Ingilizce (Dashboard + Paper Trades donem etiketi); ad eski kaldi.
+_TR_MONTHS = ("January", "February", "March", "April", "May", "June",
+              "July", "August", "September", "October", "November", "December")
 _LOW_SAMPLE_PERIOD = 10      # donem ozetinde "az ornek" rozeti
 _LOW_SAMPLE_ALL = 20         # strateji kartinda "az ornek" rozeti
 _WS_STALE_SEC = 120          # bu kadar suredir WS mesaji yoksa akis durmus sayilir
-_EXIT_LABELS = {"tp": "TP", "sl": "SL", "be": "BE", "trail": "Trail", "week_close": "Hafta kapanışı"}
+_EXIT_LABELS = {"tp": "TP", "sl": "SL", "be": "BE", "trail": "Trail", "week_close": "Week close"}
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -385,18 +399,18 @@ def _fmt_span(td: timedelta) -> str:
     days, rem = divmod(mins, 1440)
     hours, mins = divmod(rem, 60)
     if days:
-        return f"{days}g {hours}s"
+        return f"{days}d {hours}h"
     if hours:
-        return f"{hours}s {mins:02d}dk"
-    return f"{mins}dk"
+        return f"{hours}h {mins:02d}m"
+    return f"{mins}m"
 
 
 def _fmt_ago(seconds: float | None) -> str:
     if seconds is None:
-        return "yok"
+        return "none"
     if seconds < 60:
-        return f"{int(seconds)} sn önce"
-    return f"{_fmt_span(timedelta(seconds=seconds))} önce"
+        return f"{int(seconds)}s ago"
+    return f"{_fmt_span(timedelta(seconds=seconds))} ago"
 
 
 def _period_range(kind: str, offset: int, now: datetime | None = None) -> tuple[datetime, datetime, str]:
@@ -422,14 +436,23 @@ def _period_range(kind: str, offset: int, now: datetime | None = None) -> tuple[
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc), label
 
 
+def _signal_period_at(s) -> datetime | None:
+    """Donem anahtari: islemin DOLDUGU an (29.09, kullanici karari; eskiden kapanis ani).
+
+    Pazar dolup Pazartesi kapanan islem gecen haftaya yazilir. Bedeli: donem bittikten sonra
+    kapanan islem o donemin rakamini sonradan degistirir. Dolum yoksa (eski kayit) kapanis.
+    """
+    return _utc(s.entry_filled_time) or _signal_closed_at(s)
+
+
 def _period_summary(closed: list[tuple[datetime, Signal]], start: datetime, end: datetime) -> dict:
-    """Donemde KAPANAN islemlerin ozeti (acik islemler dahil degil)."""
+    """Donemde DOLAN ve kapanmis islemlerin ozeti (acik islemler dahil degil)."""
     rows = sorted((c for c in closed if start <= c[0] < end), key=lambda c: c[0])
     sigs = [s for _, s in rows]
     rs = [float(s.rr_value or 0.0) for s in sigs]
     n = len(sigs)
-    wins = sum(1 for s in sigs if s.result == "win")
-    losses = sum(1 for s in sigs if s.result == "loss")
+    wins = sum(1 for s in sigs if _trade_outcome(s) == "win")
+    losses = sum(1 for s in sigs if _trade_outcome(s) == "loss")
     total = round(sum(rs), 2)
 
     def _pick(s):
@@ -454,9 +477,13 @@ def _period_summary(closed: list[tuple[datetime, Signal]], start: datetime, end:
         "avg_r": round(total / n, 2) if n else None,
         "best": _pick(max(sigs, key=by_r)) if n else None,
         "worst": _pick(min(sigs, key=by_r)) if n > 1 else None,
+        # Kapali stratejinin (1H) donemde islemi varsa cipi de gorunur; yoksa ciplerin toplami
+        # ozetin toplamini tutmaz.
         "by_tf": [
             {"label": _tf_label(tf), **_group(lambda s, tf=tf: (s.timeframe or "4h") == tf)}
-            for tf in _DASH_TFS
+            for tf in _DASH_TFS + tuple(
+                t for t in ("1h",) if any((s.timeframe or "4h") == t for s in sigs)
+            )
         ],
         "by_market": [
             {"label": label, **_group(lambda s, mk=mk: s.market_type in mk)}
@@ -540,12 +567,12 @@ def _fx_week_state(now: datetime) -> dict:
     # Ayni ZoneInfo'lu iki aware datetime farki DST'yi yok sayar; UTC'de cikar.
     left = target.astimezone(timezone.utc) - now
     if closed:
-        return {"open": False, "soon": False, "label": f"FX kapalı · açılışa {_fmt_span(left)}"}
-    return {"open": True, "soon": left < timedelta(hours=6), "label": f"FX hafta kapanışına {_fmt_span(left)}"}
+        return {"open": False, "soon": False, "label": f"FX closed · opens in {_fmt_span(left)}"}
+    return {"open": True, "soon": left < timedelta(hours=6), "label": f"FX week closes in {_fmt_span(left)}"}
 
 
 async def _dashboard_live_context(db: AsyncSession) -> dict:
-    """Saglik seridi + acik islemler + son kapananlar + potansiyel 1D + dikkat listesi."""
+    """Saglik seridi + acik islemler + son kapananlar + dikkat listesi."""
     now = datetime.now(timezone.utc)
     st = market_data.status()
     issues = recent_issues(24.0)
@@ -555,21 +582,29 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
     stale = running and connected and (msg_age is None or msg_age > _WS_STALE_SEC)
     booting = running and st.get("bootstrap_done_at") is None
     if not running:
-        status, status_label = "down", "Bot çalışmıyor"
+        status, status_label = "down", "Bot not running"
     elif booting:
-        status, status_label = "warn", "Veri yükleniyor"
+        status, status_label = "warn", "Loading data"
     elif not connected:
-        status, status_label = "warn", "WS bağlı değil"
+        status, status_label = "warn", "WS disconnected"
     elif stale:
-        status, status_label = "warn", "Veri akışı durdu"
+        status, status_label = "warn", "Data feed stalled"
     elif issues["errors"]:
-        status, status_label = "warn", "Hata kaydı var"
+        status, status_label = "warn", "Errors logged"
     else:
-        status, status_label = "ok", "Sağlıklı"
+        status, status_label = "ok", "Healthy"
 
     totals = (await db.execute(
         select(func.count(), func.sum(Signal.rr_value)).where(Signal.result.isnot(None))
     )).one()
+    # W/L/BE: _trade_outcome ile ayni kural (kismi karli BE -> BE).
+    outcome_n = {"win": 0, "loss": 0, "breakeven": 0}
+    for res, ex, n in (await db.execute(
+        select(Signal.result, Signal.exit_reason, func.count())
+        .where(Signal.result.isnot(None)).group_by(Signal.result, Signal.exit_reason)
+    )).all():
+        key = "breakeven" if ex == "be" else res
+        outcome_n[key] = outcome_n.get(key, 0) + int(n)
     started = st.get("started_at")
     health = {
         "status": status,
@@ -587,6 +622,9 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
         "fx": _fx_week_state(now),
         "totals_n": int(totals[0] or 0),
         "totals_r": round(float(totals[1] or 0.0), 2),
+        "totals_w": outcome_n["win"],
+        "totals_l": outcome_n["loss"],
+        "totals_be": outcome_n["breakeven"],
     }
 
     open_ctx = await _open_signals_context(db, "all", "all")
@@ -602,20 +640,9 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
             "sig": s,
             "tf_label": _tf_label(s.timeframe or "4h"),
             "r": float(s.rr_value) if s.rr_value is not None else None,
-            "how": _EXIT_LABELS.get(s.exit_reason or "", {"win": "Kazanç", "loss": "Kayıp"}.get(s.result, "BE")),
+            "how": _EXIT_LABELS.get(s.exit_reason or "", {"win": "Win", "loss": "Loss"}.get(s.result, "BE")),
             "closed_label": ca.astimezone(_TSI).strftime("%d.%m %H:%M") if ca else "-",
         })
-
-    # Potansiyel 1D: CISD onayli, sinyale donusmus ama dolmamis 1D setup'lar (Telegram bildirimiyle ayni kume).
-    potentials = []
-    for r in open_ctx["rows"]:
-        s = r["sig"]
-        if r["tf"] != "1d" or s.status == "active" or not s.cisd_confirmed:
-            continue
-        left = None
-        if r["c2_open"] and r["c2_close_at"] is not None:
-            left = _fmt_span(r["c2_close_at"].replace(tzinfo=timezone.utc) - now)
-        potentials.append({"sig": s, "c2_open": r["c2_open"], "c2_left": left or "-", "to_entry_r": r["to_entry_r"]})
 
     attention: list[dict] = []
 
@@ -628,14 +655,14 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
         })
 
     if not running:
-        _add("error", None, "Bot çalışmıyor — sunucu başlatılmamış ya da durmuş.")
+        _add("error", None, "Bot not running — the server was not started or has stopped.")
     elif not connected:
-        _add("error", None, "BingX WebSocket bağlı değil — fiyat akışı yok, TP/SL takibi gecikir.")
+        _add("error", None, "BingX WebSocket disconnected — no price feed, TP/SL tracking is delayed.")
     elif stale:
-        _add("warn", last_msg, f"Son WebSocket verisi {_fmt_ago(msg_age)} geldi; akış durmuş olabilir.")
+        _add("warn", last_msg, f"Last WebSocket data arrived {_fmt_ago(msg_age)}; the feed may have stalled.")
     last_drop = st.get("last_disconnect_at")
     if last_drop and now - last_drop < timedelta(hours=24):
-        _add("warn", last_drop, f"WebSocket koptu ({st.get('last_disconnect_reason') or 'neden yok'}).")
+        _add("warn", last_drop, f"WebSocket dropped ({st.get('last_disconnect_reason') or 'no reason given'}).")
     backfills = await db.execute(
         select(EventLog)
         .where(
@@ -648,8 +675,8 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
     )
     for e in backfills.scalars().all():
         _add("info", _utc(e.created_at),
-             f"Geçmiş dolum (BACKFILL): {_fmt_ui_symbol(e.symbol, e.market_type)} {e.direction or ''} — "
-             "dolum ve sonrası gerçek mi kontrol et.")
+             f"Past fill (BACKFILL): {_fmt_ui_symbol(e.symbol, e.market_type)} {e.direction or ''} — "
+             "check that the fill and what followed are real.")
     for item in issues["items"][-6:]:
         _add("error" if item["level"] == "ERROR" else "warn", item["ts"], f"{item['logger']}: {item['msg']}")
     # Kismi kar vs sadece BE olcumu: esik dolunca KENDILIGINDEN hatirlat (kimse takvim tutmasin).
@@ -664,8 +691,8 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
     )
     if (partial_done or 0) >= PARTIAL_REVIEW_MIN_TRADES:
         _add("info", None,
-             f"Kısmi kâr vs sadece BE: {partial_done} işlem birikti — "
-             "`python scripts/partial_vs_be.py` ile ölç, sonucu IZLEME.md'ye yaz.")
+             f"Partial profit vs BE-only: {partial_done} trades collected — "
+             "measure with `python scripts/partial_vs_be.py` and record the result in IZLEME.md.")
     # LONG/SHORT ayrismasi hatirlatmasi 28.09'da kaldirildi: madde kapandi (ayrisma ortadan kalkti),
     # olcum istenirse `python scripts/direction_stat.py`.
     attention.sort(key=lambda a: a["ts"], reverse=True)
@@ -678,7 +705,6 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
         "open_r": open_ctx["open_r"],
         "open_tf_counts": open_ctx["counts"]["tf"],
         "recent_closed": recent_closed,
-        "potentials": potentials,
         "attention": attention[:8],
     }
 
@@ -704,9 +730,11 @@ async def dashboard(
         select(Signal).where(Signal.status.notin_(["waiting_entry", "pending_cisd"]))
     )
     all_signals = result.scalars().all()
+    # (dolum ani, sinyal): donem ozeti ve kartlardaki "son 7 gun" isleme dolduguna gore bakar.
     closed = [
-        (ca, s) for s in all_signals
-        if s.rr_value is not None and (ca := _signal_closed_at(s)) is not None
+        (pa, s) for s in all_signals
+        if s.rr_value is not None and _signal_closed_at(s) is not None
+        and (pa := _signal_period_at(s)) is not None
     ]
 
     summary = _period_summary(closed, start, end)
@@ -1359,8 +1387,7 @@ async def analytics_page(
     all_signals = result.scalars().all()
 
     closed = [s for s in all_signals if s.result is not None and s.rr_value is not None]
-    # Equity ve haftalik R islemin KAPANDIGI ana gore; acilis haftasina gore gruplayinca
-    # haftayi asan islem yanlis haftaya yaziliyordu.
+    # Equity islemin KAPANDIGI ana gore (R o an gerceklesir); haftalik R asagida dolum haftasina gore.
     _epoch = datetime.min.replace(tzinfo=timezone.utc)
     closed.sort(key=lambda s: _signal_closed_at(s) or _utc(s.created_at) or _epoch)
 
@@ -1376,7 +1403,8 @@ async def analytics_page(
 
     results_count = {"win": 0, "loss": 0, "breakeven": 0}
     for s in closed:
-        results_count[s.result] = results_count.get(s.result, 0) + 1
+        o = _trade_outcome(s)
+        results_count[o] = results_count.get(o, 0) + 1
 
     direction_count = {"LONG": 0, "SHORT": 0}
     for s in closed:
@@ -1386,9 +1414,10 @@ async def analytics_page(
     for s in closed:
         market_count[s.market_type] = market_count.get(s.market_type, 0) + 1
 
+    # Haftalik R dolum haftasina gore (Dashboard donem ozetiyle ayni kural, 29.09); equity kapanisa gore.
     weekly_rr: dict[str, float] = {}
-    for s in closed:
-        ca = _signal_closed_at(s) or _utc(s.created_at)
+    for s in sorted(closed, key=lambda s: _signal_period_at(s) or _utc(s.created_at) or _epoch):
+        ca = _signal_period_at(s) or _utc(s.created_at)
         if ca:
             week_key = ca.astimezone(_TSI).strftime("%Y-W%W")
             weekly_rr[week_key] = round(weekly_rr.get(week_key, 0) + s.rr_value, 2)
@@ -1402,7 +1431,7 @@ async def analytics_page(
             symbol_perf[s.symbol] = {"total_rr": 0, "count": 0, "wins": 0}
         symbol_perf[s.symbol]["total_rr"] += s.rr_value
         symbol_perf[s.symbol]["count"] += 1
-        if s.result == "win":
+        if _trade_outcome(s) == "win":
             symbol_perf[s.symbol]["wins"] += 1
 
     top_symbols = sorted(symbol_perf.items(), key=lambda x: x[1]["total_rr"], reverse=True)[:10]

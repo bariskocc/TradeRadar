@@ -42,6 +42,9 @@ TABS = (("4h", "4H-15M"), ("1d", "1D-1H"), ("1w", "1W-4H"))
 # (eski kuralla yazilmis satirlar yanlis alarm verir). Skor degisince guncelle.
 #   4H/1D 25.09: IFVG mid'in C1'de olma sarti kalkti; 1D'de acik C2 +1 almiyor, yanlis renk 0.
 #   1W 28.09: strateji acildi.
+#   29.09 key level duzeltmesi (pd_major / pd_monthly / pd_struct tanimi) ayni gerekceyle ilerletilmedi.
+#   29.09 IFVG'nin FVG'si C2 icinde olusmali (ifvg kalemi): tarih ILERLETILMEDI -- eski satirlar da
+#   izinli degerleri (0/1) tasiyor, yanlis alarm uretmez; pencereyi sifirlamak tum kalemleri korlestirirdi.
 RULES_SINCE = {
     "4h": datetime(2026, 9, 25, tzinfo=timezone.utc),
     "1d": datetime(2026, 9, 25, tzinfo=timezone.utc),
@@ -54,7 +57,8 @@ ALWAYS_FRAC = 0.95    # kalem setuplarin >= %95'inde puan veriyorsa ayirt etmiyo
 # Olcum notu (IZLEME.md'deki kararin tek satirlik hali). Kalem/strateji karara baglaninca guncelle.
 _NOTES: dict[tuple[str, str], str] = {
     ("4h", "htf"): "+2 hak ediliyor mu? Karar 03.10",
-    ("4h", "pd_major"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10",
+    ("4h", "pd_major"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10 · 29.09 tanım değişti (ilk süpüren C2)",
+    ("4h", "pd_struct"): "29.09 tanım değişti (OB yapı kırılımı, bölgeye ilk giren C2) — öncesi setupların %65'inde yanıyordu",
     ("4h", "pd_monthly"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10",
     ("4h", "wick"): "28.09: eşiği 0.30'a çıkarmak aday, karar 03.10",
     ("1d", "htf"): "Filtre koruyor; +2 ödülü karar 03.10",
@@ -104,10 +108,13 @@ def _score_rows(strategy: str) -> list[dict]:
             "allowed": {0, 1},
         },
         {
-            "key": "pd_major", "label": "PD major",
+            "key": "pd_major", "label": "Likidite (key level)",
             "points": "+1",
             "rule": ("C2 PMH/PML'ye dokundu (PDH/PDL/PWH/PWL sayılmaz)" if w1
-                     else "C2 PDH/PDL/PWH/PWL'ye dokundu"),
+                     else ("C2 PWH/PWL'ye dokundu (PDH/PDL 1D'de totolojik, sayılmaz)" if d1
+                           else "C2 PDH/PDL/PWH/PWL'ye dokundu"))
+                    + ". Seviyeyi ilk süpüren C2 olmalı, seviyeler C2 açılışına göre. "
+                      "EQH/EQL ve SSL/BSL etiket olarak yazılır, puan almaz",
             "allowed": {0, 1},
         },
         {
@@ -120,7 +127,9 @@ def _score_rows(strategy: str) -> list[dict]:
         {
             "key": "pd_struct", "label": "HTF FVG / OB",
             "points": "+1",
-            "rule": ("Haftalık" if w1 else "HTF") + " FVG ya da OB'ye dokundu (ikisi birden yine +1)",
+            "rule": ("Haftalık" if w1 else "HTF") + " FVG ya da OB'ye dokundu (ikisi birden yine +1). "
+                    "Bölgeye ilk giren C2 olmalı; OB = yapıyı kıran hamleden önceki son ters mum; "
+                    f"FVG boşluğu ≥ {ce.MIN_HTF_FVG_ATR_FRAC:g} × ATR",
             "allowed": {0, 1},
         },
         {
@@ -132,7 +141,8 @@ def _score_rows(strategy: str) -> list[dict]:
         {
             "key": "ifvg", "label": "LTF IFVG",
             "points": "+1",
-            "rule": f"Purge sonrası invert olmuş açık FVG (boşluk ≥ {ce.MIN_IFVG_GAP_RANGE_FRAC:g} × ort. LTF mumu)",
+            "rule": (f"C2 mumu içinde oluşmuş{'' if ce.IFVG_FVG_FROM_C2 else ' (C1 dahil)'}, purge sonrası invert "
+                     f"olmuş açık FVG (boşluk ≥ {ce.MIN_IFVG_GAP_RANGE_FRAC:g} × ort. LTF mumu)"),
             "allowed": {0, 1},
         },
         {
@@ -197,7 +207,7 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "Kapı", "label": "CISD / MSS onayı ve giriş seviyesi olmalı", "stage": "no_cisd", "on": True},
         {"group": "Kapı", "label": f"RR ≥ {rr:g}", "stage": "low_rr", "on": True},
         {"group": "Kapı",
-         "label": f"Skor tam {lim['min']} ise: CISD/MSS girişi + PD array" + (" + kapalı C2" if c2_wait else ""),
+         "label": f"Skor tam {lim['min']} ise: CISD/MSS girişi + key level" + (" + kapalı C2" if c2_wait else ""),
          "stage": "score7", "on": bool(cfg.get("score7_requires_cisd_pd"))},
         {"group": "Kapı", "label": f"Stop ≥ {stop_mult:g} × ort. LTF mumu", "stage": "tight_stop", "on": True},
         {"group": "Kapı", "label": "CISD hafta kapanışından önce olmamalı (yalnız FX/metal/endeks/petrol)",

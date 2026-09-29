@@ -80,7 +80,7 @@ def _format_active_signal(sig: Signal) -> str:
     else:
         cisd_txt = "-"
 
-    pd_line = f"\n\U0001f9f1 <b>PD Array:</b> {sig.pd_array}" if sig.pd_array else "\n\U0001f9f1 <b>PD Array:</b> Yok"
+    pd_line = f"\n\U0001f9f1 <b>Key Level:</b> {sig.pd_array}" if sig.pd_array else "\n\U0001f9f1 <b>Key Level:</b> Yok"
 
     # C2 (purge) mumunun kapanmis olmasi setup'i daha guvenilir kilar.
     c2_line = (
@@ -267,7 +267,7 @@ _POTENTIAL_CANCEL_REASONS = {
     "bias_mismatch": "1D bias ters döndü",
     "past_tp": "Fiyat entry'ye gelmeden hedefe gitti",
     "low_quality": "Kalite skoru 7'nin altına düştü",
-    "score7_gate": "Skor-7 kapısı (yapısal entry / PD array şartı)",
+    "score7_gate": "Skor-7 kapısı (yapısal entry / key level şartı)",
     "no_levels": "Entry/MSS seviyeleri kayboldu",
     "low_rr": "R:R 2'nin altına düştü",
     "tight_stop": "Stop çok dar",
@@ -286,7 +286,7 @@ _POTENTIAL_CANCEL_REASONS = {
 _POTENTIAL_GATE_LABELS = {
     "bias_mismatch": "1D bias ters",
     "low_quality": "Kalite skoru 7'nin altında",
-    "score7_gate": "Skor-7 kapısı (yapısal entry / PD array şartı)",
+    "score7_gate": "Skor-7 kapısı (yapısal entry / key level şartı)",
     "low_rr": "R:R 2'nin altında",
     "tight_stop": "Stop çok dar",
     "missed": "Fiyat entry'ye gelmeden hedefe gitti",
@@ -386,8 +386,8 @@ async def send_signal_potential(
 
 
 def _format_signal_waiting(sig: Signal) -> str:
-    """4H/1H: sinyal waiting_entry oldu (limit emri entry'de bekliyor). 27.09 kullanici istegi:
-    dolmadan once de takip edebilsin (BCH 4H #128). 1D'de bu is POTANSIYEL zincirinde."""
+    """Sinyal waiting_entry oldu (limit emri entry'de bekliyor). 27.09 kullanici istegi: dolmadan
+    once de takip edebilsin (BCH 4H #128). 29.09'dan beri tum stratejilerde (1D POTANSIYEL kapali)."""
     direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
     rr = (
         f"1:{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
@@ -411,7 +411,7 @@ def _format_signal_waiting(sig: Signal) -> str:
 
 
 async def send_signal_waiting(sig: Signal) -> Optional[int]:
-    """4H/1H waiting_entry bildirimi; message_id doner (ACTIVE / IPTAL buna reply olur)."""
+    """waiting_entry bildirimi; message_id doner (ACTIVE / IPTAL buna reply olur)."""
     if not is_configured():
         return None
     mid = await _send_message(_format_signal_waiting(sig))
@@ -422,8 +422,9 @@ async def send_signal_waiting(sig: Signal) -> Optional[int]:
 
 
 def _format_potential_cancel(symbol: str, direction: str, reason: str, strategy: str | None = None) -> str:
-    if strategy and strategy != "1d":
-        label = {"1h": "1H-5M", "1w": "1W-4H"}.get(strategy, "4H-15M")
+    # Strateji biliniyorsa zincir WAITING'dir (1D dahil, 29.09); stratejisiz = eski kapida elenen zincir.
+    if strategy:
+        label = {"1h": "1H-5M", "1w": "1W-4H", "1d": "1D-1H"}.get(strategy, "4H-15M")
         title = f"❌ <b>WAITING İPTAL – {symbol} ({label})</b>"
     else:
         title = f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>"

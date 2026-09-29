@@ -194,7 +194,7 @@
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">1W BIAS</th>
                             <th class="px-2 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SCORE</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SMT</th>
-                            <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PD</th>
+                            <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="HTF key level swept/touched by the purge (C2) candle">KEY LEVEL</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">C2</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Setup'ta LTF IFVG var mi? (girisin oradan yapildigi anlamina gelmez)">IFVG</th>
                             <th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap" title="Giris hangi modelden geldi: IFVG / CISD / MSS">ENTRY MODEL</th>
@@ -286,7 +286,7 @@
                             </td>
                             <td class="px-2 py-2 text-center whitespace-nowrap">
                                 {% if signal.pd_array %}
-                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-blue/15 text-accent-blue" title="Purge (C2) mumunun dokundugu PD array: {{ signal.pd_array }}">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-blue/15 text-accent-blue" title="Key level swept/touched by the purge (C2) candle: {{ signal.pd_array }}">
                                     {{ signal.pd_array }}
                                 </span>
                                 {% else %}

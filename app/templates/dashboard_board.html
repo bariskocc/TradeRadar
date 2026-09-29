@@ -1,14 +1,14 @@
 {% import '_dash_macros.html' as m %}
 <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
-    <!-- Açık işlemler -->
+    <!-- Open trades -->
     <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
         <div class="flex items-center justify-between mb-3">
             <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
-                Açık işlemler <span class="text-gray-400">({{ open_counts.all }})</span>
+                Open trades <span class="text-gray-400">({{ open_counts.all }})</span>
             </p>
             <div class="flex items-center gap-3 text-xs">
-                {% if open_r is not none %}<span class="text-gray-500">Anlık <span class="font-semibold">{{ m.rv(open_r) }}</span></span>{% endif %}
+                {% if open_r is not none %}<span class="text-gray-500">Live <span class="font-semibold">{{ m.rv(open_r) }}</span></span>{% endif %}
                 <a href="/open-signals" class="text-accent-blue hover:text-white transition">Open Signals →</a>
             </div>
         </div>
@@ -19,32 +19,32 @@
                 {{ m.tf(r.tf_label) }}
                 <span class="text-white font-medium w-20 truncate">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
                 <span class="w-12">{{ m.dir(s.direction) }}</span>
-                {# Telefonda satır dar: durum sütunu gizlenir, bekleyen işlemde "girişe xR" yerine durum yazılır. #}
-                {% set wait_state %}{% if s.status == 'waiting_entry' %}Limit bekliyor{% elif r.c2_open %}<span class="text-accent-blue">C2 açık</span>{% else %}MSS bekliyor{% endif %}{% endset %}
+                {# Telefonda satır dar: durum sütunu gizlenir, bekleyen işlemde "to entry xR" yerine durum yazılır. #}
+                {% set wait_state %}{% if s.status == 'waiting_entry' %}Awaiting limit{% elif r.c2_open %}<span class="text-accent-blue">C2 open</span>{% else %}Awaiting MSS{% endif %}{% endset %}
                 <span class="hidden md:block flex-1 text-gray-400 truncate">
-                    {% if s.status == 'active' %}<span class="text-green-400">Aktif</span>{% if r.sl_be %} · <span class="text-gray-300">SL girişte</span>{% endif %}
+                    {% if s.status == 'active' %}<span class="text-green-400">Active</span>{% if r.sl_be %} · <span class="text-gray-300">SL at entry</span>{% endif %}
                     {% else %}{{ wait_state }}{% endif %}
                 </span>
                 <span class="flex-1 md:flex-none text-right md:w-24 truncate">
                     {% if s.status == 'active' %}{{ m.rv(r.live_r) }}
                     {% else %}<span class="md:hidden text-gray-400">{{ wait_state }}</span>
-                    <span class="hidden md:inline">{% if r.to_entry_r is not none %}<span class="text-gray-400">girişe {{ '%.2f'|format(r.to_entry_r) }}R</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</span>{% endif %}
+                    <span class="hidden md:inline">{% if r.to_entry_r is not none %}<span class="text-gray-400">to entry {{ '%.2f'|format(r.to_entry_r) }}R</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</span>{% endif %}
                 </span>
                 <span class="text-right w-14 text-gray-500">{{ r.age }}</span>
             </div>
             {% endfor %}
         </div>
-        {% if open_more %}<p class="text-[10px] text-gray-500 mt-2">+{{ open_more }} işlem daha · Open Signals</p>{% endif %}
+        {% if open_more %}<p class="text-[10px] text-gray-500 mt-2">+{{ open_more }} more · Open Signals</p>{% endif %}
         {% else %}
-        <p class="py-6 text-center text-sm text-gray-500">Açık veya bekleyen işlem yok.</p>
+        <p class="py-6 text-center text-sm text-gray-500">No open or pending trades.</p>
         {% endif %}
     </section>
 
-    <!-- Son kapananlar -->
+    <!-- Recently closed -->
     <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
         <div class="flex items-center justify-between mb-3">
-            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Son kapananlar</p>
-            <a href="/signals/crypto?tab=closed" class="text-xs text-accent-blue hover:text-white transition">Geçmiş →</a>
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Recently closed</p>
+            <a href="/signals/crypto?tab=closed" class="text-xs text-accent-blue hover:text-white transition">History →</a>
         </div>
         {% if recent_closed %}
         <div class="divide-y divide-dark-700">
@@ -60,51 +60,16 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="py-6 text-center text-sm text-gray-500">Henüz kapanan işlem yok.</p>
+        <p class="py-6 text-center text-sm text-gray-500">No closed trades yet.</p>
         {% endif %}
     </section>
 
-    <!-- Potansiyel 1D CRT -->
-    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+    <!-- Attention -->
+    {# Tam genişlik: 29.09'da Potential 1D CRT paneli kalktı, satırda tek kaldı. #}
+    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4 xl:col-span-2">
         <div class="flex items-center justify-between mb-3">
-            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
-                Potansiyel 1D CRT <span class="text-gray-400">({{ potentials|length }})</span>
-            </p>
-            <span class="text-[10px] text-gray-600">CISD/MSS onaylı, tüm kapılardan geçmiş</span>
-        </div>
-        {% if potentials %}
-        <div class="divide-y divide-dark-700">
-            {% for p in potentials %}{% set s = p.sig %}
-            <div class="py-2 text-xs">
-                <div class="flex items-center gap-2.5">
-                    <span class="text-white font-medium w-20 truncate">{{ fmt_ui_symbol(s.symbol, s.market_type) }}</span>
-                    <span class="w-12">{{ m.dir(s.direction) }}</span>
-                    {% if p.c2_open %}
-                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-accent-blue/15 text-accent-blue">C2 AÇIK</span>
-                    <span class="text-gray-400">kapanışa {{ p.c2_left }}</span>
-                    {% else %}
-                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">C2 KAPALI</span>
-                    <span class="text-gray-400">limit bekliyor</span>
-                    {% endif %}
-                    <span class="ml-auto text-gray-400">Skor <span class="text-white">{{ s.bias_score|int if s.bias_score is not none else '-' }}</span> · R:R <span class="text-white">{{ '%.2f'|format(s.planned_rr) if s.planned_rr is not none else '-' }}</span></span>
-                </div>
-                <p class="mt-1 text-[11px] text-gray-500 font-mono">
-                    E {{ s.entry_price|fmt_price }} · SL {{ s.stop_loss|fmt_price }} · TP {{ s.take_profit|fmt_price }}
-                    {% if p.to_entry_r is not none %}<span class="text-gray-400"> · girişe {{ '%.2f'|format(p.to_entry_r) }}R</span>{% endif %}
-                </p>
-            </div>
-            {% endfor %}
-        </div>
-        {% else %}
-        <p class="py-6 text-center text-sm text-gray-500">Bekleyen 1D yapı yok.</p>
-        {% endif %}
-    </section>
-
-    <!-- Dikkat -->
-    <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-        <div class="flex items-center justify-between mb-3">
-            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Dikkat</p>
-            <span class="text-[10px] text-gray-600">son 24–48 saat</span>
+            <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Attention</p>
+            <span class="text-[10px] text-gray-600">last 24–48 hours</span>
         </div>
         {% if attention %}
         <div class="space-y-2">
@@ -118,7 +83,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="py-6 text-center text-sm text-green-400/80">Her şey yolunda — dikkat gerektiren bir şey yok.</p>
+        <p class="py-6 text-center text-sm text-green-400/80">All good — nothing needs attention.</p>
         {% endif %}
     </section>
 

@@ -79,6 +79,34 @@
             </div>
             {% endif %}
 
+            <!-- 0) SABITLENENLER (29.09): kullanicinin "cok onemli" dedigi maddeler, kumeden bagimsiz en ustte -->
+            {% if pinned %}
+            <h2 class="text-sm font-semibold text-amber-400 mb-2">📌 Sabitlenenler</h2>
+            <div class="space-y-3 mb-8">
+                {% for row in pinned %}
+                <div class="p-4 rounded-xl bg-dark-800 border border-amber-500/40">
+                    <div class="flex items-start justify-between gap-3">
+                        <h3 class="text-sm font-semibold text-white">{{ row.item.title }}</h3>
+                        <span class="shrink-0 text-[10px] text-gray-500">
+                            <span class="{{ row.onem_class }}">{{ row.onem_label }}</span> ·
+                            {% if row.progress and row.progress.ready %}<span class="text-accent-yellow">tetik doldu</span>{% else %}%{{ (row.closeness * 100) | round | int }}{% endif %} ·
+                            {{ row.item.started }} başladı
+                        </span>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-400"><span class="text-gray-500">Tetikleyici:</span> {{ row.item.trigger }}</p>
+                    {{ progress_block(row.progress) }}
+                    {% if row.item.measure %}
+                    <p class="mt-2 text-[11px]">
+                        <span class="text-gray-500">nereden ölçülür:</span>
+                        <code class="px-1.5 py-0.5 rounded bg-dark-900 text-accent-blue">{{ row.item.measure }}</code>
+                    </p>
+                    {% endif %}
+                    {{ detail_block(row) }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
             <!-- 1) AKSIYON BEKLEYENLER -->
             {% if action %}
             <h2 class="text-sm font-semibold text-accent-yellow mb-2">⚠ Aksiyon bekliyor</h2>

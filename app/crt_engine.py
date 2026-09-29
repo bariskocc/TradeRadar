@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
@@ -50,9 +51,18 @@ W1_TIMEFRAME = "1w"
 W1_C2_HOURS = 168.0
 W1_SCORE_CAP = 8
 _W1_TAUTOLOGICAL_PD = frozenset({"PDH", "PDL", "PWH", "PWL"})
+# 1D (29.09): onceki gunun ucu C1'in kendisi (C2 bitisikse) ya da C1'le C2 arasindaki mum; ikisinde de C2 C1'in
+# ucunu supururken PDH/PDL'ye tanim geregi dokunur -> skor almaz, key level listesine girmez.
+_D1_TAUTOLOGICAL_PD = frozenset({"PDH", "PDL"})
 # IFVG'nin mid'i C1 araliginda olmali mi (25.09 kapatildi, kullanici karari): purge
 # fitilinin icindeki FVG'nin inversiyonu da gecerli IFVG. True eski davranis.
 REQUIRE_IFVG_MID_IN_C1 = False
+# IFVG'nin FVG'si C2 (purge) mumunun icinde olusmali mi (29.09, kullanici karari): 3'lu desenin
+# SOL mumu C2 acilisindan once olamaz. C1'deki eski bosluklar süpürmeyle ilgisiz; asil IFVG
+# purge'e inen bacagin biraktigi bosluktur (BNB 4H #135: C1'deki 761.61-762.60 secildi, C2'de
+# dibe inerken olusan 759.75-760.15 atlandi). Kural INVERSIYONA degil OLUSUMA bakar. False =
+# eski davranis (arama C1 acilisindan).
+IFVG_FVG_FROM_C2 = True
 # Waiting/pending iptal: purge tarafından CRT range'in bu kadarı (LTF close).
 CRT_INVALIDATION_FRAC = 0.60
 # Swing pivot hassasiyeti:
@@ -580,6 +590,8 @@ SCORE_FEATURE_KEYS = (
     "wick_frac", "c2_body_frac", "reclaim_pct", "ifvg_gap_frac", "c2_range_frac",
     "range_atr", "stop_range_mult", "stop_pct", "sweep_pct", "sweep_frac",
     "ifvg_checked", "bias_checked", "smt_possible",
+    # 29.09: key level sayisi (EQ/SSL dahil) + purge otesindeki en yakin alinmamis likidite
+    "key_level_n", "liq_beyond_atr", "liq_beyond_frac", "liq_beyond_kind",
 )
 
 
@@ -1023,8 +1035,16 @@ def check_smt_divergence(
 
 
 # ──────────────────── PD Array (Price Delivery) tespiti ────────────────────
-PD_ARRAY_LOOKBACK_4H = 40   # FVG / OB icin geriye bakilacak 4H mum sayisi
-EQ_TOLERANCE = 0.0006       # EQH/EQL "esit" toleransi (seviyeye orani, ~6bps)
+PD_ARRAY_LOOKBACK_4H = 40   # FVG / OB icin geriye bakilacak HTF mum sayisi (her TF)
+EQ_TOLERANCE = 0.0006       # 29.09'a kadar EQH/EQL toleransi (seviyeye orani); artik EQ_TOLERANCE_ATR
+# Key level duzeltmesi (29.09, kullanici karari -- BNB 4H #135 / UNI 4H #141). Ayrinti `detect_pd_arrays`.
+EQ_TOLERANCE_ATR = 0.2      # esit dip/tepe: fark <= 0.2 x HTF ATR (sabit % yerine oynakliga gore)
+HTF_ATR_BARS = 14           # ATR = C2 oncesi son 14 HTF mumunun ort. high-low
+# Likidite (EQ / SSL / BSL) geriye bakisi: 4H'te 2 hafta; digerleri FVG/OB ile ayni (40).
+LIQ_LOOKBACK_BARS = {"4h": 84}
+SWING_LIQ_K = 2             # SSL/BSL: her iki yanda 2 mum daha yuksek dip / daha alcak tepe (5'li fraktal)
+OB_BOS_BARS = 3             # OB sonrasi yapi kirilimi (son swing tepe/dip otesinde kapanis) en gec bu kadar mumda
+MIN_HTF_FVG_ATR_FRAC = 0.15 # HTF FVG bosluk tabani (x ATR) -- LTF IFVG gurultu filtresiyle ayni oran
 
 
 def _as_of_ts(df: pd.DataFrame) -> pd.Timestamp:
@@ -1151,6 +1171,142 @@ def _previous_month_levels(
     return months[last_m]
 
 
+def _utc_ts(ts) -> pd.Timestamp:
+    t = pd.Timestamp(ts)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
+def _htf_atr(df: pd.DataFrame, purge_idx: int) -> Optional[float]:
+    """C2 oncesi son HTF_ATR_BARS mumun ort. high-low araligi (C2 dahil degil)."""
+    win = df.iloc[max(0, purge_idx - HTF_ATR_BARS):purge_idx]
+    if win.empty:
+        return None
+    atr = float((win["high"] - win["low"]).mean())
+    return atr if atr > 0 else None
+
+
+def _prior_period_levels(df_1d: Optional[pd.DataFrame], c2_open: pd.Timestamp) -> dict:
+    """C2 ACILISINA gore onceki gun / hafta / ayin (high, low, bitis) uclusu.
+
+    29.09 duzeltmesi: eskiden "simdi" (duvar saati) kullaniliyordu; gun sonundaki C2'yi (20:00 UTC)
+    gece yarisindan sonra degerlendirince "onceki gun" C2'nin KENDI gunu oluyor ve PDL = C2'nin
+    kendi dibi cikiyordu (UNI 4H #141). Bitis = donemin son 1D barinin baslangici + 24s; donemden
+    sonra C2'ye kadar olan mumlar "seviye supuruldu mu" kontrolune girer.
+    """
+    out: dict = {}
+    if df_1d is None or df_1d.empty:
+        return out
+    d = df_1d.sort_index()
+    idx = pd.DatetimeIndex([_utc_ts(t) for t in d.index])
+    d = d.set_axis(idx)
+    d = d[d.index <= c2_open]
+    if len(d) < 2:
+        return out
+    day = pd.Timedelta(hours=24)
+    closed = _drop_forming_daily(d, c2_open)
+    if closed is not None and not closed.empty and closed.index[-1] < c2_open:
+        last = closed.iloc[-1]
+        out["D"] = (float(last["high"]), float(last["low"]), closed.index[-1] + day)
+    shift = _trading_day_shift(d.index)
+    for key_name, keyfn, min_rows in (
+        ("W", lambda t: tuple((t + shift).isocalendar()[:2]), 7),
+        ("M", lambda t: ((t + shift).year, (t + shift).month), 20),
+    ):
+        if len(d) < min_rows:
+            continue
+        cur_key = keyfn(c2_open)
+        groups: dict = {}
+        order: list = []
+        for ts, row in d.iterrows():
+            k = keyfn(ts)
+            if k == cur_key:
+                continue
+            hi, lo = float(row["high"]), float(row["low"])
+            if k not in groups:
+                groups[k] = [hi, lo, ts]
+                order.append(k)
+            else:
+                g = groups[k]
+                g[0], g[1], g[2] = max(g[0], hi), min(g[1], lo), ts
+        if order:
+            g = groups[order[-1]]
+            out[key_name] = (g[0], g[1], g[2] + day)
+    return out
+
+
+def _unswept_between(df_htf: pd.DataFrame, df_1d: Optional[pd.DataFrame], level: float,
+                     since: pd.Timestamp, c2_open: pd.Timestamp, is_short: bool) -> bool:
+    """`since` ile C2 acilisi arasinda hicbir mum `level`i gecmedi mi (LONG: low < level)?
+
+    HTF mumlari [since, C2) + C2'den once KAPANMIS 1D mumlari (HTF serisi o kadar geriye
+    uzanmayabilir). Esitlik supurme sayilmaz.
+    """
+    def _broke(frame: pd.DataFrame) -> bool:
+        if frame is None or frame.empty:
+            return False
+        return float(frame["high"].max()) > level if is_short else float(frame["low"].min()) < level
+
+    h_idx = pd.DatetimeIndex([_utc_ts(t) for t in df_htf.index])
+    h = df_htf.set_axis(h_idx)
+    if _broke(h[(h.index >= since) & (h.index < c2_open)]):
+        return False
+    if df_1d is not None and not df_1d.empty:
+        d_idx = pd.DatetimeIndex([_utc_ts(t) for t in df_1d.index])
+        d = df_1d.set_axis(d_idx)
+        d = d[(d.index >= since) & (d.index + pd.Timedelta(hours=24) <= c2_open)]
+        if _broke(d):
+            return False
+    return True
+
+
+def _swept_first(vals_after: np.ndarray, level: float, is_short: bool) -> bool:
+    """Seviye olustuktan sonraki mumlar (C2 haric) seviyeyi gecmedi mi?"""
+    if len(vals_after) == 0:
+        return True
+    return float(np.max(vals_after)) <= level if is_short else float(np.min(vals_after)) >= level
+
+
+def _liquidity_pools(df: pd.DataFrame, purge_idx: int, is_short: bool, lookback: int,
+                     atr: Optional[float], before_idx: Optional[int] = None) -> tuple[list[dict], list[dict]]:
+    """C2'ye kadar ALINMAMIS likidite: (swing listesi, esit dip/tepe havuzlari).
+
+    swing: 5'li fraktal (SWING_LIQ_K) dip/tepe; havuz: iki pivot (k=1), fark <= EQ_TOLERANCE_ATR x ATR,
+    ilk pivottan C2'ye kadar (ikinci pivot haric) hicbir mum ikisinin uc olanini gecmemis.
+    Her kayit: {"level", "i"} (havuzda "level" = uc olan pivot, "i" = ikinci pivot).
+    `before_idx` (C1): pivot bu mumdan ONCE olusmali -- C1'in kendi dibi/tepesi "esit dip" ya da swing
+    sayilirsa C2'nin CRT supurmesi tanim geregi key level olurdu (UNI 4H #141: 8.666 + C1 8.645).
+    Supurulme kontrolu yine C2'ye kadar butun mumlarla (C1 dahil) yapilir.
+    """
+    lo = max(0, purge_idx - lookback)
+    seg = df.iloc[lo:purge_idx]
+    if len(seg) < 3:
+        return [], []
+    col = "high" if is_short else "low"
+    vals = seg[col].values.astype(float)
+    kind = "high" if is_short else "low"
+    cut = (before_idx - lo) if before_idx is not None else len(vals)
+    swings = []
+    for i in _swing_indices(vals, SWING_LIQ_K, kind):
+        if i >= cut:
+            continue
+        if _swept_first(vals[i + 1:], float(vals[i]), is_short):
+            swings.append({"level": float(vals[i]), "i": lo + i})
+    pools = []
+    if atr:
+        tol = EQ_TOLERANCE_ATR * atr
+        piv = [i for i in _swing_indices(vals, 1, kind) if i < cut]
+        for a_pos, ia in enumerate(piv):
+            for ib in piv[a_pos + 1:]:
+                va, vb = float(vals[ia]), float(vals[ib])
+                if abs(va - vb) > tol:
+                    continue
+                ext = max(va, vb) if is_short else min(va, vb)
+                rest = np.delete(vals[ia + 1:], ib - ia - 1)
+                if _swept_first(rest, ext, is_short):
+                    pools.append({"level": ext, "i": lo + ib, "pair": (va, vb)})
+    return swings, pools
+
+
 def detect_pd_arrays(
     df_4h: pd.DataFrame,
     df_1d: Optional[pd.DataFrame],
@@ -1158,31 +1314,46 @@ def detect_pd_arrays(
     direction: str,
     purge_idx: Optional[int] = None,
     now: pd.Timestamp | None = None,
+    timeframe: str = "4h",
 ) -> list[str]:
-    """Purge yapan C2 (4H) mumunun bir PD array'e dokunup dokunmadigini tespit et.
+    """Purge yapan C2 (HTF) mumunun degdigi / supurdugu KEY LEVEL'lar (UI'da "Key Level").
 
-    "Dokunma": C2 mumunun [low, high] araligi ilgili seviye/bolge ile kesisiyorsa
-    yeterli (kullanicinin istegi). Sadece purge YONUNDEKI (likidite tarafindaki)
-    array'ler kontrol edilir:
-      - SHORT (HIGH purge): PDH, PWH, bearish FVG, bearish OB, EQH
-      - LONG  (LOW  purge): PDL, PWL, bullish FVG, bullish OB, EQL
+    Yalniz purge yonundeki (likidite tarafi) seviyeler: LONG (LOW purge) icin PDL/PWL/PML, bullish
+    FVG, bullish OB, EQL, SSL; SHORT simetrik (PDH/PWH/PMH, bearish FVG/OB, EQH, BSL).
 
-    FVG/OB yalnizca purge'den ONCE olusmus (onceden var olan imbalans/blok)
-    olarak aranir. Doner: dokunulan array etiketleri (or. ['PDH', 'FVG']).
+    29.09 duzeltmeleri (kullanici karari; BNB 4H #135 ve UNI 4H #141 -- ikisinde de "OB,EQL" /
+    "PDL,OB" sahteydi, asil likidite purge'un OTESINDE alinmamis duruyordu):
+      * Seviyeler C2 ACILISINA gore (`_prior_period_levels`); eskiden duvar saati -> gun sonu C2'de
+        PDL = C2'nin kendi dibi.
+      * **Seviyeyi ilk supuren C2 olmali:** PDL/PWL/PML, EQ ve SSL olustuktan sonra C2'ye kadar
+        hicbir mum onlari gecmemis olmali (C1'in aldigi seviye C2 icin sayilmaz).
+      * **Bolgeye ilk giren C2 olmali:** FVG ve OB olustuktan sonra C2'ye kadar bolgeye hic
+        girilmemis olmali. FVG boslugu >= MIN_HTF_FVG_ATR_FRAC x ATR.
+      * **OB = yapi kiran hamleden onceki son ters mum:** ters mum + ardindan OB_BOS_BARS icinde son
+        swing tepe (LONG) / dip (SHORT) otesinde kapanis. Konsolidasyondaki "ters mum + ustunde
+        kapanis" artik OB degil.
+      * **EQ toleransi 0.2 x ATR** (eskiden %0.06), geriye bakis LIQ_LOOKBACK_BARS (4H'te 84).
+        EQ artik C2'nin havuzu SUPURMESINI ister (uc pivotun otesine gecis).
+      * **SSL / BSL** (yeni etiket): C2'nin supurdugu, o ana kadar alinmamis HTF swing dip/tepe.
+        Seviye PDL/PWL/PML ile (0.2 ATR icinde) cakisiyorsa ya da bir EQ havuzunun parcasiysa
+        yazilmaz. EQ ve SSL/BSL skor almaz (etiket + skor-esik kapisi icin key level).
 
-    purge_idx verilmezse crt_idx+1 varsayilir (purge, C1'den 1-2 mum sonra olabilir).
+    `now` 29.09'dan beri kullanilmiyor (imza uyumu); `timeframe` likidite geriye bakisini secer.
     """
     labels: list[str] = []
     n = len(df_4h)
     if purge_idx is None:
         purge_idx = crt_idx + 1
-    if purge_idx >= n:
+    if purge_idx >= n or purge_idx < 2:
         return labels
 
     c2 = df_4h.iloc[purge_idx]
     c2_low = float(c2["low"])
     c2_high = float(c2["high"])
+    c2_open = _utc_ts(df_4h.index[purge_idx])
     is_short = direction == "SHORT"
+    atr = _htf_atr(df_4h, purge_idx)
+    tol = EQ_TOLERANCE_ATR * atr if atr else 0.0
 
     def touches_level(level: float) -> bool:
         return c2_low <= level <= c2_high
@@ -1190,81 +1361,132 @@ def detect_pd_arrays(
     def touches_zone(z_lo: float, z_hi: float) -> bool:
         return not (c2_high < z_lo or c2_low > z_hi)
 
-    # 1) PDH/PDL & PWH/PWL (1D turevli — bias verisiyle ayni kaynak)
-    pdh, pdl = _previous_day_levels(df_1d, now)
-    pwh, pwl = _previous_week_levels(df_1d, now)
-    pmh, pml = _previous_month_levels(df_1d, now)
-    if is_short:
-        if pdh is not None and touches_level(pdh):
-            labels.append("PDH")
-        if pwh is not None and touches_level(pwh):
-            labels.append("PWH")
-        if pmh is not None and touches_level(pmh):
-            labels.append("PMH")
-    else:
-        if pdl is not None and touches_level(pdl):
-            labels.append("PDL")
-        if pwl is not None and touches_level(pwl):
-            labels.append("PWL")
-        if pml is not None and touches_level(pml):
-            labels.append("PML")
+    def swept(level: float) -> bool:
+        return c2_high > level if is_short else c2_low < level
+
+    # 1) PDH/PDL, PWH/PWL, PMH/PML -- C2 acilisina gore, C2 ilk supuren olmali
+    period_hits: list[float] = []
+    levels = _prior_period_levels(df_1d, c2_open)
+    for key, (lab_hi, lab_lo) in (("D", ("PDH", "PDL")), ("W", ("PWH", "PWL")), ("M", ("PMH", "PML"))):
+        if key not in levels:
+            continue
+        hi, lo_, ended = levels[key]
+        lvl = hi if is_short else lo_
+        if touches_level(lvl) and _unswept_between(df_4h, df_1d, lvl, ended, c2_open, is_short):
+            labels.append(lab_hi if is_short else lab_lo)
+            period_hits.append(lvl)
 
     lo = max(1, purge_idx - PD_ARRAY_LOOKBACK_4H)
+    highs = df_4h["high"].values.astype(float)
+    lows = df_4h["low"].values.astype(float)
 
-    # 2) FVG (4H, purge oncesi olusmus 3-mum imbalansi)
+    def zone_untouched(z_lo: float, z_hi: float, from_i: int) -> bool:
+        """from_i..C2 (haric) mumlari bolgeye girmedi mi (LONG: low > z_hi; SHORT: high < z_lo)?"""
+        if from_i >= purge_idx:
+            return True
+        if is_short:
+            return float(highs[from_i:purge_idx].max()) < z_lo
+        return float(lows[from_i:purge_idx].min()) > z_hi
+
+    # 2) FVG (HTF, purge oncesi, C2 bolgeye ilk giren, bosluk >= taban)
+    min_gap = MIN_HTF_FVG_ATR_FRAC * atr if atr else 0.0
     for i in range(lo, purge_idx - 1):
         a = df_4h.iloc[i - 1]
         b = df_4h.iloc[i + 1]
         if is_short:
-            # bearish FVG (direnc): a.low > b.high => bosluk [b.high, a.low]
-            if float(a["low"]) > float(b["high"]) and touches_zone(float(b["high"]), float(a["low"])):
-                labels.append("FVG")
-                break
+            z_lo, z_hi = float(b["high"]), float(a["low"])     # bearish FVG (direnc)
         else:
-            # bullish FVG (destek): a.high < b.low => bosluk [a.high, b.low]
-            if float(a["high"]) < float(b["low"]) and touches_zone(float(a["high"]), float(b["low"])):
-                labels.append("FVG")
-                break
+            z_lo, z_hi = float(a["high"]), float(b["low"])     # bullish FVG (destek)
+        if z_hi <= z_lo or (z_hi - z_lo) < min_gap:
+            continue
+        if touches_zone(z_lo, z_hi) and zone_untouched(z_lo, z_hi, i + 2):
+            labels.append("FVG")
+            break
 
-    # 3) Order Block (4H): son zit renkli mum + ardindan displacement
+    # 3) Order Block: son ters mum + OB_BOS_BARS icinde yapi kirilimi; C2 bolgeye ilk giren
+    piv_kind = "low" if is_short else "high"
+    ref_vals = lows if is_short else highs
     for i in range(lo, purge_idx - 1):
         cur = df_4h.iloc[i]
-        nxt = df_4h.iloc[i + 1]
-        o = float(cur["open"]); c = float(cur["close"])
-        h = float(cur["high"]); l = float(cur["low"])
-        nc = float(nxt["close"])
-        if is_short:
-            # bearish OB (arz): yukari mum + ardindan asagi displacement (kapanis low altina)
-            if c > o and nc < l and touches_zone(l, h):
-                labels.append("OB")
+        o, c = float(cur["open"]), float(cur["close"])
+        h, l = float(cur["high"]), float(cur["low"])
+        if is_short and not c > o:
+            continue
+        if not is_short and not c < o:
+            continue
+        # OB'den onceki son swing tepe (LONG) / dip (SHORT): kirilacak yapi
+        piv = _swing_indices(ref_vals[max(0, i - PD_ARRAY_LOOKBACK_4H):i + 1], 1, piv_kind)
+        if not piv:
+            continue
+        struct = float(ref_vals[max(0, i - PD_ARRAY_LOOKBACK_4H) + piv[-1]])
+        bos_i = None
+        for j in range(i + 1, min(i + 1 + OB_BOS_BARS, purge_idx)):
+            oj, cj = float(df_4h.iloc[j]["open"]), float(df_4h.iloc[j]["close"])
+            if (is_short and cj > oj) or (not is_short and cj < oj):
+                break                     # arada yine ters mum: OB son ters mum olmali
+            if (is_short and cj < struct) or (not is_short and cj > struct):
+                bos_i = j
                 break
-        else:
-            # bullish OB (talep): asagi mum + ardindan yukari displacement (kapanis high ustune)
-            if c < o and nc > h and touches_zone(l, h):
-                labels.append("OB")
-                break
+        if bos_i is None:
+            continue
+        if touches_zone(l, h) and zone_untouched(l, h, bos_i + 1):
+            labels.append("OB")
+            break
 
-    # 4) EQH/EQL (esit tepe/dip likiditesi)
-    seg = df_4h.iloc[lo:purge_idx]
-    if len(seg) >= 3:
-        col = "high" if is_short else "low"
-        vals = seg[col].values
-        piv = _swing_indices(vals, 1, "high" if is_short else "low")
-        levels = [float(vals[i]) for i in piv]
-        found_eq = False
-        for a_i in range(len(levels)):
-            for b_i in range(a_i + 1, len(levels)):
-                base = max(abs(levels[a_i]), 1e-9)
-                if abs(levels[a_i] - levels[b_i]) / base <= EQ_TOLERANCE:
-                    lvl = (levels[a_i] + levels[b_i]) / 2.0
-                    if touches_level(lvl):
-                        labels.append("EQH" if is_short else "EQL")
-                        found_eq = True
-                        break
-            if found_eq:
-                break
+    # 4) EQ ve 5) SSL/BSL -- C2'nin supurdugu, o ana kadar alinmamis likidite
+    lookback = LIQ_LOOKBACK_BARS.get((timeframe or "4h").lower(), PD_ARRAY_LOOKBACK_4H)
+    swings, pools = _liquidity_pools(df_4h, purge_idx, is_short, lookback, atr, before_idx=crt_idx)
+    pool_levels = []
+    for pl in pools:
+        if swept(pl["level"]):
+            labels.append("EQH" if is_short else "EQL")
+            pool_levels = [pl["pair"][0], pl["pair"][1]]
+            break
+    for sw in swings:
+        lvl = sw["level"]
+        if not swept(lvl):
+            continue
+        if any(abs(lvl - x) <= tol for x in period_hits + pool_levels):
+            continue
+        labels.append("BSL" if is_short else "SSL")
+        break
 
     return labels
+
+
+def liquidity_beyond_purge(df: pd.DataFrame, purge_idx: int, direction: str,
+                           timeframe: str = "4h", crt_idx: Optional[int] = None) -> dict:
+    """YALNIZ OLCUM (29.09): purge ucunun OTESINDE, C2'nin de almadigi en yakin likidite.
+
+    BNB 4H #135 / UNI 4H #141: C2 asil swing dibe (756.72 / 8.509) varmadan dondu, fiyat sonra oraya
+    inip SL'yi aldi. Soru: "otede yakin alinmamis likidite varsa setup daha cok stop mu oluyor?"
+    Donus (features'a): liq_beyond_atr (uzaklik / ATR), liq_beyond_frac (uzaklik / C1 araligi),
+    liq_beyond_kind (1 = swing, 2 = esit dip/tepe). Bulunamazsa bos dict. Motor karari DEGISMEZ.
+    """
+    if purge_idx is None or purge_idx >= len(df) or purge_idx < 2:
+        return {}
+    is_short = direction == "SHORT"
+    c2 = df.iloc[purge_idx]
+    ext = float(c2["high"]) if is_short else float(c2["low"])
+    atr = _htf_atr(df, purge_idx)
+    lookback = LIQ_LOOKBACK_BARS.get((timeframe or "4h").lower(), PD_ARRAY_LOOKBACK_4H)
+    swings, pools = _liquidity_pools(df, purge_idx, is_short, lookback, atr, before_idx=crt_idx)
+    cands = [(sw["level"], 1) for sw in swings] + [(pl["level"], 2) for pl in pools]
+    beyond = [(lvl, k) for lvl, k in cands if (lvl > ext if is_short else lvl < ext)]
+    out: dict = {}
+    if not beyond:
+        return out
+    lvl, kind = min(beyond, key=lambda x: abs(x[0] - ext))
+    dist = abs(lvl - ext)
+    if atr:
+        out["liq_beyond_atr"] = round(dist / atr, 4)
+    c1 = df.iloc[crt_idx if crt_idx is not None else purge_idx - 1]
+    if c1 is not None:
+        rng = float(c1["high"]) - float(c1["low"])
+        if rng > 0:
+            out["liq_beyond_frac"] = round(dist / rng, 4)
+    out["liq_beyond_kind"] = kind
+    return out
 
 
 @dataclass
@@ -1502,7 +1724,8 @@ def detect_ltf_ifvgs(
 
     LONG: bear FVG invert (close zone ustu) + bolge acik.
     SHORT: bull FVG invert (close zone alti) + bolge acik.
-    FVG, CRT mumunun acilisindan itibaren aranir. Mid'in C1 high-low icinde
+    FVG, C2 (purge) mumunun acilisindan itibaren aranir (29.09, `IFVG_FVG_FROM_C2`; eskiden
+    CRT/C1 mumunun acilisindan). Mid'in C1 high-low icinde
     olmasi sarti 25.09'da kalkti (REQUIRE_IFVG_MID_IN_C1): purge fitilindeki FVG
     de sayilir. Butun acik adaylar FVG olusum sirasiyla doner (en son olusan sonda).
     Inversion purge sonrasi. C2 HTF mumu icindeki LTF ekstrem mitigasyon
@@ -1535,9 +1758,10 @@ def detect_ltf_ifvgs(
     )
     min_gap = MIN_IFVG_GAP_RANGE_FRAC * _avg_range if _avg_range > 0 else 0.0
     start_i = 1
-    if crt_ts is not None:
-        # Sol mum CRT baslangicindan once olmasin (3'lu FVG).
-        start_i = max(1, int(work.index.searchsorted(crt_ts, side="left")) + 1)
+    anchor_ts = purge_ts if IFVG_FVG_FROM_C2 else crt_ts
+    if anchor_ts is not None:
+        # Sol mum C2 (eski kural: CRT) baslangicindan once olmasin (3'lu FVG).
+        start_i = max(1, int(work.index.searchsorted(anchor_ts, side="left")) + 1)
     picked: list[IFVGZone] = []
     for i in range(start_i, n - 1):
         a = work.iloc[i - 1]
@@ -1731,10 +1955,12 @@ def _build_crt_setup(
         or (direction == "LONG" and float(after_c2["low"].min()) <= purge_ext)
     )
 
-    pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j)
+    pd_labels = detect_pd_arrays(df_4h, df_1d, live_i, direction, purge_idx=purge_j, timeframe=timeframe)
     if (timeframe or "").lower() == W1_TIMEFRAME:
         # 1W: onceki gun/hafta seviyeleri skor almaz; pd_array'e (UI + skor-esik kapisi) de girmez.
         pd_labels = [x for x in pd_labels if str(x).upper() not in _W1_TAUTOLOGICAL_PD]
+    elif (timeframe or "").lower() == "1d":
+        pd_labels = [x for x in pd_labels if str(x).upper() not in _D1_TAUTOLOGICAL_PD]
     bias, score, score_parts, score_features = _calc_live_setup_bias(
         df_4h, live_i, direction, htf_bias,
         pd_labels=pd_labels, purge_idx=purge_j, df_1d=df_1d,
@@ -1742,6 +1968,12 @@ def _build_crt_setup(
     )
     if range_atr is not None:
         score_features["range_atr"] = round(float(range_atr), 4)
+    # Key level olcumleri (29.09): hard filtre sorusu (key_level_n = 0 olan setup) + purge otesi likidite.
+    score_features["key_level_n"] = len(pd_labels)
+    try:
+        score_features.update(liquidity_beyond_purge(df_4h, purge_j, direction, timeframe, crt_idx=live_i))
+    except Exception:
+        pass
     purge_extreme = float(purge_row["high"]) if direction == "SHORT" else float(purge_row["low"])
     crt_bull = float(live_crt["close"]) > float(live_crt["open"])
     crt_bear = float(live_crt["close"]) < float(live_crt["open"])

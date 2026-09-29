@@ -75,7 +75,7 @@
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">1W Bias</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Score</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">SMT</th>
-                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">PD Array</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="HTF key level swept/touched by the purge (C2) candle">Key Level</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">C2</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Setup mumunun (purge / C2) açılış zamanı — TSİ">Setup</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">IFVG</th>
@@ -130,7 +130,7 @@ function smtBadge(smt) {
 
 function pdBadge(pd) {
     if (!pd) return '<span class="text-gray-600">-</span>';
-    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="PD array touched by the purge (C2) candle: ${pd}">${pd}</span>`;
+    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="Key level swept/touched by the purge (C2) candle: ${pd}">${pd}</span>`;
 }
 
 function c2Badge(closed) {

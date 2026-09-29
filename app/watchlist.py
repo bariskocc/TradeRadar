@@ -116,6 +116,7 @@ class WatchItem:
     measure: str = ""           # calistirilacak komut / bakilacak sayfa
     result: str = ""            # status="done" ise tek cumle sonuc
     onem: int = 2               # 1 yuksek / 2 orta / 3 dusuk -- ONEM_META, siralamanin BIRINCIL anahtari
+    pinned: bool = False        # kullanici "en uste" dedi (29.09): kumesinin basinda, onemden bile once
     progress_fn: Optional[Callable[[AsyncSession], Awaitable[Progress]]] = None
 
 
@@ -339,6 +340,41 @@ async def _p_nearest_zone(db: AsyncSession) -> Progress:
         db, Signal.entry_model.in_(("ifvg", "bpr")), Signal.created_at >= datetime(2026, 9, 28),
     )
     return Progress(bars=[Bar("bölge girişli kapalı sinyal (28.09+)", n, 10)], due=date(2026, 10, 3), either=True)
+
+
+async def _kl_count(db: AsyncSession, cond) -> int:
+    """29.09+ Journal satiri, key level olcumu dolu, sonuclanmis (win/loss) + ek kosul."""
+    t = SetupJournal.__table__
+    return await db.scalar(
+        select(func.count()).select_from(t).where(
+            t.c.first_seen >= datetime(2026, 9, 29),
+            func.json_extract(t.c.features, "$.key_level_n").is_not(None),
+            t.c.outcome.in_(("win", "loss")),
+            cond(t),
+        )
+    ) or 0
+
+
+async def _p_key_level_filter(db: AsyncSession) -> Progress:
+    """Key level'siz (key_level_n = 0) ve key level'li sonuclanmis setup; her grupta 20."""
+    none = await _kl_count(db, lambda t: func.json_extract(t.c.features, "$.key_level_n") == 0)
+    some = await _kl_count(db, lambda t: func.json_extract(t.c.features, "$.key_level_n") > 0)
+    return Progress(bars=[Bar("key level'siz", none, 20), Bar("key level'li", some, 20)])
+
+
+async def _p_liq_beyond(db: AsyncSession) -> Progress:
+    """Purge otesinde 0.5 ATR icinde alinmamis likidite olan / olmayan sonuclanmis setup; her grupta 20."""
+    near = await _kl_count(db, lambda t: func.json_extract(t.c.features, "$.liq_beyond_atr") <= 0.5)
+    far = await _kl_count(db, lambda t: func.coalesce(func.json_extract(t.c.features, "$.liq_beyond_atr"), 99) > 0.5)
+    return Progress(bars=[Bar("yakında (≤ 0.5 ATR)", near, 20), Bar("uzak / yok", far, 20)])
+
+
+async def _p_ifvg_from_c2(db: AsyncSession) -> Progress:
+    """29.09+ bolge girisli (ifvg/bpr) kapali sinyal (esik 10); 28.09 'en yakin bolge' maddesiyle ayni oturumda okunur."""
+    n = await _closed_count(
+        db, Signal.entry_model.in_(("ifvg", "bpr")), Signal.created_at >= datetime(2026, 9, 29),
+    )
+    return Progress(bars=[Bar("bölge girişli kapalı sinyal (29.09+)", n, 10)], due=date(2026, 10, 3), either=True)
 
 
 async def _p_c2_refreeze(db: AsyncSession) -> Progress:
@@ -825,6 +861,34 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_purge_threshold,
     ),
     WatchItem(
+        key="key_level_filter", status="open", started="29.09", onem=1, pinned=True,
+        title="Key level teması yoksa işlem açılmasın mı? (+ EQ/SSL puan almalı mı)",
+        trigger="29.09 sonrası her grupta 20 sonuçlanmış setup: key level'siz grup ≥ 0.3 R/setup kötüyse hard filtre, "
+                "0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay); EQ/SSL'li grup PDL/PWL'li kadar "
+                "iyiyse +1 puan adayı",
+        measure="setup_journal.features.key_level_n (EQ/SSL dahil etiket sayısı) · outcome (düz TP/SL)",
+        md="Key level teması yoksa işlem açılmasın mı? (29.09.2026, restart bekliyor)",
+        progress_fn=_p_key_level_filter,
+    ),
+    WatchItem(
+        key="liq_beyond", status="open", started="29.09", onem=1,
+        title="Purge ötesinde alınmamış likidite varsa setup daha çok stop mu oluyor?",
+        trigger="29.09 sonrası her grupta 20 sonuçlanmış setup: 0.5 ATR içinde alınmamış likidite olan grup "
+                "≥ 0.3 R/setup kötüyse kapı/ceza adayı (önce tek replay)",
+        measure="setup_journal.features.liq_beyond_atr / liq_beyond_frac · outcome (düz TP/SL)",
+        md="Purge ötesinde alınmamış likidite (29.09.2026, restart bekliyor)",
+        progress_fn=_p_liq_beyond,
+    ),
+    WatchItem(
+        key="ifvg_from_c2", status="open", started="29.09", onem=2,
+        title="IFVG'nin FVG'si C2 içinde oluşmalı (C1'deki boşluklar aday değil)",
+        trigger="03.10.2026 ya da restart sonrası 10 kapalı bölge girişli sinyal: 21–28.09'a göre R/işlem 0.3R'den "
+                "fazla düşmediyse kural kalır; 'en yakın bölge' maddesiyle aynı oturumda okunur (ayrıştırılamaz)",
+        measure="signals (entry_model ifvg/bpr, created_at ≥ 29.09) + dar stop elemeleri (setup_journal best_stage)",
+        md="IFVG'nin FVG'si C2 içinde oluşmalı (29.09.2026, restart bekliyor)",
+        progress_fn=_p_ifvg_from_c2,
+    ),
+    WatchItem(
         key="nearest_zone", status="open", started="27.09", onem=2,
         title="Birden çok IFVG'de fiyata en yakın bölge (+28.09: RR ≥ 2 bölge CISD'den sığ olsa da seçilir)",
         trigger="03.10.2026 ya da restart sonrası 10 kapalı bölge girişli sinyal: dolum oranı arttı ve R/işlem "
@@ -883,11 +947,13 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_prefill,
     ),
     WatchItem(
-        key="gated_potential", status="open", started="18.09", onem=3,
+        key="gated_potential", status="done", started="18.09", onem=3,
         title="Elenen 1D setup bildirimi",
         trigger="02.10.2026: kapsam daraltıldıktan sonra günlük mesaj ~4'e indi mi (8'i aşarsa RR tabanı 1.8)",
         measure="potential_notices — gate dolu satırlar",
         md="Elenen 1D setup bildirimi (18.09.2026, restart bekliyor)",
+        result="(29.09) Bildirim kaldırıldı, ölçüm yapılmadı: kullanıcı potansiyel bildirimlerini iptal etti, "
+               "tüm stratejilerde yalnız WAITING ENTRY gidiyor (scanner.POTENTIAL_NOTICES_ENABLED = False).",
         progress_fn=_p_gated_potential,
     ),
     WatchItem(
@@ -927,11 +993,13 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_partial_flat,
     ),
     WatchItem(
-        key="tight_stop_gate", status="open", started="18.09", onem=1,
+        key="tight_stop_gate", status="done", started="18.09", onem=1,
         title="Dar stop kapısı — elenen setup TP'ye gidiyor mu?",
         trigger="20 çözülmüş elenen setup (kapı haftada ~1–2 eliyor)",
         measure="python scripts/tight_stop_stat.py",
         md="Dar stop kapısı — elenen setup TP'ye gidiyor mu? (başladı 18.09.2026, ⏰ tetik: 20 çözülmüş setup)",
+        result="(29.09) Kapı KALIYOR: elenen 10 çözülmüş setupun 10'u kayıp (−10R), taban WR %22.4. Eşik (20) "
+               "dolmadan kapandı — dar stoplu bölge artık atlandığı için elenen akışı azalıyor.",
         progress_fn=_p_tight_stop_gate,
     ),
     WatchItem(
@@ -1413,10 +1481,17 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
     # Siralama (21.09, kullanici istegi "onemsizler alt siralarda olsun"): BIRINCIL anahtar
     # ONEM, ikincil tetige yakinlik, esitlikte en eski izleme. Eskiden yalniz yakinlik vardi ve
     # bir bildirim maddesi sayaci doldu diye kural maddesinin ustune cikabiliyordu.
-    open_items.sort(key=lambda r: (r["item"].onem, -r["closeness"],
+    # Sabitlenen maddeler (29.09, kullanici "cok onemli, uste yaz"): hangi kumede olursa olsun sayfanin EN
+    # USTUNDE ayri bolum ("Sabitlenenler"); diger kumelerden cikarilir. Tetigi dolmussa kartta yazilir.
+    pinned = [r for r in action + open_items + passive if r["item"].pinned]
+    action = [r for r in action if not r["item"].pinned]
+    open_items = [r for r in open_items if not r["item"].pinned]
+    passive = [r for r in passive if not r["item"].pinned]
+    pinned.sort(key=lambda r: (r["item"].onem, _started_key(r["item"].started)))
+    open_items.sort(key=lambda r: (not r["item"].pinned, r["item"].onem, -r["closeness"],
                                    _started_key(r["item"].started)))
-    action.sort(key=lambda r: (r["item"].onem, _started_key(r["item"].started)))
-    passive.sort(key=lambda r: (r["item"].onem, _started_key(r["item"].started)))
+    action.sort(key=lambda r: (not r["item"].pinned, r["item"].onem, _started_key(r["item"].started)))
+    passive.sort(key=lambda r: (not r["item"].pinned, r["item"].onem, _started_key(r["item"].started)))
 
     # "Ne bekliyor" ozeti: ayni tarihi bekleyen maddeler IZLEME.md'de zaten "ayni oturumda oku"
     # diye bagli (kardes maddeler ayni golge verisini okuyor). 18 satirlik listede bunu gormek
@@ -1434,6 +1509,7 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
     return {
         "waiting": waiting,
         "sample_only": sample_only,
+        "pinned": pinned,
         "action": action,
         "open_items": open_items,
         "passive_items": passive,
