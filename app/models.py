@@ -98,6 +98,12 @@ class Signal(Base):
     # kullanilmadigini entry_model soyler.
     bpr_low = Column(Float, nullable=True)
     bpr_high = Column(Float, nullable=True)
+    # Dolum oncesi kosu (29.09, TODO 5q -- yalniz olcum): CISD onay mumundan MOTORUN dolum mumuna kadar
+    # (dolum mumu haric) fiyatin TP yolunda gittigi en uzak nokta; 0 = entry, 1 = TP, sinyalin kendi
+    # seviyeleriyle. Journal `prefill` kendi dolumunda bittigi icin gercek dolumu goremiyordu.
+    # prefill_cov: 1 = pencerenin tamami store'daydi, 0 = basi eksik (deger alt sinir).
+    prefill_run = Column(Float, nullable=True)
+    prefill_cov = Column(Integer, nullable=True)
 
     # Status: pending_cisd → waiting_entry → active → expired (win/loss) | breakeven
     status = Column(String, default="waiting_entry")

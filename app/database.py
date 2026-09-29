@@ -46,6 +46,8 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("tg_potential_id", "ALTER TABLE signals ADD COLUMN tg_potential_id INTEGER"),
         ("tg_potential_state", "ALTER TABLE signals ADD COLUMN tg_potential_state VARCHAR"),
         ("closed_at", "ALTER TABLE signals ADD COLUMN closed_at DATETIME"),
+        ("prefill_run", "ALTER TABLE signals ADD COLUMN prefill_run FLOAT"),
+        ("prefill_cov", "ALTER TABLE signals ADD COLUMN prefill_cov INTEGER"),
     ],
     "setup_journal": [
         ("shadow", "ALTER TABLE setup_journal ADD COLUMN shadow VARCHAR"),

@@ -157,6 +157,8 @@ CFVG_BARS_AFTER = 2
 # Bekleyen tespit durumu `entries` sozlugunde bu ANAHTARDA tutulur (varyant degil; alt cizgi
 # oneki `entry_cands`teki `_ref` ile ayni gelenek). Varyant donguleri bu anahtari atlar.
 CFVG_STATE = "_cfvg"
+# CISD / MSS kapanisla kirilim tohumu (29.09): scanner `_break_seed` -> `retrace["brk"]`. Varyant degildir.
+BREAK_SEED = "_brk"
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -206,11 +208,12 @@ def _shadow_c1(rec: dict, e: float, sl: float, tp: float, risk: float) -> dict |
 def _entries_init(rec: dict) -> dict | None:
     """Aday entry'leri dondur: her biri kendi RR'siyle, SL/TP ortak."""
     cands = dict(rec.get("entry_cands") or {})
-    ref = cands.pop("_ref", None)          # seviye dondugu andaki fiyat (son LTF kapanisi)
+    ref = cands.pop("_ref", None)          # seviye dondugu andaki fiyat: df_ltf son satiri -- canli akista FORMING mum (kapanis degil)
     sl, tp = rec.get("sl"), rec.get("tp")
     if not cands or sl is None or tp is None:
         return None
     seed = cands.pop(CFVG_STATE, None)     # CISD kirilim FVG'si: seviye henuz olusmamis olabilir
+    cands.pop(BREAK_SEED, None)            # retrace'e gider (`_retrace_init`)
     out: dict = {}
     for name in ENTRY_VARIANTS:
         e = cands.get(name)
@@ -414,8 +417,14 @@ def _retrace_init(rec: dict) -> dict | None:
             continue
         d_of[name] = round(
             ((ref - float(e)) if rec.get("direction") == "LONG" else (float(e) - ref)) / span, 4)
-    return {"ref": round(ref, 8), "span": round(span, 8), "d_max": 0.0, "d_tp": 0.0,
-            "d_tp_bar": None, "tp_first": None, "d_of": d_of, "done": False, "until": None}
+    out = {"ref": round(ref, 8), "span": round(span, 8), "d_max": 0.0, "d_tp": 0.0,
+           "d_tp_bar": None, "tp_first": None, "d_of": d_of, "done": False, "until": None}
+    brk = cands.get(BREAK_SEED)
+    if isinstance(brk, dict):
+        # CISD / MSS seviyesinin purge'den sonra KAPANISLA ilk kirildigi mum (acilis, naive UTC ISO).
+        # Donana kadarki kisim scanner'dan, sonrasi `_apply_retrace` kapanislarindan (29.09).
+        out["brk"] = dict(brk)
+    return out
 
 
 def _retrace_active(rec: dict, bar_ts=None) -> bool:
@@ -430,10 +439,15 @@ def _retrace_active(rec: dict, bar_ts=None) -> bool:
     return True
 
 
-def _apply_retrace(rec: dict, bar_ts, high: float, low: float) -> None:
+def _apply_retrace(rec: dict, bar_ts, high: float, low: float, close: float | None = None) -> None:
     """Mum basina derinlik guncellemesi; TP/SL ile sonuclanir."""
     r = rec["retrace"]
     long = rec["direction"] == "LONG"
+    brk = r.get("brk")
+    if brk and close is not None:
+        for key, lvl in (("cisd", brk.get("cl")), ("mss", brk.get("ml"))):
+            if brk.get(key) is None and lvl is not None and (close > lvl if long else close < lvl):
+                brk[key] = bar_ts.isoformat()
     sl, tp, ref, span = rec["sl"], rec["tp"], r["ref"], r["span"]
     r["until"] = bar_ts
     ext = low if long else high                       # aleyhte ucta ne kadar geri gelindi
@@ -1145,7 +1159,7 @@ def _is_tracking(rec: dict, bar_ts) -> bool:
     return rec.get("tracked_until") is None or bar_ts > rec["tracked_until"]
 
 
-def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float) -> None:
+def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float, close: float | None = None) -> None:
     """Kapanan LTF mumunu, o sembol+stratejinin izlenen kayitlarina uygula."""
     try:
         bar_ts = _naive_utc(bar_ts)
@@ -1163,7 +1177,8 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float) -> No
                 _apply_entries(rec, bar_ts, float(high), float(low))
                 touched = True
             if _retrace_active(rec, bar_ts):
-                _apply_retrace(rec, bar_ts, float(high), float(low))
+                _apply_retrace(rec, bar_ts, float(high), float(low),
+                               float(close) if close is not None else None)
                 touched = True
             if _prefill_active(rec, bar_ts):
                 _apply_prefill(rec, bar_ts, float(high), float(low))
@@ -1285,7 +1300,7 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                         _apply_entries(rec, bar_ts, float(bar["high"]), float(bar["low"]))
                         hit = True
                     if _retrace_active(rec, bar_ts):
-                        _apply_retrace(rec, bar_ts, float(bar["high"]), float(bar["low"]))
+                        _apply_retrace(rec, bar_ts, float(bar["high"]), float(bar["low"]), float(bar["close"]))
                         hit = True
                     if _prefill_active(rec, bar_ts):
                         _apply_prefill(rec, bar_ts, float(bar["high"]), float(bar["low"]))

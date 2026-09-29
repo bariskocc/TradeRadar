@@ -369,6 +369,51 @@ async def _p_liq_beyond(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("yakında (≤ 0.5 ATR)", near, 20), Bar("uzak / yok", far, 20)])
 
 
+async def _p_c1_shape(db: AsyncSession) -> Progress:
+    """C1-C2 ayni renk / zit renk sonuclanmis setup (motorun CRT saydigi); her grupta 20."""
+    t = SetupJournal.__table__
+    notcrt = tuple(PRE_SETUP_STAGES - {"not_selected"})
+    col = func.json_extract(t.c.features, "$.c1_same_color")
+
+    async def _n(v: int) -> int:
+        return await db.scalar(select(func.count()).select_from(t).where(
+            col == v, t.c.outcome.in_(("win", "loss")), t.c.best_stage.not_in(notcrt),
+        )) or 0
+    return Progress(bars=[Bar("aynı renk", await _n(1), 20), Bar("zıt renk / doji", await _n(0), 20)])
+
+
+async def _p_cisd_mss(db: AsyncSession) -> Progress:
+    """Kapilardan gecmis, dolumdan once kapanisla kirilim olculmus cozulmus setup: sadece CISD / CISD + MSS (20)."""
+    import json as _json
+    t = SetupJournal.__table__
+    qual_fail = tuple(PRE_SETUP_STAGES | {"bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr",
+                                          "score7", "tight_stop"})
+    rows = (await db.execute(select(t.c.entries, t.c.retrace).where(
+        func.json_extract(t.c.retrace, "$.brk").is_not(None), t.c.best_stage.not_in(qual_fail),
+        func.json_extract(t.c.entries, "$.chosen.o").in_(("win", "loss")),
+        func.json_extract(t.c.entries, "$.chosen.rr") >= 2,
+    ))).all()
+    only = both = 0
+    for ents, rt in rows:
+        try:
+            fill = str(_json.loads(ents)["chosen"].get("t") or "")[:19]
+            brk = _json.loads(rt)["brk"]
+        except Exception:
+            continue
+        ca = fill and brk.get("cisd") and str(brk["cisd"])[:19] < fill
+        ma = fill and brk.get("mss") and str(brk["mss"])[:19] < fill
+        only += 1 if ca and not ma else 0
+        both += 1 if ca and ma else 0
+    return Progress(bars=[Bar("sadece CISD", only, 20), Bar("CISD + MSS", both, 20)])
+
+
+async def _p_prefill_signal(db: AsyncSession) -> Progress:
+    """Kosusu olculmus kapali gercek sinyal: >= %50 kosan (10) / digerleri (20)."""
+    hi = await _closed_count(db, Signal.prefill_run >= 0.5, Signal.result.is_not(None))
+    lo = await _closed_count(db, Signal.prefill_run < 0.5, Signal.result.is_not(None))
+    return Progress(bars=[Bar("≥ %50 koşup dolan", hi, 10), Bar("diğerleri", lo, 20)])
+
+
 async def _p_ifvg_from_c2(db: AsyncSession) -> Progress:
     """29.09+ bolge girisli (ifvg/bpr) kapali sinyal (esik 10); 28.09 'en yakin bolge' maddesiyle ayni oturumda okunur."""
     n = await _closed_count(
@@ -878,6 +923,33 @@ ITEMS: list[WatchItem] = [
         measure="setup_journal.features.liq_beyond_atr / liq_beyond_frac · outcome (düz TP/SL)",
         md="Purge ötesinde alınmamış likidite (29.09.2026, restart bekliyor)",
         progress_fn=_p_liq_beyond,
+    ),
+    WatchItem(
+        key="c1_shape", status="open", started="29.09", onem=1,
+        title="C1'in şekli: C2 ile aynı renk / TP'si fitil tepesi olan setup daha kötü mü?",
+        trigger="her grupta 20 sonuçlanmış setup: aynı renk (H1) ya da TP fitili ≥ 0.40 (H2) grubu ≥ 0.3 R/setup "
+                "kötüyse hard filtre, 0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay)",
+        measure="python scripts/c1_shape_stat.py · setup_journal.features.c1_same_color / c1_body_frac / c1_tp_wick_frac",
+        md="C1'in şekli — aynı renk C1 ve fitil tepesine TP (29.09.2026, restart bekliyor)",
+        progress_fn=_p_c1_shape,
+    ),
+    WatchItem(
+        key="cisd_mss", status="open", started="29.09", onem=1,
+        title="Sadece CISD onaylı setup, CISD + MSS onaylıdan daha çok mu stop oluyor?",
+        trigger="kapılardan geçmiş (RR ≥ 2) her grupta 20 çözülmüş setup: sadece CISD grubu ≥ 0.3 R/setup kötüyse "
+                "MSS şartı, 0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay)",
+        measure="python scripts/cisd_mss_stat.py · setup_journal.retrace.brk (CISD/MSS kapanışla ilk kırılım) · entries.chosen",
+        md="CISD onayı mı, CISD + MSS onayı mı? (ilk okuma 29.09.2026)",
+        progress_fn=_p_cisd_mss,
+    ),
+    WatchItem(
+        key="prefill_signal", status="open", started="29.09", onem=1,
+        title="Gerçek sinyallerde: TP yolunun %50'sini koşup entry'ye dönen işlem stop mu oluyor?",
+        trigger="≥ %50 koşan grupta 10, diğerinde 20 kapalı işlem: ≥ %50 grubu SL oranı ≥ 15 puan yüksek VE "
+                "R/işlem ≥ 0.30 kötüyse kapı adayı (önce tek replay), aksi değişiklik yok",
+        measure="python scripts/prefill_signal_stat.py · signals.prefill_run / prefill_cov",
+        md="Gerçek sinyallerde dolum öncesi %50+ koşu (29.09.2026, restart bekliyor)",
+        progress_fn=_p_prefill_signal,
     ),
     WatchItem(
         key="ifvg_from_c2", status="open", started="29.09", onem=2,

@@ -130,7 +130,7 @@ class CRTSetup:
     smt_pair: Optional[str] = None  # SMT divergence bulunan korele parite (gosterim adi)
     pd_array: Optional[str] = None  # Purge (C2) mumunun dokundugu PD array etiketleri (or. 'PDH,FVG')
     c2_closed: bool = False  # Purge (C2) mumu KAPANMIS mi? (forming/kapanmamis ise False)
-    color_opposite: bool = True  # CRT/purge farkli renk; ayni renk skorda baz -1 (hard filter degil)
+    color_opposite: bool = True  # CRT/purge farkli renk; hicbir kararda kullanilmiyor (baz skor yalniz C2 rengine bakar)
     target_consumed: bool = False  # C1 hedef tarafi sonradan supuruldu; sinyal yok, radar gosterir
     # Purge (SL) tarafi C2'den SONRA da alindi: fiyat purge_extreme'i gecti, yani bu setup'in
     # stopu fiilen yenmis. Hedef tarafinin aynasi (target_consumed) ve onun gibi aday secimini
@@ -592,6 +592,8 @@ SCORE_FEATURE_KEYS = (
     "ifvg_checked", "bias_checked", "smt_possible",
     # 29.09: key level sayisi (EQ/SSL dahil) + purge otesindeki en yakin alinmamis likidite
     "key_level_n", "liq_beyond_atr", "liq_beyond_frac", "liq_beyond_kind",
+    # 29.09: C1 sekli -- C2 ile ayni renk (1/0), govde orani, TP tarafindaki fitil / C1 range
+    "c1_same_color", "c1_body_frac", "c1_tp_wick_frac",
 )
 
 
@@ -1980,6 +1982,13 @@ def _build_crt_setup(
     rev_bull = float(purge_row["close"]) > float(purge_row["open"])
     rev_bear = float(purge_row["close"]) < float(purge_row["open"])
     same_color = (crt_bull and rev_bull) or (crt_bear and rev_bear)
+    # C1 sekli (29.09, yalniz olcum -- SEI 4H #133): C2 ile ayni renk mi, govde orani ve TP tarafindaki
+    # fitil (LONG ust, SHORT alt / C1 range). Uzun TP fitili = hedef zaten reddedilmis bir tepe/dip.
+    c1_open, c1_close = float(live_crt["open"]), float(live_crt["close"])
+    score_features["c1_same_color"] = 1 if same_color else 0
+    score_features["c1_body_frac"] = round(abs(c1_close - c1_open) / live_range, 4)
+    tp_wick = crt_high - max(c1_open, c1_close) if direction == "LONG" else min(c1_open, c1_close) - crt_low
+    score_features["c1_tp_wick_frac"] = round(tp_wick / live_range, 4)
     if direction == "LONG":
         inv_level = crt_low + (live_range * CRT_INVALIDATION_FRAC)
     else:

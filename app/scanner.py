@@ -1803,8 +1803,36 @@ def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None, bpr=None) -> dic
             # yuzden bu FVG'yi hic goremiyor). Journal'a tespitin TOHUMU verilir: onay zamani +
             # cevresindeki kapali mumlar; gerisini `setup_journal._cfvg_step` mum mum tamamlar.
             out[journal.CFVG_STATE] = _cfvg_seed(df_ltf, cisd.cisd_time)
+        out[journal.BREAK_SEED] = _break_seed(setup, cisd, df_ltf)
     except Exception:
         log.exception("entry candidates failed for %s", getattr(setup, "symbol", "?"))
+    return out
+
+
+def _break_seed(setup: CRTSetup, cisd, df_ltf) -> dict | None:
+    """CISD / MSS seviyesinin purge'den sonra KAPANISLA ilk kirildigi LTF mumu (29.09, yalniz olcum).
+
+    Soru: "sadece CISD onayli setup, CISD + MSS onaylidan daha cok mu stop oluyor?" Seviyeler donana
+    kadarki kirilimlar burada (kapali mumlar, son satir forming), sonrasi `setup_journal._apply_retrace`
+    kapanislariyla. Zaman = kirilim mumunun ACILISI (entries `t` ile ayni gelenek).
+    """
+    cl, ml = getattr(cisd, "cisd_level", None), getattr(cisd, "mss_level", None)
+    if df_ltf is None or len(df_ltf) < 2 or (cl is None and ml is None) or setup.purge_time is None:
+        return None
+    long = setup.direction == "LONG"
+    closed = df_ltf.sort_index().iloc[:-1]
+    since = pd.Timestamp(setup.purge_time)
+    since = since.tz_localize("UTC") if since.tzinfo is None else since.tz_convert("UTC")
+    idx = closed.index if closed.index.tz is not None else closed.index.tz_localize("UTC")
+    closes = closed["close"].astype(float).to_numpy()
+    out = {"cl": float(cl) if cl is not None else None, "ml": float(ml) if ml is not None else None,
+           "cisd": None, "mss": None}
+    for ts, c in zip(idx, closes):
+        if ts < since:
+            continue
+        for key, lvl in (("cisd", out["cl"]), ("mss", out["ml"])):
+            if out[key] is None and lvl is not None and (c > lvl if long else c < lvl):
+                out[key] = ts.tz_convert("UTC").tz_localize(None).isoformat()
     return out
 
 
@@ -2300,8 +2328,8 @@ async def _detect_and_create_waiting_locked(
             strategy=strategy, cfg=cfg, htf_bias=htf_bias, weekly_bias=weekly_bias,
         )
 
-    # CRT/purge ayni renk hard filter DEGIL; skorda baz +2 yerine +1
-    # (bkz. _calc_live_setup_bias). Eski hard filter (geri almak icin ac):
+    # CRT/purge ayni renk hard filter DEGIL ve skorda da yok (baz yalniz C2 rengine bakar);
+    # 29.09'dan beri Journal features.c1_same_color olarak olculuyor. Eski hard filter (geri almak icin ac):
     # if not setup.color_opposite:
     #     _radar("same_color", direction=setup.direction,
     #                score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
@@ -3732,6 +3760,66 @@ async def reconcile_open_signals(
     return result
 
 
+# ──────────────────── Dolum oncesi kosu (29.09, TODO 5q) ────────────────────
+
+PREFILL_LOOKBACK = timedelta(days=3)   # dolumdan sonra en fazla bu kadar sure olculmeye calisilir
+
+
+def _prefill_run(direction: str, entry: float, tp: float, df_closed, start, fill) -> tuple[float, int] | None:
+    """[start, fill) araligindaki KAPALI LTF mumlarinda TP yolunda en uzak nokta (0 = entry, 1 = TP).
+
+    Dolum mumu haric (mum ici sira bilinmez -- Journal `prefill.f_max` ile ayni kural). Dolum mumu henuz
+    seride yoksa None (sonraki kapanista tekrar denenir). Ikinci deger: pencerenin basi seride mi (1/0).
+    """
+    if df_closed is None or df_closed.empty or start is None or fill is None:
+        return None
+    idx = df_closed.index if df_closed.index.tz is not None else df_closed.index.tz_localize("UTC")
+    if idx[-1] < fill:
+        return None
+    path = abs(tp - entry)
+    if path <= 0:
+        return None
+    mask = (idx >= start) & (idx < fill)
+    long = direction == "LONG"
+    if not mask.any():
+        run = 0.0
+    elif long:
+        run = (float(df_closed["high"].to_numpy()[mask].max()) - entry) / path
+    else:
+        run = (entry - float(df_closed["low"].to_numpy()[mask].min())) / path
+    return round(max(0.0, run), 4), int(idx[0] <= start)
+
+
+async def _measure_prefill_runs(session, display_symbol: str, strategy: str, df_ltf) -> None:
+    """Dolmus ve kosusu henuz olculmemis sinyaller (acik ya da kapanmis) icin `prefill_run` yaz. Yalniz olcum."""
+    try:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - PREFILL_LOOKBACK
+        sigs = (await session.execute(select(Signal).where(
+            Signal.symbol == display_symbol, Signal.timeframe == strategy,
+            Signal.entry_filled_time.is_not(None), Signal.entry_filled_time >= cutoff,
+            Signal.prefill_run.is_(None),
+        ))).scalars().all()
+        if not sigs or df_ltf is None or len(df_ltf) < 2:
+            return
+        closed = df_ltf.sort_index().iloc[:-1]
+        changed = False
+        for sig in sigs:
+            if None in (sig.entry_price, sig.take_profit):
+                continue
+            res = _prefill_run(
+                sig.direction, float(sig.entry_price), float(sig.take_profit), closed,
+                _as_utc(sig.cisd_time) or _as_utc(sig.created_at), _as_utc(sig.entry_filled_time),
+            )
+            if res is None:
+                continue
+            sig.prefill_run, sig.prefill_cov = res
+            changed = True
+        if changed:
+            await session.commit()
+    except Exception:
+        log.exception("prefill run measure failed for %s %s", display_symbol, strategy)
+
+
 # ──────────────────── WS olay isleyicileri ────────────────────
 
 
@@ -3792,12 +3880,16 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                         avg_ltf_range=_avg_ltf_range(df_ltf),
                         bar_closed=True,
                     )
+            # Dolum oncesi kosu (29.09): dolmus sinyallerin CISD onayi -> dolum arasi TP yonlu kosusu.
+            if ltf_strategy:
+                await _measure_prefill_runs(session, display_symbol, ltf_strategy, store.get_df(bingx_symbol, timeframe))
             # Setup Journal sonuc izleme: kapanan LTF mumu (sinyal olsun olmasin).
             if ltf_strategy:
                 df_bar = store.get_df(bingx_symbol, timeframe)
                 if df_bar is not None and len(df_bar) >= 2:
                     jb = df_bar.iloc[-2]
-                    journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]))
+                    journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]),
+                                      float(jb["close"]))
             await _flush_journal_and_potential(session)
     except Exception:
         log.exception("on_candle_closed failed for %s %s", bingx_symbol, timeframe)
