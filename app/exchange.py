@@ -429,7 +429,7 @@ async def fetch_ohlcv(
         payload = resp.json()
     except Exception as e:
         log.warning("BingX kline fetch failed for %s %s: %s", symbol, timeframe, e)
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        return _error_frame("http")
     finally:
         if owns_client:
             await client.aclose()
@@ -437,12 +437,23 @@ async def fetch_ohlcv(
     if payload.get("code") not in (0, None):
         log.warning("BingX kline error %s for %s: %s",
                     payload.get("code"), symbol, payload.get("msg"))
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        return _error_frame(payload.get("code"))
 
     rows = payload.get("data") or []
     df = _klines_to_df(rows)
     if limit > 0 and not df.empty:
         df = df.tail(limit)
+    return df
+
+
+def _error_frame(code) -> pd.DataFrame:
+    """Hata donusu: bos DataFrame + `attrs["bingx_error"]` -- "pencerede veri yok" ile ayrilsin (29.09).
+
+    Ayrim sart: BingX 15 dk'da 10'dan fazla HATALI istekte IP'yi kilitliyor (109429, mesaj: "over 10
+    error code:109415 requests within 900000 ms"), yani hatali istegi tekrarlamak hacimden tehlikeli.
+    """
+    df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    df.attrs["bingx_error"] = code
     return df
 
 
@@ -480,10 +491,20 @@ async def fetch_ohlcv_deep(
         frames: list[pd.DataFrame] = []
         # Sonsuz donguye karsi tavan: her sayfa en az 1 mum ilerlemek zorunda.
         for _ in range(int(bars // 1000) + 3):
+            if cursor >= end_ms:
+                break
             page = await fetch_ohlcv(symbol, timeframe, limit=1000,
                                      since_ms=cursor, client=client)
             if page.empty:
-                break
+                # Veri geldikten sonra bos sayfa ya da HATA (hafta sonu duraklamasi 109415, IP siniri,
+                # ag): eskisi gibi dur -- hatali istegi tekrarlamak IP kilidini tetikler (`_error_frame`).
+                if frames or page.attrs.get("bingx_error") is not None:
+                    break
+                # Hatasiz bos ilk sayfa = pencere kontrat listelenmeden once. Eskiden burada da
+                # kiriliyordu ve HIC veri donmuyordu: 1W'nin 4400 saatlik ilk bootstrap'inda 6 aydan
+                # yeni GBPAUD (09.07) / NZDCAD (02.06) her restart'ta bos kaliyordu (29.09). Atla.
+                cursor += 1000 * step_ms
+                continue
             frames.append(page)
             last_ms = int(page.index[-1].value // 1_000_000)
             if last_ms <= cursor or last_ms >= end_ms - step_ms:

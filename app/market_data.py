@@ -258,7 +258,16 @@ class BingXMarketData:
         4H ve 1D BingX'ten CEKILMEZ: BingX'in mumlari UTC gece yarisina hizali,
         gercek FX mumu ise 17:00 NY'ye. Ikisi de derin 1H serisinden NY-hizali
         sentezlenir ve olu seans barlari elenir.
+
+        Spot FX olu seansta (Cuma 17:00 NY sonrasi) HIC istenmez (29.09): BingX onlari durdurur
+        (109415) ve 15 dk'da 10'dan fazla hatali istek IP'yi kilitler (109429; 13.09'da oldu,
+        19.09 00:34 restart'i bir saatte 42 hatali istek atti). Evren Cumartesi 00:00 UTC FX'i
+        zaten dusuruyor; bu yalniz o aradaki restart'i korur. Metal/endeks/petrol hafta sonu da
+        veri veriyor, dokunulmaz.
         """
+        if market_of(sym) == "fx" and fx_session.is_dead_session(datetime.now(timezone.utc), sym):
+            log.info("Seans bootstrap atlandi (FX kapali, BingX duraklamasi): %s", sym)
+            return
         if with_ltf:
             try:
                 df15 = await fetch_ohlcv(sym, "15m", limit=BOOTSTRAP_LIMITS["15m"], client=client)
