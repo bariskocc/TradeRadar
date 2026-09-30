@@ -46,28 +46,25 @@
                     {% else %}<span class="text-gray-600">—</span>{% endif %}
                 </td>
                 <td class="px-2 py-2 whitespace-nowrap">
-                    {% if t.status == 'open' %}
-                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/15 text-green-400">Açık</span>
-                    {% else %}
-                    <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold
-                        {% if t.result == 'win' %}bg-green-500/15 text-green-400{% elif t.result == 'loss' %}bg-red-500/15 text-red-400{% else %}bg-gray-500/15 text-gray-300{% endif %}"
-                        title="Kapanış: {{ r.closed_label }}">{{ r.result_label }}</span>
-                    {% endif %}
+                    {# Durum satirdan duzeltilir (30.09): kapali islemde yalniz etiket degisir (K/Z aynen),
+                       acik islem secilen sonucla SIMDI kapanir, Acik secmek kapanisi geri alir. #}
+                    {% set cur = t.result if t.status == 'closed' and t.result else 'open' %}
+                    <form method="POST" action="/paper-trades/{{ t.id }}/status" class="inline">
+                        <input type="hidden" name="qs" value="{{ qs }}">
+                        <select name="status" data-prev="{{ cur }}" onchange="paperStatus(this)"
+                                title="{% if t.status == 'closed' %}Kapanış: {{ r.closed_label }} · değiştirmek yalnız sonucu düzeltir, K/Z aynen kalır{% else %}Win/Loss/Breakeven seçersen işlem şimdi kapanır{% endif %}"
+                                class="pl-2 pr-1 py-0.5 rounded text-[10px] font-bold border-0 cursor-pointer focus:outline-none focus:ring-1 focus:ring-accent-blue
+                                {% if cur == 'win' %}bg-green-500/15 text-green-400{% elif cur == 'loss' %}bg-red-500/15 text-red-400{% elif cur == 'open' %}bg-amber-500/15 text-amber-400{% else %}bg-gray-500/15 text-gray-300{% endif %}">
+                            {% for key, label in status_options %}
+                            <option value="{{ key }}" class="bg-dark-800 text-white" {% if key == cur %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </form>
                 </td>
                 <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.entered_label }}</td>
                 <td class="px-2 py-2 whitespace-nowrap">{{ sess.session_badge(t.entered_at) }}</td>
                 <td class="px-2 py-2 text-right whitespace-nowrap">
                     <div class="flex items-center justify-end gap-1">
-                        {% if t.status == 'open' %}
-                        <a href="/paper-trades?close={{ t.id }}&{{ qs }}" class="px-2 py-1 rounded bg-accent-blue/15 text-accent-blue text-[10px] font-semibold hover:bg-accent-blue/25">Kapat</a>
-                        {% endif %}
-                        <a href="/paper-trades?edit={{ t.id }}&{{ qs }}" class="px-2 py-1 rounded bg-dark-700 text-gray-300 text-[10px] hover:bg-dark-600">Düzenle</a>
-                        {% if t.status == 'closed' %}
-                        <form method="POST" action="/paper-trades/{{ t.id }}/reopen" class="inline" onsubmit="return confirm('Kapanış geri alınsın mı?')">
-                            <input type="hidden" name="qs" value="{{ qs }}">
-                            <button class="px-2 py-1 rounded bg-dark-700 text-gray-400 text-[10px] hover:bg-dark-600" title="Kapanışı geri al">↺</button>
-                        </form>
-                        {% endif %}
                         <form method="POST" action="/paper-trades/{{ t.id }}/delete" class="inline" onsubmit="return confirm('Bu kayıt silinsin mi? Geri alınamaz.')">
                             <input type="hidden" name="qs" value="{{ qs }}">
                             <button class="px-2 py-1 rounded bg-dark-700 text-gray-500 text-[10px] hover:bg-red-500/20 hover:text-red-400">Sil</button>
@@ -77,7 +74,7 @@
             </tr>
             {% else %}
             <tr><td colspan="9" class="px-4 py-10 text-center text-sm text-gray-500">
-                Bu filtrede kayıt yok. Üstteki <span class="text-gray-300">Yeni işlem</span> ile ekleyebilirsin.
+                Bu filtrede kayıt yok. İşlemleri <span class="text-gray-300">Import</span> sekmesinden ekleyebilirsin.
             </td></tr>
             {% endfor %}
         </tbody>

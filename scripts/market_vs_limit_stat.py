@@ -38,7 +38,7 @@ ap.add_argument("--fee-market", type=float, default=0.10, help="market gidis-don
 ap.add_argument("--fee-limit", type=float, default=0.07, help="limit gidis-donus komisyonu, yuzde")
 A = ap.parse_args()
 
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
 QUAL = {"bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr", "score7", "tight_stop"}
 MIN_RR = 2.0
 

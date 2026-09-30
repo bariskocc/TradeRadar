@@ -41,6 +41,7 @@ STAGES: list[tuple[str, str]] = [
     ("c1_stale", "CRT: C1 extreme taken earlier"),
     ("c2_breakout", "CRT: C2 closed outside C1"),
     ("c2_wrong_color", "CRT: C2 wrong color"),
+    ("c1_weak", "CRT: C1 body too small"),
     ("not_selected", "CRT: another candidate chosen"),
     ("bias_mismatch", "1D bias opposite"),
     ("target_taken", "Target already taken"),
@@ -64,7 +65,8 @@ STAGES: list[tuple[str, str]] = [
     ("week_close", "Cancelled at week close"),
 ]
 STAGE_LABELS = dict(STAGES)
-PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "not_selected"))
+PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak",
+                              "not_selected"))
 _RANK = {code: i for i, (code, _) in enumerate(STAGES)}
 SIGNAL_STAGE = "waiting"
 
@@ -846,6 +848,17 @@ def _refreeze_at_c2_close(rec: dict, stage: str, now) -> None:
     rec["best_stage"], rec["best_stage_at"] = stage, now
 
 
+def _reset_for_new_c1(rec: dict) -> None:
+    """Satir baska C1'in gercek sinyaline devredilir (30.09): eski C1'in seviye/sonuc/olcumleri silinir,
+    asama ve kimlik (crt_bar_time) cagiran `note`'ta yeni C1'den yazilir."""
+    for k in _RESET_KEYS:
+        rec[k] = None
+    for k in ("pre_c2", "score_parts", "features", "deleted_reason", "deleted_at", "best_stage", "best_stage_at"):
+        rec[k] = None
+    rec.pop("_lv_c2_open", None)
+    rec.pop("_lv_stage", None)
+
+
 def _ts(v):
     if v is None or isinstance(v, datetime):
         return v
@@ -985,6 +998,28 @@ def note(
                 rec[k] = None
             rec.pop("_lv_c2_open", None)
             changed = True
+        # 30.09: anahtar C1'i icermez (strateji+sembol+yon+C2). Ayni C2'ye BASKA bir C1 adayi eslenince
+        # (onceki C1'in stopu yendi / baska aday secildi) eskiden crt_bar_time, skor, kirilim, features ve
+        # asamalar yeni C1'den eziliyordu -- seviyeler ve sonuc ise eski C1'e aitti (LTC 4H #146: donmus
+        # C1 29.09 16:00, satirda 20:00; son iki gunde 443 satirin 11'i). Kural: seviyeler dondukten sonra
+        # satir o C1'indir; baska C1'in notu yok sayilir. Istisna: baska C1 GERCEK sinyale donduyse
+        # (`waiting`) satir onu izler -- motorun islemi daha degerli. Seviyeler donmadan C1 degisirse
+        # onceki C1'in olcumleri tasinmaz.
+        new_c1 = _naive_utc(crt_bar_time) if crt_bar_time is not None else None
+        own_c1 = rec.get("crt_bar_time")
+        if new_c1 is not None and own_c1 is not None and new_c1 != own_c1:
+            if rec.get("levels_at") is None:
+                rec["score_parts"] = None
+                rec["features"] = None
+                changed = True
+            elif stage == SIGNAL_STAGE and rec.get("outcome") != "signal":
+                _reset_for_new_c1(rec)
+                changed = True
+            else:
+                seen = rec.get("_flushed_seen")
+                if changed or seen is None or now - seen >= _TOUCH_EVERY:
+                    _DIRTY.add(key)
+                return
         if (
             key[0] in C2_REFREEZE_STRATEGIES
             and c2_closed is True
@@ -1075,6 +1110,10 @@ def note_deleted(sig, reason: str, now=None) -> None:
                  c1=(sig.key_level_low if sig.direction == "LONG" else sig.key_level_high), now=now)
         rec = _CACHE.get(key)
         if rec is None:
+            return
+        # Satir baska C1'e aitse (30.09, bkz. note) silme o C1'in izlemesini diriltmesin.
+        sig_c1 = _naive_utc(sig.crt_bar_time) if getattr(sig, "crt_bar_time", None) is not None else None
+        if sig_c1 is not None and rec.get("crt_bar_time") not in (None, sig_c1) and rec.get("levels_at") is not None:
             return
         rec["deleted_reason"], rec["deleted_at"] = reason, now
         _resume_tracking(rec, now)

@@ -19,6 +19,15 @@ ADMIN_USERNAME = _require_env("ADMIN_USERNAME")
 ADMIN_PASSWORD = _require_env("ADMIN_PASSWORD")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# Haber bildirimi (app/news.py) — sinyal botundan AYRI bir Telegram botu. Token yoksa
+# bildirim gitmez ama takvim/sonuc yine cekilir (Open Signals haber kutusu icin).
+NEWS_ENABLED = (os.getenv("NEWS_ENABLED", "1").strip().lower() not in ("0", "false", "no", ""))
+NEWS_TELEGRAM_BOT_TOKEN = os.getenv("NEWS_TELEGRAM_BOT_TOKEN", "").strip()
+NEWS_TELEGRAM_CHAT_ID = os.getenv("NEWS_TELEGRAM_CHAT_ID", "").strip()
+NEWS_CURRENCIES = tuple(c.strip().upper() for c in os.getenv("NEWS_CURRENCIES", "USD").split(",") if c.strip())
+NEWS_ALERT_MINUTES = int(os.getenv("NEWS_ALERT_MINUTES", "15"))
+NEWS_MORNING_HOUR = int(os.getenv("NEWS_MORNING_HOUR", "9"))   # TSI
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR / 'traderadar.db'}")
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 saat

@@ -31,7 +31,7 @@ ap.add_argument("--since", default="2000-01-01")
 A = ap.parse_args()
 
 # motorun CRT saymadigi adaylar (PRE_SETUP_STAGES)
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
 MIN_SCORE, MIN_RR = 7, 2.0
 
 

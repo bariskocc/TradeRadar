@@ -43,6 +43,7 @@ TABS = (("4h", "4H-15M"), ("1d", "1D-1H"), ("1w", "1W-4H"))
 #   4H/1D 25.09: IFVG mid'in C1'de olma sarti kalkti; 1D'de acik C2 +1 almiyor, yanlis renk 0.
 #   1W 28.09: strateji acildi.
 #   29.09 key level duzeltmesi (pd_major / pd_monthly / pd_struct tanimi) ayni gerekceyle ilerletilmedi.
+#   30.09 donem ucunu C1 yaptiysa PDL/PWL/PML sayilmaz (pd_major/pd_monthly + NEUTRAL'da htf): ilerletilmedi.
 #   29.09 IFVG'nin FVG'si C2 icinde olusmali (ifvg kalemi): tarih ILERLETILMEDI -- eski satirlar da
 #   izinli degerleri (0/1) tasiyor, yanlis alarm uretmez; pencereyi sifirlamak tum kalemleri korlestirirdi.
 RULES_SINCE = {
@@ -57,7 +58,7 @@ ALWAYS_FRAC = 0.95    # kalem setuplarin >= %95'inde puan veriyorsa ayirt etmiyo
 # Olcum notu (IZLEME.md'deki kararin tek satirlik hali). Kalem/strateji karara baglaninca guncelle.
 _NOTES: dict[tuple[str, str], str] = {
     ("4h", "htf"): "+2 hak ediliyor mu? Karar 03.10",
-    ("4h", "pd_major"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10 · 29.09 tanım değişti (ilk süpüren C2)",
+    ("4h", "pd_major"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10 · 29.09 tanım değişti (ilk süpüren C2) · 30.09 ucu C1 yaptıysa sayılmaz",
     ("4h", "pd_struct"): "29.09 tanım değişti (OB yapı kırılımı, bölgeye ilk giren C2) — öncesi setupların %65'inde yanıyordu",
     ("4h", "pd_monthly"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10",
     ("4h", "wick"): "28.09: eşiği 0.30'a çıkarmak aday, karar 03.10",
@@ -192,6 +193,9 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "CRT yapısı", "label": "C1 ucu purge'den önce alınmamış olmalı", "stage": "c1_stale", "on": True},
         {"group": "CRT yapısı", "label": "C2 rengi (belirgin yanlış renk C1'i eler)", "stage": "c2_wrong_color",
          "on": color_on, "off_note": "Yalnız skorda (yanlış renk 0 puan)"},
+        {"group": "CRT yapısı",
+         "label": f"C1 gövdesi ≥ aralığın %{ce.C1_MIN_BODY_FRAC * 100:g}'u (doji / kararsız C1 CRT sayılmaz)",
+         "stage": "c1_weak", "on": strategy in ce.C1_BODY_FILTER_TFS, "off_note": "Yok — C1 şekline bakılmaz"},
         # --- Kapilar (scanner.detect_and_create_waiting sirasi) ---
         {"group": "Kapı", "label": "1D bias ters olmamalı (NEUTRAL geçer)", "stage": "bias_mismatch",
          "on": bias_on, "off_note": "Yok — aylık bias yalnız skorda"},

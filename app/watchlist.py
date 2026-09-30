@@ -635,7 +635,7 @@ async def _p_bias_1h(db: AsyncSession) -> Progress:
     # H2 kovalari (htf +2 / 0) -- kalem karari icin kova basina 25 gerekiyor.
     # Kume raporunkiyle AYNI olmali (scripts/bias_1h_stat.py): seviyesi olan ve motorun CRT
     # saydigi setuplar. On-eleme adaylari sayilirsa sayac esigi rapordan once doldurur.
-    pre = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "not_selected")
+    pre = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected")
     htf = func.json_extract(t.c.score_parts, "$.htf")
     buckets = await db.execute(
         select(htf, func.count()).where(t.c.strategy == "1h",
@@ -929,7 +929,8 @@ ITEMS: list[WatchItem] = [
         title="C1'in şekli: C2 ile aynı renk / TP'si fitil tepesi olan setup daha kötü mü?",
         trigger="her grupta 20 sonuçlanmış setup: aynı renk (H1) ya da TP fitili ≥ 0.40 (H2) grubu ≥ 0.3 R/setup "
                 "kötüyse hard filtre, 0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay)",
-        measure="python scripts/c1_shape_stat.py · setup_journal.features.c1_same_color / c1_body_frac / c1_tp_wick_frac",
+        measure="python scripts/c1_shape_stat.py · setup_journal.features.c1_same_color / c1_body_frac / c1_tp_wick_frac"
+                " · 30.09: 4H'te C1 gövdesi < %30 filtrelendi (c1_weak, kullanıcı kararı)",
         md="C1'in şekli — aynı renk C1 ve fitil tepesine TP (29.09.2026, restart bekliyor)",
         progress_fn=_p_c1_shape,
     ),

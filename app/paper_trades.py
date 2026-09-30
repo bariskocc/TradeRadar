@@ -5,9 +5,9 @@ Sayfa: /paper-trades. Bu modul saf mantik + sorgu; route'lar app/main.py'de.
 
 Sayfa yalniz PARA ve win/loss gosterir (25.09, kullanici karari). SL/TP/R, TF, kaynak, cikis
 nedeni ve disiplin alanlari kalkti; kolonlar DB'de duruyor (eski kayitlar), yeni kayitta bos.
-`result` formda secildiyse o (Durum kutusu), yoksa paranin isaretinden, o da yoksa fiyat
-hareketinin yonunden (`apply_close`, `result_of`). Giris/cikis fiyati zorunlu degil; giris zamani
-her kayitta, cikis zamani kapali kayitta zorunlu.
+`result` secildiyse o, yoksa paranin isaretinden, o da yoksa fiyat hareketinin yonunden
+(`apply_close`, `result_of`). 30.09'dan beri ustte yeni/duzenle formu ve kapatma paneli yok
+(kullanici karari): kayit Import'tan gelir, durum satirdaki kutudan duzeltilir (`set_status`).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ TSI = timezone(timedelta(hours=3))
 
 RESULT_LABELS = {"win": "Win", "loss": "Loss", "breakeven": "Breakeven"}
 
-# Yeni / duzenle formundaki Durum kutusu (25.09): tablodaki DURUM sutunuyla ayni dort deger.
+# Tablodaki DURUM kutusu (30.09: satirdan duzenleme, `set_status`).
 STATUS_OPTIONS = (("open", "Açık"), ("win", "Win"), ("loss", "Loss"), ("breakeven", "Breakeven"))
 STATUS_LABELS = dict(STATUS_OPTIONS)
 
@@ -247,22 +247,6 @@ def apply_plan(t: PaperTrade, form: dict) -> list[str]:
     return errors
 
 
-def apply_status(t: PaperTrade, form: dict) -> list[str]:
-    """Formdaki Durum kutusu: Acik ise islem acik kalir (kapaliysa geri acilir), Win/Loss/BE ise
-    o sonucla kapanir. Acik secilip K/Z ya da cikis fiyati girildiyse hata -- sessizce yok
-    saymak girilen tutari kaybederdi."""
-    status = (form.get("status") or "open").lower()
-    if status not in STATUS_LABELS:
-        status = "open"
-    if status == "open":
-        if parse_num(form.get("pnl_amount")) is not None or parse_num(form.get("exit_price")) is not None:
-            return ["K/Z ya da çıkış fiyatı girdin ama durum Açık — işlem kapandıysa Win/Loss/Breakeven seç."]
-        if t.status == "closed":
-            reopen(t)
-        return []
-    return apply_close(t, {**form, "result": status})
-
-
 def apply_close(t: PaperTrade, form: dict) -> list[str]:
     """Kapanis. Cikis fiyati zorunlu degil, cikis zamani ZORUNLU. Sonuc: formda secildiyse o, yoksa
     K/Z'nin isaretinden, o da yoksa giris -> cikis yonunden; hicbiri yoksa hata."""
@@ -301,6 +285,35 @@ def reopen(t: PaperTrade) -> None:
     t.pnl_amount = t.return_pct = None
     t.status = "open"
     t.updated_at = now_utc()
+
+
+def set_status(t: PaperTrade, status: str) -> list[str]:
+    """Tablodaki DURUM kutusu (30.09, kullanici istegi: duzeltme dogrudan satirdan; ustteki
+    yeni/duzenle formu ve kapatma paneli kalkti). Kapali islemde YALNIZ sonuc etiketi degisir --
+    K/Z, cikis fiyati ve zamani aynen kalir (Win -> BE duzeltmesi tutari silmesin). Acik islem
+    Win/Loss/BE secilince SIMDI canli fiyatla kapanir; Acik secilen kapali islem geri acilir."""
+    status = (status or "").lower()
+    if status not in STATUS_LABELS:
+        return ["Geçersiz durum."]
+    if status == "open":
+        if t.status == "closed":
+            reopen(t)
+        return []
+    if t.status == "closed":
+        t.result = status
+        t.updated_at = now_utc()
+        return []
+    # Cikis zamani saniyeli yazilir ve yukari yuvarlanir: asagi kirpmak ayni dakikada/saniyede
+    # girilmis islemi "cikis giristen once" hatasina dusururdu.
+    closed = max(now_utc(), t.entered_at) if t.entered_at else now_utc()
+    if closed.microsecond:
+        closed = closed.replace(microsecond=0) + timedelta(seconds=1)
+    price = last_price(t.symbol, t.strategy)
+    return apply_close(t, {
+        "result": status,
+        "closed_at": closed.replace(tzinfo=timezone.utc).astimezone(TSI).strftime("%Y-%m-%d %H:%M:%S"),
+        "exit_price": price,
+    })
 
 
 # ──────────────────── Gorunum ────────────────────

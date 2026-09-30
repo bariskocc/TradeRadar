@@ -21,6 +21,7 @@ from app.watchlist import build_watchlist
 from app.score_table import build_score_table
 from app import paper_trades as paper
 from app import tv_import as tv
+from app import news
 from app.setup_journal import PRE_SETUP_STAGES
 from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR, trading_session
 from app.telegram import is_configured as tg_is_configured
@@ -150,6 +151,7 @@ RADAR_STATE_META = {
     "low_quality":    {"label": "Low quality (score<7)",      "color": "gray",   "rank": 10},
     # detect_crt_setup'in setup'a cevirmeden eledigi CRT (setup yoksa en guncel adayin nedeni).
     "c2_wrong_color": {"label": "CRT rejected: C2 wrong color",    "color": "dim", "rank": 11},
+    "c1_weak":        {"label": "CRT rejected: C1 body too small", "color": "dim", "rank": 11},
     "c2_breakout":    {"label": "CRT rejected: C2 closed outside", "color": "dim", "rank": 11},
     "c1_stale":       {"label": "CRT rejected: C1 extreme taken",  "color": "dim", "rank": 11},
     "range_atr":      {"label": "CRT rejected: C1 range vs ATR",   "color": "dim", "rank": 11},
@@ -163,7 +165,9 @@ RADAR_STATE_META = {
 async def lifespan(app: FastAPI):
     await init_db()
     await market_data.start()
+    await news.start()
     yield
+    await news.stop()
     await market_data.stop()
 
 
@@ -1176,6 +1180,7 @@ async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
         "rows": rows,
         "open_r": round(sum(live), 2) if live else None,
         "banked_r": round(sum(r["banked_r"] for r in rows if r["banked_r"] is not None), 2),
+        "news": news.web_context(),
     }
 
 
@@ -1818,14 +1823,6 @@ _PAPER_TABS = ("all", "open", "closed")
 _PAPER_MARKET_KEYS = {key for key, _ in paper.MARKET_OPTIONS}
 
 
-def _paper_num_str(value) -> str:
-    """Form alani icin sade sayi metni (bilimsel notasyon ve virgul olmadan)."""
-    if value is None:
-        return ""
-    text = f"{float(value):.10f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
 def _paper_filters(request: Request) -> dict:
     q = request.query_params
     f = {key: (q.get(key) or "").strip()
@@ -1857,38 +1854,8 @@ def _paper_qs(f: dict, view: str, tab: str, kind: str, offset: int) -> tuple[str
     return urlencode(head + items), urlencode(items)
 
 
-def _paper_form_ctx(request: Request, trade, form_data: dict | None) -> dict:
-    """Form'un dolu degerleri: POST hatasi > duzenlenen kayit > bos."""
-    if form_data is not None:
-        ctx = {key: (form_data.get(key) or "") for key in (
-            "symbol", "direction", "status", "pnl_amount", "entry_price", "entered_at",
-            "exit_price", "closed_at", "currency")}
-        ctx["id"] = form_data.get("id") or (trade.id if trade else "")
-        return ctx
-    if trade is not None:
-        closed = trade.status == "closed"
-        return {
-            "id": trade.id,
-            "symbol": trade.symbol or "",
-            "direction": trade.direction or "LONG",
-            "status": (trade.result or "win") if closed else "open",
-            "pnl_amount": _paper_num_str(paper.pnl_of(trade)) if closed else "",
-            "entry_price": _paper_num_str(trade.entry_price),
-            "entered_at": paper.to_input_dt(trade.entered_at),
-            "exit_price": _paper_num_str(trade.exit_price) if closed else "",
-            "closed_at": paper.to_input_dt(trade.closed_at) if closed else "",
-            "currency": trade.currency or paper.DEFAULT_CURRENCY,
-        }
-    return {
-        "id": "", "symbol": "", "direction": "LONG", "status": "open", "pnl_amount": "",
-        "entry_price": "", "entered_at": "", "exit_price": "", "closed_at": "",
-        "currency": paper.DEFAULT_CURRENCY,
-    }
-
-
 async def _paper_context(
-    request: Request, db: AsyncSession, *, errors: list[str] | None = None,
-    form_data: dict | None = None, edit_id: int | None = None, full: bool = True,
+    request: Request, db: AsyncSession, *, errors: list[str] | None = None, full: bool = True,
 ) -> dict:
     """Sayfa baglami. `full=False` yalnizca tablo parcasi icin: 30 sn'de bir yenilenen
     istek panolari (donem ozeti / takvim) hesaplamaz."""
@@ -1932,24 +1899,6 @@ async def _paper_context(
                                 if prev["n"] else None)
         panels["summary"] = summary
 
-    # Duzenlenen / kapatilan kayit
-    trade = None
-    edit_raw = edit_id if edit_id is not None else q.get("edit")
-    if edit_raw:
-        try:
-            trade = await db.get(PaperTrade, int(edit_raw))
-        except (ValueError, TypeError):
-            trade = None
-    close_target = None
-    if q.get("close"):
-        try:
-            target = await db.get(PaperTrade, int(q.get("close")))
-        except (ValueError, TypeError):
-            target = None
-        if target is not None and target.status == "open":
-            close_target = paper.row_view(target)
-            close_target["price"] = _paper_num_str(close_target["price"])
-
     # "Tabloyu bu doneme getir": ozet donem seciciye, tablo kendi tarih filtresine bagli.
     table_link = "/paper-trades?" + urlencode([
         ("view", "trades"), ("tab", tab), ("period", kind), ("offset", str(offset)),
@@ -1963,13 +1912,8 @@ async def _paper_context(
         "active_page": "paper_trades",
         "view": view,
         "errors": errors or [],
-        "form": _paper_form_ctx(request, trade, form_data),
-        "form_open": bool(q.get("new") or edit_raw or errors or form_data),
-        "close_target": close_target,
-        "symbols": paper.symbol_choices(),
         "markets": paper.MARKET_OPTIONS,
         "status_options": paper.STATUS_OPTIONS,
-        "result_options": [(k, v) for k, v in paper.STATUS_OPTIONS if k != "open"],
         "period": {"kind": kind, "offset": offset, "label": label, "table_link": table_link},
         **panels,
         "listing": listing,
@@ -1982,7 +1926,6 @@ async def _paper_context(
         "qs": qs,
         "filter_qs": filter_qs,
         "week_start": _period_range("week", 0)[0].astimezone(_TSI).strftime("%Y-%m-%d"),
-        "now_input": paper.to_input_dt(paper.now_utc()),
         "imported": q.get("imported"),
         "import_result": None,
     }
@@ -2015,65 +1958,21 @@ async def paper_trades_table(request: Request, db: AsyncSession = Depends(get_db
     return templates.TemplateResponse(request=request, name="paper_trades_table.html", context=ctx)
 
 
-@app.post("/paper-trades/new")
-async def paper_trade_new(request: Request, db: AsyncSession = Depends(get_db)):
+@app.post("/paper-trades/{trade_id}/status")
+async def paper_trade_status(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """Satirdaki DURUM kutusu (30.09): Acik / Win / Loss / Breakeven. Kurallar `paper.set_status`."""
     if not get_current_user(request):
         return RedirectResponse(url="/login", status_code=303)
     data = await _paper_form_data(request)
-    trade = PaperTrade()
-    # Durum Win/Loss/BE ise islem dogrudan kapali dogar (gecmis islemleri toplu girmek icin).
-    # Iki adimin hatalari birlikte toplanir: giris VE cikis zamani eksikse ikisi birden soylenir.
-    errors = paper.apply_plan(trade, data) + paper.apply_status(trade, data)
-    if errors:
-        ctx = await _paper_context(request, db, errors=errors, form_data=data)
-        return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
-    db.add(trade)
-    await db.commit()
-    return _paper_redirect(data)
-
-
-@app.post("/paper-trades/{trade_id}/edit")
-async def paper_trade_edit(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    if not get_current_user(request):
-        return RedirectResponse(url="/login", status_code=303)
-    trade = await db.get(PaperTrade, trade_id)
-    if trade is None:
-        return RedirectResponse(url="/paper-trades", status_code=303)
-    data = await _paper_form_data(request)
-    errors = paper.apply_plan(trade, data) + paper.apply_status(trade, data)
-    if errors:
-        data["id"] = trade_id
-        ctx = await _paper_context(request, db, errors=errors, form_data=data, edit_id=trade_id)
-        return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
-    await db.commit()
-    return _paper_redirect(data)
-
-
-@app.post("/paper-trades/{trade_id}/close")
-async def paper_trade_close(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    if not get_current_user(request):
-        return RedirectResponse(url="/login", status_code=303)
-    trade = await db.get(PaperTrade, trade_id)
-    if trade is None:
-        return RedirectResponse(url="/paper-trades", status_code=303)
-    data = await _paper_form_data(request)
-    errors = paper.apply_close(trade, data)
-    if errors:
-        ctx = await _paper_context(request, db, errors=errors)
-        return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
-    await db.commit()
-    return _paper_redirect(data)
-
-
-@app.post("/paper-trades/{trade_id}/reopen")
-async def paper_trade_reopen(trade_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    if not get_current_user(request):
-        return RedirectResponse(url="/login", status_code=303)
     trade = await db.get(PaperTrade, trade_id)
     if trade is not None:
-        paper.reopen(trade)
+        errors = paper.set_status(trade, data.get("status") or "")
+        if errors:
+            await db.rollback()
+            ctx = await _paper_context(request, db, errors=errors)
+            return templates.TemplateResponse(request=request, name="paper_trades.html", context=ctx)
         await db.commit()
-    return _paper_redirect(await _paper_form_data(request))
+    return _paper_redirect(data)
 
 
 @app.post("/paper-trades/{trade_id}/delete")

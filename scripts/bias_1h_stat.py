@@ -47,7 +47,7 @@ MIN_BUCKET = 25          # H2: htf kovasi basina gereken cozulmus setup
 MIN_WR_GAP_PP = 5.0      # H2: +2 kaleminin kanitli sayilmasi icin gereken WR farki
 
 # Motorun CRT saymadigi adaylar: kapi sirasina hic gelmediler, taban orani bozarlar.
-PRE_STAGES = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "not_selected")
+PRE_STAGES = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected")
 WIN, LOSS = "win", "loss"
 RESOLVED = (WIN, LOSS)
 

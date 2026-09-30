@@ -42,7 +42,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 
-NOT_CRT = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color"}
+NOT_CRT = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak"}
 QUAL_FAIL = NOT_CRT | {"not_selected", "bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr",
                        "score7", "tight_stop"}
 MIN_RR = 2.0

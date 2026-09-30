@@ -3,8 +3,7 @@
 
 {% block title %}TradeRadar - Paper Trading Journal{% endblock %}
 
-{# Ortak alan stilleri #}
-{% macro fld() %}class="w-full px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-accent-blue"{% endmacro %}
+{# Ortak etiket stili #}
 {% macro lbl(text, hint='') %}<label class="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1" {% if hint %}title="{{ hint }}"{% endif %}>{{ text }}</label>{% endmacro %}
 {# Sekme / donem baglantisi: filtreler tasinir, view+tab+period ACIKCA yazilir (tekrarlanan
    parametrede Starlette ilkini alir, o yuzden qs ile birlestirmek kirilgan olurdu). #}
@@ -31,8 +30,6 @@
                     <p id="refresh-info" class="text-[10px] text-gray-500">
                         {% if view == 'trades' %}Açık işlemler 30 sn'de bir yenilenir{% endif %}
                     </p>
-                    <a href="/paper-trades?new=1&{{ qs }}"
-                       class="px-4 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">+ Yeni işlem</a>
                 </div>
             </div>
 
@@ -47,134 +44,6 @@
                 {% for e in errors %}<p class="text-sm text-red-300">• {{ e }}</p>{% endfor %}
             </div>
             {% endif %}
-
-            {# ──────────── Kapatma paneli ──────────── #}
-            {% if close_target %}
-            {% set ct = close_target %}
-            <section class="mb-5 bg-dark-800 rounded-xl border border-accent-blue/40 p-5">
-                <div class="flex items-center justify-between mb-4">
-                    <h2 class="text-sm font-semibold text-white">
-                        İşlemi kapat — {{ ct.symbol }} <span class="{% if ct.t.direction == 'LONG' %}text-green-400{% else %}text-red-400{% endif %}">{{ ct.t.direction }}</span>
-                        <span class="text-gray-500 font-normal">· giriş {{ ct.t.entry_price|fmt_price }}</span>
-                    </h2>
-                    <a href="/paper-trades?{{ qs }}" class="text-xs text-gray-400 hover:text-white">Vazgeç</a>
-                </div>
-                <form method="POST" action="/paper-trades/{{ ct.t.id }}/close">
-                    <input type="hidden" name="qs" value="{{ qs }}">
-                    <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-                        <div>
-                            {{ lbl('Durum', 'Otomatik: K/Z’nin işaretinden, o da yoksa çıkış fiyatından') }}
-                            <select name="result" data-status-for="close-pnl" {{ fld() }}>
-                                <option value="">Otomatik</option>
-                                {% for key, label in result_options %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            {{ lbl('Net K/Z', 'Boş bırakırsan miktar × fiyat farkı − komisyon (miktar biliniyorsa)') }}
-                            <input type="text" inputmode="decimal" name="pnl_amount" id="close-pnl" placeholder="opsiyonel" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Çıkış fiyatı') }}
-                            <input type="text" inputmode="decimal" name="exit_price"
-                                   value="{{ ct.price if ct.price is not none else '' }}" placeholder="opsiyonel" {{ fld() }}>
-                            <p class="text-[10px] text-gray-500 mt-1">
-                                {% if ct.price is not none %}canlı fiyat dolduruldu{% else %}canlı fiyat yok{% endif %}
-                            </p>
-                        </div>
-                        <div>
-                            {{ lbl('Çıkış zamanı') }}
-                            <input type="datetime-local" name="closed_at" required value="{{ now_input }}" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Komisyon') }}
-                            <input type="text" inputmode="decimal" name="fees"
-                                   value="{{ ct.t.fees if ct.t.fees is not none else '' }}" placeholder="0" {{ fld() }}>
-                        </div>
-                    </div>
-                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
-                        Kapat ve kaydet
-                    </button>
-                    <span class="ml-3 text-xs text-gray-500">Yalnız çıkış zamanı zorunlu; durum seçmezsen K/Z'nin işaretinden, o da yoksa çıkış fiyatından bulunur.</span>
-                </form>
-            </section>
-            {% endif %}
-
-            {# ──────────── Yeni / düzenle formu ──────────── #}
-            <details class="mb-5 bg-dark-800 rounded-xl border border-dark-600" {% if form_open %}open{% endif %}>
-                <summary class="px-5 py-3 cursor-pointer text-sm font-semibold text-white select-none">
-                    {% if form.id %}İşlemi düzenle — #{{ form.id }}{% else %}Yeni işlem{% endif %}
-                    <span class="ml-2 text-xs font-normal text-gray-500">sembol + giriş zamanı zorunlu (kapalı işlemde çıkış zamanı da) · fiyatlar opsiyonel</span>
-                </summary>
-                <form method="POST" action="{% if form.id %}/paper-trades/{{ form.id }}/edit{% else %}/paper-trades/new{% endif %}" class="px-5 pb-5">
-                    <input type="hidden" name="qs" value="{{ qs }}">
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                        <div>
-                            {{ lbl('Sembol') }}
-                            <input type="text" name="symbol" list="paper-symbols" required value="{{ form.symbol }}"
-                                   placeholder="BTC, XAUUSD…" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Yön') }}
-                            <select name="direction" {{ fld() }}>
-                                <option value="LONG" {% if form.direction != 'SHORT' %}selected{% endif %}>LONG</option>
-                                <option value="SHORT" {% if form.direction == 'SHORT' %}selected{% endif %}>SHORT</option>
-                            </select>
-                        </div>
-                        <div>
-                            {{ lbl('Durum') }}
-                            <select name="status" data-status-for="form-pnl" {{ fld() }}>
-                                {% for key, label in status_options %}
-                                <option value="{{ key }}" {% if form.status == key %}selected{% endif %}>{{ label }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            {{ lbl('K/Z', 'Net kâr/zarar (komisyon dahil). Açık işlemde boş bırak.') }}
-                            <input type="text" inputmode="decimal" name="pnl_amount" id="form-pnl" value="{{ form.pnl_amount }}"
-                                   placeholder="ör. 12,50 / -8" {{ fld() }}>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                        <div>
-                            {{ lbl('Giriş fiyatı') }}
-                            <input type="text" inputmode="decimal" name="entry_price" value="{{ form.entry_price }}" placeholder="opsiyonel" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Giriş zamanı') }}
-                            <input type="datetime-local" name="entered_at" required value="{{ form.entered_at }}" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Çıkış fiyatı') }}
-                            <input type="text" inputmode="decimal" name="exit_price" value="{{ form.exit_price }}" placeholder="opsiyonel" {{ fld() }}>
-                        </div>
-                        <div>
-                            {{ lbl('Çıkış zamanı', 'Durum Win/Loss/Breakeven ise zorunlu') }}
-                            <input type="datetime-local" name="closed_at" id="form-closed-at" value="{{ form.closed_at }}"
-                                   {% if form.status and form.status != 'open' %}required{% endif %} {{ fld() }}>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                        <div>
-                            {{ lbl('Para birimi') }}
-                            <input type="text" name="currency" value="{{ form.currency or 'USD' }}" {{ fld() }}>
-                        </div>
-                    </div>
-
-                    <div class="flex items-center gap-2">
-                        <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">
-                            {% if form.id %}Kaydet{% else %}İşlemi ekle{% endif %}
-                        </button>
-                        <a href="/paper-trades?{{ qs }}" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Vazgeç</a>
-                    </div>
-                </form>
-            </details>
-
-            <datalist id="paper-symbols">
-                {% for s in symbols %}<option value="{{ s }}"></option>{% endfor %}
-            </datalist>
 
             {# ──────────── Görünüm sekmeleri ──────────── #}
             <div class="flex items-center gap-1 mb-5 overflow-x-auto">
@@ -601,6 +470,7 @@ async function loadPaperTable() {
     const box = document.getElementById('paper-table');
     if (!box) return;
     const info = document.getElementById('refresh-info');
+    if (document.activeElement && document.activeElement.tagName === 'SELECT' && box.contains(document.activeElement)) return;
     try {
         const res = await fetch('/paper-trades/table' + window.location.search);
         if (!res.ok || res.redirected) return;
@@ -612,30 +482,16 @@ async function loadPaperTable() {
 }
 if (document.getElementById('paper-table')) setInterval(loadPaperTable, 30000);
 
-// Cikis zamani yalniz kapali durumda (Win/Loss/BE) zorunlu.
-const statusSel = document.querySelector('select[name="status"]');
-const closedAt = document.getElementById('form-closed-at');
-if (statusSel && closedAt) {
-    const syncRequired = () => { closedAt.required = statusSel.value !== 'open'; };
-    statusSel.addEventListener('change', syncRequired);
-    statusSel.addEventListener('status-sync', syncRequired);   // K/Z'den otomatik secim
-    syncRequired();
+// Satirdaki DURUM kutusu: degisince hemen kaydedilir. Iki geri donussuz durum onay ister:
+// kapali islemi Acik'a cekmek K/Z'yi siler, acik islemi kapatmak cikis zamanini "simdi" yazar.
+function paperStatus(sel) {
+    const prev = sel.dataset.prev, next = sel.value;
+    let ask = null;
+    if (next === 'open' && prev !== 'open') ask = 'Kapanış geri alınsın mı? K/Z ve çıkış bilgisi silinir.';
+    else if (prev === 'open' && next !== 'open') ask = 'İşlem şimdi kapatılsın mı? Çıkış zamanı şu an, çıkış fiyatı canlı fiyat.';
+    if (ask && !confirm(ask)) { sel.value = prev; return; }
+    sel.form.submit();
 }
-
-// K/Z yazilinca Durum kutusu isaretten secilir -- elle secilmis bir durum ezilmez.
-document.querySelectorAll('select[data-status-for]').forEach(sel => {
-    const pnl = document.getElementById(sel.dataset.statusFor);
-    if (!pnl) return;
-    let auto = !pnl.value;
-    sel.addEventListener('change', () => { auto = false; });
-    pnl.addEventListener('input', () => {
-        if (!auto) return;
-        const v = parseFloat(pnl.value.replace(/\s/g, '').replace(/\.(?=.*,)/g, '').replace(',', '.'));
-        if (isNaN(v)) return;
-        sel.value = v > 0.005 ? 'win' : (v < -0.005 ? 'loss' : 'breakeven');
-        sel.dispatchEvent(new Event('status-sync'));
-    });
-});
 
 </script>
 {% endblock %}

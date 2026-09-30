@@ -317,6 +317,22 @@ class PotentialNotice(Base):
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class NewsNotice(Base):
+    """Haber botunun gonderdigi her mesaj (app/news.py). Restart'ta ayni bildirim tekrar
+    gitmesin ve sonuc mesaji on-bildirime reply olabilsin diye DB'de tutulur.
+
+    `key` ornekleri: "morning|2026-09-30", "pre|20260930T1230Z", "result|20260930T1230Z",
+    "talk|20260930T1930Z", "sudden|tarife|<guid>", "digest|tarife|<zaman>".
+    """
+    __tablename__ = "news_notices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, nullable=False, unique=True, index=True)
+    kind = Column(String, nullable=False)
+    tg_message_id = Column(Integer, nullable=True)
+    sent_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class PaperTrade(Base):
     """Deneme (paper) islem gunlugu: ELLE tutulan islem kaydi.
 

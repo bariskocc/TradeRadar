@@ -40,6 +40,11 @@ DOJI_BODY_RATIO_MAX = 0.10
 # kalkti, yanlis renk yalniz skorda (base 0) ceza olur. 4H/1H'te guclu yanlis renk
 # C1'i elemeye devam eder.
 C2_COLOR_HARD_FILTER_TFS = frozenset({"4h", "1h"})
+# C1 govde filtresi (30.09, kullanici karari -- LTC 4H #146, C1 govdesi araligin %11'i): govdesi araligin
+# C1_MIN_BODY_FRAC'indan kucuk C1 (doji / iki yani fitilli karasiz mum) CRT sayilmaz -> `c1_weak`. Journal
+# (29.09+) 4H: govde < 0.30 -0.70 R/setup, >= 0.30 -0.25. Yalniz 4H: 1D/1W'de olcum yok denecek kadar az.
+C1_MIN_BODY_FRAC = 0.30
+C1_BODY_FILTER_TFS = frozenset({"4h"})
 # 1W-4H stratejisi (28.09, kullanici karari; 1H-5M'in yerine). HTF haftalik mum, 1D'den
 # sentezlenir (`daily_to_weekly_bars`). Skor tablosu farkli (`_calc_live_setup_bias`):
 #   - 1D bias kalemi (htf, +2/-2) yerine AYLIK bias (`compute_monthly_bias`); hard filtre degil.
@@ -1366,7 +1371,19 @@ def detect_pd_arrays(
     def swept(level: float) -> bool:
         return c2_high > level if is_short else c2_low < level
 
-    # 1) PDH/PDL, PWH/PWL, PMH/PML -- C2 acilisina gore, C2 ilk supuren olmali
+    # 1) PDH/PDL, PWH/PWL, PMH/PML -- C2 acilisina gore, C2 ilk supuren olmali.
+    # 30.09 (kullanici karari, LTC 4H #146): donem ucunu C1 ya da C1-C2 arasi bir mum yaptiysa
+    # seviye C1'den ONCE olusmamistir -> sayilmaz (C1'in ucunu supurmek zaten CRT'nin tanimi;
+    # eskiden PDL = C1 dibi pd_major +1 ve NEUTRAL'da reversal-at-PD htf +2 getiriyordu).
+    c1_to_c2 = df_4h.iloc[max(0, crt_idx):purge_idx]
+
+    def made_since_c1(level: float) -> bool:
+        if c1_to_c2.empty:
+            return False
+        if is_short:
+            return float(c1_to_c2["high"].max()) >= level
+        return float(c1_to_c2["low"].min()) <= level
+
     period_hits: list[float] = []
     levels = _prior_period_levels(df_1d, c2_open)
     for key, (lab_hi, lab_lo) in (("D", ("PDH", "PDL")), ("W", ("PWH", "PWL")), ("M", ("PMH", "PML"))):
@@ -1374,6 +1391,8 @@ def detect_pd_arrays(
             continue
         hi, lo_, ended = levels[key]
         lvl = hi if is_short else lo_
+        if made_since_c1(lvl):
+            continue
         if touches_level(lvl) and _unswept_between(df_4h, df_1d, lvl, ended, c2_open, is_short):
             labels.append(lab_hi if is_short else lab_lo)
             period_hits.append(lvl)
@@ -2071,6 +2090,9 @@ def detect_crt_setup(
     mumda C1 araligina GERI kapatan ilk mum. Bir mum tarafi asip geri kapatmadan
     (breakout) kaparsa o C1 gecersiz sayilir.
 
+    C1 govdesi (30.09): C1_BODY_FILTER_TFS'te (4H) govdesi araligin C1_MIN_BODY_FRAC'indan (0.30)
+    kucuk C1 elenir (`c1_weak`).
+
     Purge mum rengi (reversal, A kurali):
       - Sweep + iceri kapanis zorunlu.
       - C2 dogru renk (LONG yesil / SHORT kirmizi) VEYA doji (govde/range <= %10).
@@ -2096,7 +2118,7 @@ def detect_crt_setup(
     radar/Journal nedeni gosterir.
     `rejected` (liste verilirse): setup'a cevrilmeden elenen adaylar -- yalniz KAPANMIS C2 ve
     C1 ucu gercekten delinmisse -- {reason, direction, crt_bar_time, purge_time, setup} olarak
-    eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small /
+    eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small / c1_weak /
     not_selected (gecerliydi, baska aday secildi; `setup` dolu). Motor karari DEGISMEZ; Setup
     Journal bu adaylarin sonrasini izler (14.09).
     """
@@ -2116,6 +2138,7 @@ def detect_crt_setup(
     c1_back = CRT_C1_LOOKBACK_1H if (timeframe or "").lower() == "1h" else CRT_C1_LOOKBACK
     # 1D'de C2 rengi hard filtre degil (25.09); yanlis renk skorda base 0 alir.
     color_hard = (timeframe or "4h").lower() in C2_COLOR_HARD_FILTER_TFS
+    c1_body_hard = (timeframe or "4h").lower() in C1_BODY_FILTER_TFS
 
     def _reject(reason: str, direction: str, c1_i: int, c2_i: int) -> None:
         # Yalniz KAPANMIS C2: forming mumun rengi/kapanisi fiyatla degisir (gurultu).
@@ -2219,6 +2242,11 @@ def detect_crt_setup(
         if direction is None or purge_j is None:
             if red is not None:
                 _reject(red[0], red[1], live_i, red[2])
+            continue
+
+        # Karasiz C1 (govde < C1_MIN_BODY_FRAC x aralik) CRT sayilmaz (30.09).
+        if c1_body_hard and abs(float(live_crt["close"]) - float(live_crt["open"])) < C1_MIN_BODY_FRAC * live_range:
+            _reject("c1_weak", direction, live_i, purge_j)
             continue
 
         candidates.append((live_range, crt_vol, live_i, _build_crt_setup(
