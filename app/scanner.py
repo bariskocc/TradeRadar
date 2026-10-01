@@ -276,6 +276,12 @@ STRATEGY_CFG = {
         "ifvg_requires_c2_closed": False,
         # 1D bias hard filtresi YOK; aylik bias yalniz skorda (+2/-2).
         "require_bias_align": False,
+        # Giris modeli (01.10, kullanici karari): yalniz CISD limit emri -- MSS / IFVG / BPR girisi yok;
+        # SL girisle purge ucu arasinin %80'i (`_cisd_opts`). Journal'in 1W SL'i de bu SL'dir: 01.10
+        # sonrasi 1W satirlarinda "stop %100" = motorun %80 stopu (raporlari buna gore oku).
+        "zone_entry": False,
+        "entry_cisd_only": True,
+        "stop_frac": 0.80,
         # Koruma 4H/1D ile ayni (kullanici karari): yarisi TP yolunun %50'sinde + BE, trail kapali.
         "be_arm_r": None,
         "trail_arm_r": None,
@@ -1684,6 +1690,8 @@ def _maybe_ifvg_entry(
 def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
     """FVG bolgesinden (IFVG veya BPR) entry alinabilir mi?"""
     cfg = cfg or {}
+    if cfg.get("zone_entry") is False:      # 01.10: 1W yalniz CISD
+        return False
     if cfg.get("ifvg_requires_c2_closed") and not setup.c2_closed:
         return False
     if cfg.get("score7_requires_cisd_pd") and int(setup.bias_score or 0) == 7:
@@ -1867,6 +1875,12 @@ def _cfvg_seed(df_ltf, confirm_time) -> dict | None:
         return None
 
 
+def _cisd_opts(cfg: dict | None) -> dict:
+    """Stratejinin CISD secenekleri (01.10, 1W): yalniz CISD girisi + dar stop kesri."""
+    cfg = cfg or {}
+    return {"cisd_only": bool(cfg.get("entry_cisd_only")), "stop_frac": float(cfg.get("stop_frac") or 1.0)}
+
+
 def _preview_trade_levels(
     setup: CRTSetup,
     df_ltf: pd.DataFrame | None,
@@ -1885,7 +1899,7 @@ def _preview_trade_levels(
     # formasyondayken IFVG fiilen var olsa bile "-" gorunuyordu.
     ifvg = zone is not None
     bpr = bpr_zone is not None
-    cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=c2_hours)
+    cisd = check_cisd_confirmation(df_ltf, setup, c2_hours=c2_hours, **_cisd_opts(cfg))
     if cisd is not None:
         cisd, planned = _maybe_ifvg_entry(
             cisd, setup, df_ltf, c2_hours=c2_hours, allow_ifvg=allow_ifvg, cfg=cfg,
@@ -2496,7 +2510,7 @@ async def _detect_and_create_waiting_locked(
                    smt=setup.smt_pair, pd=setup.pd_array)
         return None
 
-    cisd = await _cpu(check_cisd_confirmation, df_ltf, setup, c2_hours=cfg["c2_hours"])
+    cisd = await _cpu(check_cisd_confirmation, df_ltf, setup, c2_hours=cfg["c2_hours"], **_cisd_opts(cfg))
     if cisd is None:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "no_levels")

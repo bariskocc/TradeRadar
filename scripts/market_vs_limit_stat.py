@@ -6,7 +6,7 @@ IZLEME "Geri cekilme derinligi" / tmp/tmp_limit_variant_depth.py.
 
 Kaynak `setup_journal.retrace` ekseni (mum indirmez): 0 = seviye dondugu andaki fiyat (`ref`, market girisi),
 1 = SL. Limit = `d_of.chosen` (bugunku giris). Stop kesri k: SL = x + k(1-x) (%100 bugunku purge ucu);
-market kollari k = %100 / %90 / %80 / %70 / %60.
+market kollari k = %100 / %90 / %80 / %70 / %60; limit kollari (01.10) ayni giris, k = %90 / %80 / %70 / %60.
   tp_first True : x <= d_tp ise dolar; d_tp < s -> TP, degilse SL; x > d_tp -> TP giristen once (0R)
   tp_first False: dolar, SL
   ufuk doldu    : d_max >= x -> dolu/sonuclanmamis (0R brut, komisyonun giris yarisi dusulur), degilse dolmadi
@@ -19,8 +19,8 @@ RR kapisi: "RR>=2" = motorun bugunku kurali yeni giris/stopla; "kapi yok" = her 
 Duz TP/SL (kismi kar + BE yok). Karar yalniz first_bar'li satirlarda (26.09+): eski satirlar sinyal anindaki ilk
 mumu gormez -> d_tp kucuk -> market (sig giris) ve dar stop LEHINE yanli.
 
-Karar kurali: IZLEME.md "Market vs limit giriş — komisyonsuz / komisyonlu".
-Kullanim: python scripts/market_vs_limit_stat.py [--fee-market 0.10] [--fee-limit 0.07] [--all]
+Karar kurali: IZLEME.md "Market vs limit giriş — 4H" / "— 1D" / "— 1W" (01.10'da strateji bazinda bolundu).
+Kullanim: python scripts/market_vs_limit_stat.py [--strategy 4h|1d|1w] [--fee-market 0.10] [--fee-limit 0.07]
   --all : kapi fark etmez tum gercek setuplar (varsayilan: kalite kapilarini gecmis + tum; ikisi de basilir)
 """
 import argparse
@@ -36,6 +36,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--db", default=str(REPO / "traderadar.db"))
 ap.add_argument("--fee-market", type=float, default=0.10, help="market gidis-donus komisyonu, yuzde")
 ap.add_argument("--fee-limit", type=float, default=0.07, help="limit gidis-donus komisyonu, yuzde")
+ap.add_argument("--strategy", choices=("4h", "1d", "1w"), help="tek strateji (01.10: izleme strateji basina uc madde)")
 A = ap.parse_args()
 
 PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
@@ -45,11 +46,15 @@ MIN_RR = 2.0
 con = sqlite3.connect(f"file:{A.db}?mode=ro", uri=True)
 con.row_factory = sqlite3.Row
 recs = []
+past_tp = 0
 for r in con.execute("select * from setup_journal where retrace is not null and parts_at_levels is not null"):
     if r["best_stage"] in PRE:
         continue
     pal = json.loads(r["parts_at_levels"])
-    if r["strategy"] in ("4h", "1d") and pal.get("c2_closed") != 1:
+    if A.strategy and r["strategy"] != A.strategy:
+        continue
+    # 01.10: C2 kapali donmus sarti yalniz 4H -- 1D/1W 25.09'dan beri C2 acikken islem aciyor (eskiden 1D de suzuluyordu)
+    if r["strategy"] == "4h" and pal.get("c2_closed") != 1:
         continue
     rt = json.loads(r["retrace"])
     if rt.get("amb") or not rt.get("span") or not rt.get("ref"):
@@ -60,6 +65,12 @@ for r in con.execute("select * from setup_journal where retrace is not null and 
     if d is None or d >= 1:
         continue
     long = r["direction"] == "LONG"
+    # (01.10) Journal setup'i ilk gordugunde fiyat TP'yi zaten gecmisse (ref TP'nin otesinde; cogu target_taken, 1W'nin
+    # 28.09 acilisinda gorulen gecmis setuplar) ne market ne limit islemi olur -- eskiden market kolu bunlari negatif RR'li
+    # TP sayiyordu. Canli dogsaydi market ne yapardi sorusunu Journal olcemez: sinyal anindaki fiyat kayitli degil.
+    if ((r["tp"] - rt["ref"]) if long else (rt["ref"] - r["tp"])) <= 0:
+        past_tp += 1
+        continue
     recs.append(dict(r=r, rt=rt, d=max(0.0, d), gp=r["best_stage"] not in QUAL, fb=r["first_bar"] is not None,
                      rr0=((r["tp"] - rt["ref"]) if long else (rt["ref"] - r["tp"])) / rt["span"],
                      span_pct=rt["span"] / rt["ref"] * 100))
@@ -84,6 +95,9 @@ def trade(rec, x, k, fee_pct):
 
 
 ARMS = [("limit (bugunku)", "limit", 1.0, True)]
+# 01.10 (kullanici): limit girisin kendisi de dar stopla olculsun -- ayni giris, stop %90..%60, RR>=2 yeni stopla.
+for k in (0.9, 0.8, 0.7, 0.6):
+    ARMS.append((f"limit stop %{int(k * 100)} RR>=2", "limit", k, True))
 # %90 / %70 (28.09, kullanici): "market + dar stop limitten kotu mu" sorusunu ara noktalarla da gormek icin.
 for k in (1.0, 0.9, 0.8, 0.7, 0.6):
     for gate in (True, False):
@@ -125,15 +139,17 @@ def table(title, sub):
         n, tp, sl, g, nt, fm = arm(sub, kind, k, gate)
         n1 = arm(h1, kind, k, gate)[4]
         n2 = arm(h2, kind, k, gate)[4]
-        if kind == "limit":
+        if not base:  # ilk kol = bugunku limit (stop %100) -- butun farklar ona gore
             base = dict(g=g, nt=nt, n1=n1, n2=n2)
         dg, dn = g - base["g"], nt - base["nt"]
         print(f"   {name:<26}{n:>6}{tp:>4}{sl:>4}{g:>+8.1f}{nt:>+8.1f}{fm:>10.2f}"
               f"{dg:>+10.1f}{dn:>+9.1f}{n1 - base['n1']:>+11.1f}{n2 - base['n2']:>+11.1f}")
-    print(f"   (fark = market kolu - limit, toplam R; per setup icin {len(sub)}'e bol)")
+    print(f"   (fark = kol - bugunku limit, toplam R; per setup icin {len(sub)}'e bol)")
 
 
+print(f"Strateji: {A.strategy or 'hepsi'}")
 print(f"Komisyon varsayimi: market %{A.fee_market:.2f}, limit %{A.fee_limit:.2f} gidis-donus")
+print(f"Haric: setup ilk goruldugunde TP zaten gecilmis {past_tp} satir (market de limit de islem olmazdi)")
 print(f"Stop mesafesi (ref -> SL) medyan %{statistics.median(x['span_pct'] for x in recs):.2f} fiyat")
 for name, pop in (("KAPILARI GECMIS", [x for x in recs if x["gp"]]), ("TUM GERCEK SETUP (kapi fark etmez)", recs)):
     print("\n" + "=" * 110 + f"\n{name}\n" + "=" * 110)

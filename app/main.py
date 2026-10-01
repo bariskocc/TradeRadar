@@ -1561,7 +1561,9 @@ async def api_radar(request: Request):
             "crt_bar_time": _fmt_date_tsi(e["crt_bar_time"]) if e.get("crt_bar_time") else None,
             "updated_at": _fmt_date_tsi(e["updated_at"]) if e.get("updated_at") else None,
         })
-    symbols.sort(key=lambda x: (x["rank"], x["symbol"]))
+    # 01.10 (kullanici): yuksek skor en ustte; skoru olmayan (no_setup / no_data) en altta.
+    # Esit skorda eski sira (durum onceligi, sonra sembol).
+    symbols.sort(key=lambda x: (x["score"] is None, -(x["score"] or 0), x["rank"], x["symbol"]))
 
     cnt = _Counter(s["state"] for s in symbols)
     summary = {

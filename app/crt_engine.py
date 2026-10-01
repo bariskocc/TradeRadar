@@ -2282,6 +2282,9 @@ def check_cisd_confirmation(
     df_15m: pd.DataFrame,
     setup: CRTSetup,
     c2_hours: float = 4.0,
+    *,
+    cisd_only: bool = False,
+    stop_frac: float = 1.0,
 ) -> Optional[CISDConfirmation]:
     """15M seviyeleri + (varsa) MSS kapanis onayi.
 
@@ -2294,6 +2297,10 @@ def check_cisd_confirmation(
     entry, kirilim ve mss_ref_time ayni adaya aittir.
 
     SL = purge ucu, TP = CRT karsi seviye.
+
+    `cisd_only` (01.10, 1W kullanici karari): MSS adayi yarismaz, giris daima CISD seviyesi (gecersizse None).
+    `stop_frac` (01.10, 1W): SL = giris + stop_frac x (purge ucu - giris); 1.0 = purge ucu. Adayin gecerliligi
+    ve onay yine purge ucuna gore (SL yalniz yakinlasir).
     """
     if len(df_15m) < 3:
         return None
@@ -2322,10 +2329,12 @@ def check_cisd_confirmation(
     if setup.direction == "LONG":
         return _check_bullish_cisd(
             recent, setup, min_confirm_time=min_confirm_time, c2_hours=c2_hours,
+            cisd_only=cisd_only, stop_frac=stop_frac,
         )
     else:
         return _check_bearish_cisd(
             recent, setup, min_confirm_time=min_confirm_time, c2_hours=c2_hours,
+            cisd_only=cisd_only, stop_frac=stop_frac,
         )
 
 
@@ -2366,6 +2375,7 @@ def _pick_wider_stop(
     sl: float,
     tp: float,
     direction: str,
+    cisd_only: bool = False,
 ) -> Optional[tuple[float, datetime, str]]:
     """Swing vs CISD blogu: gecerli ve daha iyi RR (daha dar stop) olan adayi don.
 
@@ -2385,8 +2395,10 @@ def _pick_wider_stop(
             return sl < level < tp
         return tp < level < sl
 
-    swing_ok = _ok(swing_level)
     cisd_ok = _ok(cisd_level)
+    if cisd_only:  # 01.10, 1W: MSS yarismaz
+        return (float(cisd_level), cisd_time, "cisd") if cisd_ok else None
+    swing_ok = _ok(swing_level)
     if not swing_ok and not cisd_ok:
         return None
     if swing_ok and not cisd_ok:
@@ -2542,6 +2554,8 @@ def _check_bullish_cisd(
     setup: CRTSetup,
     min_confirm_time: Optional[pd.Timestamp] = None,
     c2_hours: float = 4.0,
+    cisd_only: bool = False,
+    stop_frac: float = 1.0,
 ) -> Optional[CISDConfirmation]:
     """15M bullish onay: swing vs bearish blog (CISD), tek aday (genis stop).
 
@@ -2589,21 +2603,23 @@ def _check_bullish_cisd(
 
     # Swing adayi: C2 dip ekstreminden ONCEKI son swing high (plato dahil).
     swing = _last_swing_high_before(work, low_iloc)
-    if swing is None:
+    if swing is None and not cisd_only:
         return None
-    mss_level, mss_ref_time = swing
+    mss_level, mss_ref_time = swing if swing is not None else (None, None)
 
     sl = round(setup.purge_extreme, 8)
     tp = round(setup.key_level_high, 8)
     cisd_ref_time = _bar_time(work, run_start)
 
     picked = _pick_wider_stop(
-        mss_level, mss_ref_time, cisd_level, cisd_ref_time, sl, tp, "LONG",
+        mss_level, mss_ref_time, cisd_level, cisd_ref_time, sl, tp, "LONG", cisd_only=cisd_only,
     )
     if picked is None:
         return None
     break_level, mss_ref_time, entry_model = picked
     entry = round(break_level, 8)
+    # 01.10 (1W): SL girisle purge ucu arasinin `stop_frac`'i; 1.0 = purge ucu (eski davranis birebir).
+    stop = sl if stop_frac >= 1.0 else round(entry + stop_frac * (sl - entry), 8)
 
     confirm_time: Optional[datetime] = None
     # Dipten sonra break_level USTUNDE kapatan ilk mum -> onay.
@@ -2620,7 +2636,7 @@ def _check_bullish_cisd(
 
     return CISDConfirmation(
         entry_price=entry,
-        stop_loss=sl,
+        stop_loss=stop,
         take_profit=tp,
         invalidation_level=setup.invalidation_level,
         cisd_price=round(break_level, 8),
@@ -2628,7 +2644,7 @@ def _check_bullish_cisd(
         mss_ref_time=mss_ref_time,
         entry_model=entry_model,
         cisd_level=round(float(cisd_level), 8),
-        mss_level=round(float(mss_level), 8),
+        mss_level=round(float(mss_level), 8) if mss_level is not None else None,
     )
 
 
@@ -2637,6 +2653,8 @@ def _check_bearish_cisd(
     setup: CRTSetup,
     min_confirm_time: Optional[pd.Timestamp] = None,
     c2_hours: float = 4.0,
+    cisd_only: bool = False,
+    stop_frac: float = 1.0,
 ) -> Optional[CISDConfirmation]:
     """15M bearish onay: swing vs bullish blog (CISD), tek aday (genis stop).
 
@@ -2681,21 +2699,23 @@ def _check_bearish_cisd(
 
     # Swing adayi: C2 tepe ekstreminden ONCEKI son swing low (plato dahil).
     swing = _last_swing_low_before(work, high_iloc)
-    if swing is None:
+    if swing is None and not cisd_only:
         return None
-    mss_level, mss_ref_time = swing
+    mss_level, mss_ref_time = swing if swing is not None else (None, None)
 
     sl = round(setup.purge_extreme, 8)
     tp = round(setup.key_level_low, 8)
     cisd_ref_time = _bar_time(work, run_start)
 
     picked = _pick_wider_stop(
-        mss_level, mss_ref_time, cisd_level, cisd_ref_time, sl, tp, "SHORT",
+        mss_level, mss_ref_time, cisd_level, cisd_ref_time, sl, tp, "SHORT", cisd_only=cisd_only,
     )
     if picked is None:
         return None
     break_level, mss_ref_time, entry_model = picked
     entry = round(break_level, 8)
+    # 01.10 (1W): SL girisle purge ucu arasinin `stop_frac`'i; 1.0 = purge ucu (eski davranis birebir).
+    stop = sl if stop_frac >= 1.0 else round(entry + stop_frac * (sl - entry), 8)
 
     confirm_time: Optional[datetime] = None
     # Tepeden sonra break_level ALTINDA kapatan ilk mum -> onay.
@@ -2712,7 +2732,7 @@ def _check_bearish_cisd(
 
     return CISDConfirmation(
         entry_price=entry,
-        stop_loss=sl,
+        stop_loss=stop,
         take_profit=tp,
         invalidation_level=setup.invalidation_level,
         cisd_price=round(break_level, 8),
@@ -2720,7 +2740,7 @@ def _check_bearish_cisd(
         mss_ref_time=mss_ref_time,
         entry_model=entry_model,
         cisd_level=round(float(cisd_level), 8),
-        mss_level=round(float(mss_level), 8),
+        mss_level=round(float(mss_level), 8) if mss_level is not None else None,
     )
 
 

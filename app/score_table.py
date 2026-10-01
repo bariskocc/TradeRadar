@@ -165,6 +165,28 @@ def _score_rows(strategy: str) -> list[dict]:
     return rows
 
 
+def _trade_plan(strategy: str) -> dict:
+    """Emir turu / giris modeli / stop seviyesi (01.10, kullanici istegi) -- STRATEGY_CFG'den okunur.
+
+    Motor her stratejide LIMIT emir gibi davranir (sinyal `waiting_entry`, retest'te dolar); market girisi
+    yalniz olcumde (IZLEME "Market vs limit giris"). Giris modeli ve stop kesri strateji ayarindan gelir,
+    elle yazilmaz -- ayar degisince sayfa kendiliginden dogru kalir.
+    """
+    cfg = sc.STRATEGY_CFG.get(strategy) or {}
+    if cfg.get("zone_entry") is False:
+        zones = None
+    elif cfg.get("ifvg_requires_c2_closed"):
+        zones = "BPR → IFVG (C2 kapandıktan sonra)"
+    else:
+        zones = "BPR → IFVG"
+    struct = "yalnız CISD" if cfg.get("entry_cisd_only") else "CISD / MSS (daha iyi RR)"
+    entry = f"{zones} → {struct}" if zones else struct[0].upper() + struct[1:]
+    frac = float(cfg.get("stop_frac") or 1.0)
+    stop = "Purge ucu (%100)" if frac >= 1.0 else f"Girişten purge ucuna mesafenin %{frac * 100:.0f}'i"
+    return {"code": strategy, "label": dict(TABS).get(strategy, strategy), "order": "Limit",
+            "entry": entry, "stop": stop}
+
+
 def _limits(strategy: str) -> dict:
     cfg = sc.STRATEGY_CFG.get(strategy) or {}
     max_score = int(cfg.get("max_score", sc.MAX_QUALITY_SCORE))
@@ -339,6 +361,7 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
     return {
         "tabs": TABS,
         "strategy": strategy,
+        "plans": [_trade_plan(code) for code, _ in TABS],
         "rows": rows,
         "filters": filters,
         "limits": lim,

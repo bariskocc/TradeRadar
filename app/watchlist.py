@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from markupsafe import Markup
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BiasJournal, PotentialNotice, SetupJournal, Signal
@@ -49,7 +49,10 @@ STATUS_META = {
 #   2 = dogrulama: canliya alinmis bir degisiklik tuttu mu, kapi ne eliyor
 #   3 = bilgi / saglik / bildirim ergonomisi -- motor karari degismez
 ONEM_META: dict[int, tuple[str, str]] = {
-    1: ("Yüksek", "text-accent-red"),
+    # 0 (01.10, kullanici): 21 acik madde "Yuksek"ti, sira bir sey soylemiyordu. Cok yuksek = kullanicinin
+    # actigi VE canli bir kurali degistirebilecek madde (cogu orneklemi dolmus). Az tut -- hepsi cok yuksekse yine ayni sorun.
+    0: ("Çok yüksek", "text-accent-red font-bold"),
+    1: ("Yüksek", "text-accent-yellow"),
     2: ("Orta", "text-accent-blue"),
     3: ("Düşük", "text-gray-500"),
 }
@@ -115,7 +118,7 @@ class WatchItem:
     md: str                     # IZLEME.md'deki BASLIK METNI (## isareti olmadan)
     measure: str = ""           # calistirilacak komut / bakilacak sayfa
     result: str = ""            # status="done" ise tek cumle sonuc
-    onem: int = 2               # 1 yuksek / 2 orta / 3 dusuk -- ONEM_META, siralamanin BIRINCIL anahtari
+    onem: int = 2               # 0 cok yuksek / 1 yuksek / 2 orta / 3 dusuk -- ONEM_META, siralamanin BIRINCIL anahtari
     pinned: bool = False        # kullanici "en uste" dedi (29.09): kumesinin basinda, onemden bile once
     progress_fn: Optional[Callable[[AsyncSession], Awaitable[Progress]]] = None
 
@@ -216,13 +219,20 @@ async def _p_shadow(db: AsyncSession) -> Progress:
                     note=f"{n} setup gölge izlemede · sürekli k eğrisi için çözülmüş kazanan {egri}/60")
 
 
-async def _p_retrace(db: AsyncSession) -> Progress:
-    """first_bar'li (26.09+, yanlissiz) cozulmus KAZANAN setup, C2 kapali donmus (esik 30; 27.09'da yeniden tanimlandi)."""
+async def _p_retrace(db: AsyncSession, strategy: Optional[str] = None, target: int = 30) -> Progress:
+    """first_bar'li (26.09+, yanlissiz) bugunku girisle DOLUP TP'ye giden setup (limit seviyesi karar dilimi).
+
+    01.10: strateji bazinda uc maddeye bolundu (`strategy`, kullanici: "30 az"); C2 kapali donmus sarti yalniz 4H'te
+    (1D/1W 25.09'dan beri C2 acikken islem aciyor; rapor `tmp/tmp_limit_variant_depth.py --strategy` ayni kural).
+    Tetik yalniz orneklem -- tarih yok.
+    """
     t = SetupJournal.__table__
     base = [
         t.c.retrace.is_not(None), t.c.first_bar.is_not(None), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
-        or_(t.c.strategy == "1h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+        or_(t.c.strategy != "4h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
     ]
+    if strategy:
+        base.append(t.c.strategy == strategy)
     n = await db.scalar(select(func.count()).select_from(t).where(*base)) or 0
     # 28.09: kazanan = bugunku girisle DOLUP TP'ye giden (d_of.chosen <= d_tp). Eskiden `tp_first` sayiliyordu;
     # dolmadan TP'ye gidenler de girdigi icin sayac 67/30 gosterirken esli tablolarda varyant basina 5-8 islem
@@ -234,25 +244,69 @@ async def _p_retrace(db: AsyncSession) -> Progress:
             d_ch <= func.coalesce(func.json_extract(t.c.retrace, "$.d_tp"), 0),
         )
     ) or 0
-    return Progress(bars=[Bar("first_bar'lı dolmuş kazanan", win, 30)],
-                    due=date(2026, 10, 3), either=True, note=f"{n} first_bar'lı setup ölçekte")
+    return Progress(bars=[Bar("first_bar'lı dolmuş kazanan", win, target)], note=f"{n} first_bar'lı setup ölçekte")
 
 
-async def _p_market_fee(db: AsyncSession) -> Progress:
-    """first_bar'li (26.09+) cozulmus gercek setup, C2 kapali donmus (market vs limit karar dilimi, esik 400).
+def _p_retrace_for(strategy: str, target: int):
+    async def fn(db: AsyncSession) -> Progress:
+        return await _p_retrace(db, strategy, target)
+    return fn
+
+
+async def _p_market_fee(db: AsyncSession, strategy: Optional[str] = None, target: int = 400,
+                        note: str = "") -> Progress:
+    """first_bar'li (26.09+) cozulmus gercek setup (market vs limit karar dilimi).
 
     28.09: esik 100 -> 400 (kullanici "iyice emin olmak istiyorum"); 100'de okunan sonuc ara okuma sayildi.
-    Tetik yalniz orneklem: tarih yok (03.10 ara okuma note'ta), either yok -- tarih tek basina tetiklemesin.
+    01.10: setup ilk goruldugunde TP'si gecilmis satirlar sayilmaz (114 satir; sayac 452 gosterip erken tetikledi).
+    01.10: strateji bazinda uc maddeye bolundu (`strategy`); C2 kapali donmus sarti yalniz 4H'te -- 1D/1W 25.09'dan
+    beri C2 acikken islem aciyor (rapor `--strategy` ile ayni kural).
+    Tetik yalniz orneklem: tarih yok, either yok -- tarih tek basina tetiklemesin.
     """
     t = SetupJournal.__table__
-    n = await db.scalar(select(func.count()).select_from(t).where(
+    where = [
         t.c.retrace.is_not(None), t.c.first_bar.is_not(None), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
-        or_(t.c.strategy == "1h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+        or_(t.c.strategy != "4h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
         or_(t.c.retrace.like('%"tp_first":true%'), t.c.retrace.like('%"tp_first":false%'),
             t.c.retrace.like('%"done":true%')),
-    )) or 0
-    return Progress(bars=[Bar("first_bar'lı çözülmüş setup", n, 400)],
-                    note="28.09 ara okuma (104): her market kolu limitin altında · 03.10 ikinci ara okuma")
+        # 01.10: ilk goruldugunde TP'si zaten gecilmis satir islem degil (rapor da haric tutar)
+        case((t.c.direction == "LONG", t.c.tp > func.json_extract(t.c.retrace, "$.ref")),
+             else_=t.c.tp < func.json_extract(t.c.retrace, "$.ref")),
+    ]
+    if strategy:
+        where.append(t.c.strategy == strategy)
+    n = await db.scalar(select(func.count()).select_from(t).where(*where)) or 0
+    return Progress(bars=[Bar("first_bar'lı çözülmüş setup", n, target)], note=note)
+
+
+def _p_market_fee_for(strategy: str, target: int, note: str = ""):
+    async def fn(db: AsyncSession) -> Progress:
+        return await _p_market_fee(db, strategy, target, note)
+    return fn
+
+
+async def _p_reclaim_penalty(db: AsyncSession) -> Progress:
+    """Zayif C2 geri donusu cezasi (-4) alan, ham skoru esigi gecen, cozulmus Journal setupu -- strateji basina 20.
+
+    Rapor `scripts/reclaim_penalty_stat.py` ile ayni kume: 19.09+ (ceza o gun -4 oldu), 4H'te C2 kapali donmus,
+    ham skor = raw - reclaim >= esik (tavan SMT'den once uygulandigi icin bu esitlik tavan durumunda da dogru).
+    Sonuc `outcome` win/loss; setup sinyale donustuyse `shadow["1"].o`.
+    """
+    t = SetupJournal.__table__
+    pal = t.c.parts_at_levels
+    rec = func.json_extract(pal, "$.reclaim")
+    raw = func.coalesce(func.json_extract(pal, "$.raw"), func.json_extract(pal, "$.score"))
+    res = or_(t.c.outcome.in_(("win", "loss")),
+              (t.c.outcome == "signal") & func.json_extract(t.c.shadow, '$."1".o').in_(("win", "loss")))
+    bars = []
+    for strat, thr in (("4h", 7), ("1d", 7), ("1w", 6)):
+        n = await db.scalar(select(func.count()).select_from(t).where(
+            t.c.strategy == strat, t.c.first_seen >= datetime(2026, 9, 19), t.c.entry.is_not(None),
+            t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)), rec == -4, raw - rec >= thr, res,
+            or_(t.c.strategy != "4h", func.json_extract(pal, "$.c2_closed") == 1),
+        )) or 0
+        bars.append(Bar(f"{strat.upper()} ceza alan, ham skor ≥ {thr}", n, 20))
+    return Progress(bars=bars, note="01.10 ilk okuma: 4H ve 1D'de ceza kalır · 1W veri birikiyor")
 
 
 async def _p_entry_models(db: AsyncSession) -> Progress:
@@ -691,6 +745,13 @@ async def _p_score_parts_4h(db: AsyncSession) -> Progress:
     return Progress(due=date(2026, 10, 3), note=f"4H: {n} sonuçlanmış kırılımlı setup")
 
 
+async def _p_score_parts_1w(db: AsyncSession) -> Progress:
+    """1W (01.10): kirilimli + sonuclanmis 1W setup. Hukum kalem basina karar bandinda taraf basina 10 ister
+    (`scripts/score_item_outcome_stat.py`); 60 sonuclanmis kaba bir hedef -- hukum raporun kendisinden okunur."""
+    n = await _score_parts_resolved(db, "1w")
+    return Progress(bars=[Bar("sonuçlanmış 1W setup", n, 60)])
+
+
 async def _p_score_parts_1d(db: AsyncSession) -> Progress:
     # Tarihli madde: cubuk eklemek hatirlatmayi saklar (ready tarih + cubuk ister), sayi note'ta.
     n = await _score_parts_resolved(db, "1d")
@@ -797,13 +858,38 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_session_anchor,
     ),
     WatchItem(
-        key="retrace", status="open", started="18.09", onem=1,
+        key="retrace", status="done", started="18.09", onem=1,
         title="Limit giriş seviyesi — CISD/MSS mi IFVG/BPR mi, stop %100/%80/%60",
-        trigger="03.10.2026 ya da 30 first_bar'lı dolmuş kazanan: bir varyant/stop aynı setuplarda bugünkü girişi "
-                "+0.15 R/setup geçerse mum re-track'i (market girişi ayrı konu)",
-        measure="python tmp/tmp_limit_variant_depth.py · python scripts/retrace_stat.py",
+        trigger="30 first_bar'lı dolmuş kazanan: bir varyant/stop bugünkü girişi +0.15 R/setup geçerse mum re-track'i",
+        result="(01.10) STRATEJİ BAZINDA ÜÇ MADDEYE BÖLÜNDÜ (kullanıcı: 30 az): 4H 150 / 1D 40 / 1W 10 dolmuş kazanan; "
+               "bölünürken 4H 62, 1D 4, 1W 0. Karar okuması yapılmadı.",
+        measure="python tmp/tmp_limit_variant_depth.py --strategy 4h|1d|1w",
         md="Geri çekilme derinliği — limit emri hangi seviyeden dolar? (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
         progress_fn=_p_retrace,
+    ),
+    WatchItem(
+        key="retrace_4h", status="open", started="01.10", onem=1,
+        title="Limit giriş seviyesi — 4H",
+        trigger="150 first_bar'lı dolmuş kazanan: bir limit varyantı (CISD/MSS/IFVG/BPR) ya da stop (%80/%60) aynı setuplarda bugünkü girişi +0.15 R/setup geçerse mum re-track'i; geçmezse giriş ve stop kalır",
+        measure="python tmp/tmp_limit_variant_depth.py --strategy 4h · python scripts/retrace_stat.py",
+        md="Limit giriş seviyesi — 4H",
+        progress_fn=_p_retrace_for("4h", 150),
+    ),
+    WatchItem(
+        key="retrace_1d", status="open", started="01.10", onem=1,
+        title="Limit giriş seviyesi — 1D",
+        trigger="40 first_bar'lı dolmuş kazanan: bir limit varyantı (CISD/MSS/IFVG/BPR) ya da stop (%80/%60) aynı setuplarda bugünkü girişi +0.15 R/setup geçerse mum re-track'i; geçmezse giriş ve stop kalır",
+        measure="python tmp/tmp_limit_variant_depth.py --strategy 1d",
+        md="Limit giriş seviyesi — 1D",
+        progress_fn=_p_retrace_for("1d", 40),
+    ),
+    WatchItem(
+        key="retrace_1w", status="open", started="01.10", onem=1,
+        title="Limit giriş seviyesi — 1W",
+        trigger="10 first_bar'lı dolmuş kazanan: bir limit varyantı (CISD/MSS/IFVG/BPR) ya da stop (%80/%60) aynı setuplarda bugünkü girişi +0.15 R/setup geçerse mum re-track'i; geçmezse giriş ve stop kalır. 01.10'dan beri 1W girişi yalnız CISD + %80 stop (kullanıcı kararı): bugünkü giriş = o kural. 10'da fark iki zaman yarısında da aynı yöndeyse karar, değilse eşik 20'ye uzar",
+        measure="python tmp/tmp_limit_variant_depth.py --strategy 1w",
+        md="Limit giriş seviyesi — 1W",
+        progress_fn=_p_retrace_for("1w", 10),
     ),
     WatchItem(
         key="entry_models", status="done", started="18.09",
@@ -859,14 +945,50 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_week_gap,
     ),
     WatchItem(
-        key="market_vs_limit_fee", status="open", started="27.09", onem=1,
+        key="market_vs_limit_fee", status="done", started="27.09", onem=1,
         title="Market vs limit giriş — komisyonsuz / komisyonlu",
-        trigger="400 first_bar'lı setup (28.09'da 100'den yükseltildi, kullanıcı): market kolu (stop %100/90/80/70/60) "
-                "NET limiti +0.15 R/setup ve iki zaman yarısında geçerse mum re-track'i (kısmi kâr + BE); "
-                "03.10 ara okuma, karar değil",
-        measure="python scripts/market_vs_limit_stat.py [--fee-market 0.10 --fee-limit 0.07]",
+        trigger="400 first_bar'lı setup: market kolu NET limiti +0.15 R/setup ve iki zaman yarısında geçerse mum re-track'i",
+        result="(01.10) STRATEJİ BAZINDA ÜÇ MADDEYE BÖLÜNDÜ (kullanıcı): 4H / 1D / 1W ayrı tetikle. Bölünmeden önceki "
+               "ara okumada (354) her market kolu limitin altındaydı; 114 'TP'si doğmadan geçilmiş' satır dışlandı.",
+        measure="python scripts/market_vs_limit_stat.py --strategy 4h|1d|1w",
         md="Market vs limit giriş — komisyonsuz / komisyonlu (27.09.2026, ⏰ 03.10)",
         progress_fn=_p_market_fee,
+    ),
+    WatchItem(
+        key="market_vs_limit_4h", status="open", started="01.10", onem=1,
+        title="Market vs limit giriş — 4H",
+        trigger="400 first_bar'lı 4H setup: market kolu (stop %100/90/80/70/60) NET limiti +0.15 R/setup ve iki zaman "
+                "yarısında geçerse mum re-track'i (kısmi kâr + BE); geçmezse limit kalır",
+        measure="python scripts/market_vs_limit_stat.py --strategy 4h",
+        md="Market vs limit giriş — 4H",
+        progress_fn=_p_market_fee_for("4h", 400, "01.10 (320): tüm kümede her kol eksi · kapıları geçmiş 56'da %90 RR≥2 +0.14"),
+    ),
+    WatchItem(
+        key="market_vs_limit_1d", status="open", started="01.10", onem=1,
+        title="Market vs limit giriş — 1D",
+        trigger="100 first_bar'lı 1D setup: market kolu NET limiti +0.15 R/setup ve iki zaman yarısında geçerse "
+                "mum re-track'i; geçmezse limit kalır",
+        measure="python scripts/market_vs_limit_stat.py --strategy 1d",
+        md="Market vs limit giriş — 1D",
+        progress_fn=_p_market_fee_for("1d", 100, "01.10 (52): her market kolu limitin altında"),
+    ),
+    WatchItem(
+        key="market_vs_limit_1w", status="open", started="01.10", onem=0,
+        title="Market vs limit giriş — 1W",
+        trigger="50 first_bar'lı 1W setup: market kolu NET limiti +0.15 R/setup ve iki zaman yarısında geçerse "
+                "mum re-track'i; geçmezse limit kalır. 01.10'dan beri 1W limiti = yalnız CISD + %80 stop (kullanıcı kararı)",
+        measure="python scripts/market_vs_limit_stat.py --strategy 1w",
+        md="Market vs limit giriş — 1W",
+        progress_fn=_p_market_fee_for("1w", 50, "01.10 (18): kapıyı geçen 1W setup yok; iki kolda da 0 TP (RR ≥ 2)"),
+    ),
+    WatchItem(
+        key="reclaim_penalty_by_tf", status="open", started="01.10", onem=0,
+        title="Zayıf C2 geri dönüşü cezası (−4) alan setup gerçekten stop oluyor mu?",
+        trigger="strateji başına 20 çözülmüş ceza alan setup (ham skor ≥ eşik): ceza alanın R/setup'ı cezasızdan "
+                "0.15'ten az kötüyse o stratejide ceza gevşetme adayı (−2, replay öncesi kullanıcıya); değilse kalır",
+        measure="python scripts/reclaim_penalty_stat.py",
+        md="Zayıf C2 geri dönüşü cezası (−4) alan setup gerçekten stop oluyor mu?",
+        progress_fn=_p_reclaim_penalty,
     ),
     WatchItem(
         key="zone_presence", status="open", started="27.09", onem=1,
@@ -906,7 +1028,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_purge_threshold,
     ),
     WatchItem(
-        key="key_level_filter", status="open", started="29.09", onem=1, pinned=True,
+        key="key_level_filter", status="open", started="29.09", onem=0, pinned=True,
         title="Key level teması yoksa işlem açılmasın mı? (+ EQ/SSL puan almalı mı)",
         trigger="29.09 sonrası her grupta 20 sonuçlanmış setup: key level'siz grup ≥ 0.3 R/setup kötüyse hard filtre, "
                 "0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay); EQ/SSL'li grup PDL/PWL'li kadar "
@@ -916,7 +1038,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_key_level_filter,
     ),
     WatchItem(
-        key="liq_beyond", status="open", started="29.09", onem=1,
+        key="liq_beyond", status="open", started="29.09", onem=0,
         title="Purge ötesinde alınmamış likidite varsa setup daha çok stop mu oluyor?",
         trigger="29.09 sonrası her grupta 20 sonuçlanmış setup: 0.5 ATR içinde alınmamış likidite olan grup "
                 "≥ 0.3 R/setup kötüyse kapı/ceza adayı (önce tek replay)",
@@ -925,7 +1047,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_liq_beyond,
     ),
     WatchItem(
-        key="c1_shape", status="open", started="29.09", onem=1,
+        key="c1_shape", status="open", started="29.09", onem=0,
         title="C1'in şekli: C2 ile aynı renk / TP'si fitil tepesi olan setup daha kötü mü?",
         trigger="her grupta 20 sonuçlanmış setup: aynı renk (H1) ya da TP fitili ≥ 0.40 (H2) grubu ≥ 0.3 R/setup "
                 "kötüyse hard filtre, 0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay)",
@@ -1076,7 +1198,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_tight_stop_gate,
     ),
     WatchItem(
-        key="missed_quality", status="open", started="21.09", onem=1,
+        key="missed_quality", status="open", started="21.09", onem=0,
         title="Retest skor kapısı — kazanan mı eliyor?",
         trigger="20 çözülmüş elenen setup (H3 için ayrıca her zamanlama diliminde 10)",
         measure="python scripts/missed_quality_stat.py",
@@ -1120,7 +1242,8 @@ ITEMS: list[WatchItem] = [
         title="Skor kalemleri — 4H",
         trigger="03.10: Journal karşı-olgusu (tmp/tmp_score_weight_cf.py) aynı kuralla yeniden — 28.09'da "
                 "temiz küme 15 işlemdi, karar yok; uzun fitil × −4 ceza hipotezi (bölüm 5) W40 ile",
-        measure="python scripts/score_parts_stat.py --strategy 4h",
+        measure="python scripts/score_item_outcome_stat.py --strategy 4h (kalem başına TP/SL) · "
+                "python scripts/score_parts_stat.py --strategy 4h",
         md="Skor kalemleri — 4H (ölçüm 16.09.2026, ilk okuma 28.09, ⏰ 03.10.2026)",
         progress_fn=_p_score_parts_4h,
     ),
@@ -1128,9 +1251,19 @@ ITEMS: list[WatchItem] = [
         key="score_parts_1d", status="open", started="16.09", onem=1,
         title="Skor kalemleri — 1D",
         trigger="03.10.2026 okuma; kalem başına iki tarafta 50 sonuçlanmış yoksa “veri birikiyor”",
-        measure="python scripts/score_parts_stat.py --strategy 1d  (C2/renk: --since 2026-09-25)",
+        measure="python scripts/score_item_outcome_stat.py --strategy 1d (kalem başına TP/SL) · "
+                "python scripts/score_parts_stat.py --strategy 1d  (C2/renk: --since 2026-09-25)",
         md="Skor kalemleri — 1D (ölçüm 16.09.2026, ⏰ okuma 03.10.2026)",
         progress_fn=_p_score_parts_1d,
+    ),
+    WatchItem(
+        key="score_parts_1w", status="open", started="01.10", onem=1,
+        title="Skor kalemleri — 1W",
+        trigger="kalem başına karar bandında (kalemin sinyali değiştirdiği setuplar) taraf başına 10 çözülmüş: puan alan "
+                "almayandan 0.15 R/setup kötüyse (cezada iyiyse) kalem TERS → kullanıcıya; aylık bias, haftalık, PMH/PML 1W'ye özgü",
+        measure="python scripts/score_item_outcome_stat.py --strategy 1w",
+        md="Skor kalemleri — 1W",
+        progress_fn=_p_score_parts_1w,
     ),
     WatchItem(
         key="w1_live", status="open", started="28.09", onem=2,
@@ -1518,6 +1651,33 @@ def _started_key(started: str) -> tuple[int, int]:
     return (int(m.group(2)), int(m.group(1))) if m else (99, 99)
 
 
+# Ayni isi strateji bazinda yapan maddeler (01.10, kullanici "alt alta yaz"): baslik "<aile> — 4H|1D|1W" kalibinda.
+_FAMILY_RE = re.compile(r"^(.*?) — (4H|1D|1W|1H)$")
+_TF_ORDER = {"4H": 0, "1D": 1, "1W": 2, "1H": 3}
+
+
+def _family(item: WatchItem) -> tuple[str, int]:
+    """(aile adi, strateji sirasi); kaliba uymayan madde kendi basina bir aile."""
+    m = _FAMILY_RE.match(item.title or "")
+    return (m.group(1), _TF_ORDER[m.group(2)]) if m else (item.key, 0)
+
+
+def _group_families(rows: list[dict]) -> list[dict]:
+    """Siralanmis kumede aile uyelerini alt alta topla: aile, en iyi siradaki uyesinin yerinde durur, uyeler 4H/1D/1W.
+
+    Kume siniri asilmaz: tetigi dolan uye tek basina "Aksiyon bekliyor"a cikar (o kume "tetik doldu" demek).
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        fam = _family(r["item"])[0]
+        if fam in seen:
+            continue
+        seen.add(fam)
+        out.extend(sorted((x for x in rows if _family(x["item"])[0] == fam), key=lambda x: _family(x["item"])[1]))
+    return out
+
+
 async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
     """Dort kume: aksiyon bekleyen / acik (oncelige gore) / pasif / tamamlanan.
 
@@ -1565,6 +1725,7 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
                                    _started_key(r["item"].started)))
     action.sort(key=lambda r: (not r["item"].pinned, r["item"].onem, _started_key(r["item"].started)))
     passive.sort(key=lambda r: (not r["item"].pinned, r["item"].onem, _started_key(r["item"].started)))
+    pinned, action, open_items, passive = (_group_families(x) for x in (pinned, action, open_items, passive))
 
     # "Ne bekliyor" ozeti: ayni tarihi bekleyen maddeler IZLEME.md'de zaten "ayni oturumda oku"
     # diye bagli (kardes maddeler ayni golge verisini okuyor). 18 satirlik listede bunu gormek

@@ -31,6 +31,30 @@
                 </p>
             </div>
 
+            <!-- Emir / giris / stop ozeti (01.10): STRATEGY_CFG'den, uc strateji birden -->
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto mb-4">
+                <table class="w-full text-xs">
+                    <thead>
+                        <tr class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-dark-600">
+                            <th class="text-left font-semibold px-3 py-2">Strateji</th>
+                            <th class="text-left font-semibold px-3 py-2">Emir</th>
+                            <th class="text-left font-semibold px-3 py-2">Giriş modeli</th>
+                            <th class="text-left font-semibold px-3 py-2">Stop seviyesi</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for p in plans %}
+                        <tr class="border-b border-dark-700/50 {% if p.code == strategy %}bg-dark-700/40{% endif %}">
+                            <td class="px-3 py-2 whitespace-nowrap {% if p.code == strategy %}text-accent-blue font-semibold{% else %}text-gray-300{% endif %}">{{ p.label }}</td>
+                            <td class="px-3 py-2 text-gray-300 whitespace-nowrap">{{ p.order }}</td>
+                            <td class="px-3 py-2 text-gray-300">{{ p.entry }}</td>
+                            <td class="px-3 py-2 text-gray-300">{{ p.stop }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
             <!-- Strateji sekmeleri -->
             <div class="flex gap-1 mb-4 border-b border-dark-600">
                 {% for code, label in tabs %}
