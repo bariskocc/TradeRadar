@@ -24,6 +24,7 @@ yazildi; bu betik yalnizca oradaki kurali calistirir.
 Kullanim:
     python scripts/missed_quality_stat.py
     python scripts/missed_quality_stat.py --strategy 4h --market crypto
+    python scripts/missed_quality_stat.py --all     # RR < 2 ve 1H dahil (bilgi)
 """
 
 from __future__ import annotations
@@ -37,16 +38,23 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-# IZLEME.md'deki onceden yazilmis esikler.
-MIN_RESOLVED = 20        # H1: karar icin gereken cozulmus elenen setup
+# IZLEME.md'deki onceden yazilmis esikler. 01.10'da 20/10 -> 60/30: 22 cozulmusle H1'in R/islem
+# guven araligi sifiri kapsiyordu (%95 [-0.42, +1.10]), H3 farki tek yonlu Fisher p 0.09.
+MIN_RESOLVED = 60        # H1: karar icin gereken cozulmus elenen setup
 MIN_WR_GAP_PP = 5.0      # H2: kapi koruyucu sayilmasi icin taban orandan bu kadar puan dusuk olmali
-MIN_SLICE = 10           # H3: her zamanlama diliminde gereken cozulmus setup
+MIN_SLICE = 30           # H3: her zamanlama diliminde gereken cozulmus setup
 MIN_SLICE_GAP_PP = 10.0  # H3: dilimler arasi anlamli sayilan WR farki
+
+# Karar kumesi (01.10): yalniz islem acilabilecek setuplar. RR < 2 kapi gecse bile low_rr'de
+# olurdu, 1H stratejisi 28.09'da kapandi. `--all` eski genis kumeyi basar (bilgi).
+DECISION_STRATEGIES = ("4h", "1d", "1w")
+MIN_RR = 2.0
 
 GATE = "missed_quality"
 WIN, LOSS = "win", "loss"
 # C2 mumunun suresi: kapanis ani = purge_time + bu sure.
-BAR = {"4h": timedelta(hours=4), "1d": timedelta(days=1), "1h": timedelta(hours=1)}
+BAR = {"4h": timedelta(hours=4), "1d": timedelta(days=1), "1w": timedelta(weeks=1),
+       "1h": timedelta(hours=1)}
 
 
 def _dt(value) -> datetime | None:
@@ -61,9 +69,13 @@ def _dt(value) -> datetime | None:
     return None
 
 
-def fetch(con: sqlite3.Connection, strategy: str, market: str) -> tuple[list[sqlite3.Row], dict]:
+def fetch(con: sqlite3.Connection, strategy: str, market: str,
+          wide: bool = False) -> tuple[list[sqlite3.Row], dict]:
     where = ["levels_at IS NOT NULL"]
     params: list = []
+    if not wide:
+        where.append(f"strategy IN ({','.join('?' * len(DECISION_STRATEGIES))}) AND rr >= ?")
+        params.extend([*DECISION_STRATEGIES, MIN_RR])
     if strategy:
         where.append("strategy = ?")
         params.append(strategy)
@@ -112,17 +124,21 @@ def _wr(rows: list[sqlite3.Row]) -> tuple[int, int, float, float]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=str(REPO / "traderadar.db"))
-    ap.add_argument("--strategy", default="", help="4h | 1d | 1h")
+    ap.add_argument("--strategy", default="", help="4h | 1d | 1w")
     ap.add_argument("--market", default="", help="crypto | fx | metal | index | oil")
+    ap.add_argument("--all", action="store_true",
+                    help="karar kumesi yerine butun satirlar (RR < 2 ve 1H dahil; bilgi)")
     args = ap.parse_args()
 
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    rows, base = fetch(con, args.strategy, args.market)
+    rows, base = fetch(con, args.strategy, args.market, wide=args.all)
 
     print("=" * 78)
     print("  RETEST SKOR KAPISI (missed_quality) - eledigi setuplar ne yapti?")
     print("=" * 78)
+    print("  kume: " + ("BUTUN satirlar (--all, karar kumesi degil)" if args.all else
+                       f"karar kumesi - strateji {'/'.join(DECISION_STRATEGIES)}, RR >= {MIN_RR:g}"))
     if not rows:
         print("  Kapida elenmis setup yok.")
         return

@@ -20,7 +20,7 @@
                     <div>
                         <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
                         <select name="tf" class="w-32 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
-                            {% for key, label in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H'), ('1h', '1H-5M (off)')] %}
+                            {% for key, label in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>

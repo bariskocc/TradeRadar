@@ -148,6 +148,7 @@ RADAR_STATE_META = {
     "has_open":       {"label": "Open signal exists",         "color": "purple", "rank": 7},
     "corr_open":      {"label": "Correlated pair open",       "color": "purple", "rank": 8},
     "duplicate":      {"label": "Setup already saved",        "color": "purple", "rank": 9},
+    "deleted_before": {"label": "Deleted once (not reopened)", "color": "purple", "rank": 9},
     "low_quality":    {"label": "Low quality (score<7)",      "color": "gray",   "rank": 10},
     # detect_crt_setup'in setup'a cevirmeden eledigi CRT (setup yoksa en guncel adayin nedeni).
     "c2_wrong_color": {"label": "CRT rejected: C2 wrong color",    "color": "dim", "rank": 11},
@@ -1581,7 +1582,7 @@ async def api_radar(request: Request):
             "waiting", "c2_open", "no_cisd", "low_rr", "missed", "invalidated",
             # "same_color",  # eski hard filter
             "tight_stop", "bias_mismatch", "cluster_limit", "low_quality",
-            "has_open", "duplicate", "corr_open", "stale", "same_bar_sl", "week_gap",
+            "has_open", "duplicate", "deleted_before", "corr_open", "stale", "same_bar_sl", "week_gap",
             "past_sl", "missed_quality",
         )),
         "idle": cnt.get("no_setup", 0) + cnt.get("no_data", 0),

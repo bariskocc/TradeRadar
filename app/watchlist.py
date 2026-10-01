@@ -253,6 +253,49 @@ def _p_retrace_for(strategy: str, target: int):
     return fn
 
 
+async def _p_rr_cap(db: AsyncSession) -> Progress:
+    """RR tavani maddesi: first_bar'li, kapilari gecmis, sonuclanmis, GIRISI DEGISEN setup (havuz, esik 20) --
+    bugunku RR > 4 ve 3-4R bandinda motorun bildigi bir aday giris (CISD/MSS/IFVG/BPR yakin kenar) var.
+
+    Sayac `scripts/rr_cap_stat.py` karar dilimini birebir sayar; RR retrace ekseninden hesaplandigi icin (giris
+    fiyatin gerisindeyse market, TP'si gecilmis satir haric) SQL yerine Python'da.
+    """
+    t = SetupJournal.__table__
+    rows = await db.execute(
+        select(t.c.strategy, t.c.direction, t.c.tp, t.c.retrace, t.c.parts_at_levels).where(
+            t.c.retrace.is_not(None), t.c.first_bar.is_not(None), t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
+            t.c.best_stage.not_in(("bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr", "score7",
+                                   "tight_stop")),
+        )
+    )
+    per: dict[str, int] = {}
+    aff = 0
+    for strat, direction, tp, rt_raw, pal_raw in rows.all():
+        rt = json.loads(rt_raw)
+        if strat == "4h" and (json.loads(pal_raw) if pal_raw else {}).get("c2_closed") != 1:
+            continue
+        d, span, ref = (rt.get("d_of") or {}).get("chosen"), rt.get("span"), rt.get("ref")
+        if d is None or not span or ref is None or d >= 1 or tp is None or rt.get("amb"):
+            continue
+        if rt.get("tp_first") is None and not rt.get("done"):
+            continue
+        rr0 = ((tp - ref) if direction == "LONG" else (ref - tp)) / span
+        if rr0 <= 0:
+            continue
+        rr = lambda x: (rr0 + max(0.0, x)) / (1 - max(0.0, x))  # noqa: E731
+        cur = rr(d)
+        if cur < 2:
+            continue
+        aff += cur > 4
+        if cur > 4 and any(3 <= rr(c) <= 4 and rr(c) < cur for c in
+                           ((rt.get("d_of") or {}).get(k) for k in ("cisd", "mss", "ifvg_near", "bpr_near"))
+                           if c is not None and c < 1):
+            per[strat] = per.get(strat, 0) + 1
+    note = " · ".join(f"{k.upper()} {v}" for k, v in sorted(per.items())) or "henüz yok"
+    return Progress(bars=[Bar("first_bar'lı girişi değişen çözülmüş setup", sum(per.values()), 20)],
+                    note=f"RR > 4 olan {aff} setupun bandında aday olanlar · strateji: {note}")
+
+
 async def _p_market_fee(db: AsyncSession, strategy: Optional[str] = None, target: int = 400,
                         note: str = "") -> Progress:
     """first_bar'li (26.09+) cozulmus gercek setup (market vs limit karar dilimi).
@@ -397,13 +440,22 @@ async def _p_nearest_zone(db: AsyncSession) -> Progress:
 
 
 async def _kl_count(db: AsyncSession, cond) -> int:
-    """29.09+ Journal satiri, key level olcumu dolu, sonuclanmis (win/loss) + ek kosul."""
+    """29.09+ Journal satiri, key level olcumu dolu, sonuclanmis (win/loss), KARAR KUMESI + ek kosul.
+
+    01.10: karar kumesi IZLEME.md'deki gibi kapilari gecmis + RR >= 2 + 4H'te C2 kapali donmus. Eskiden butun
+    satirlari (CRT sayilmayan adaylar ve kapida elenenler dahil) sayiyordu; madde 407/177 ile "aksiyon bekliyor"a
+    dustu, karar kumesinde 9 setup vardi.
+    """
     t = SetupJournal.__table__
+    qual_fail = tuple(PRE_SETUP_STAGES | {"bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr",
+                                          "score7", "tight_stop"})
     return await db.scalar(
         select(func.count()).select_from(t).where(
             t.c.first_seen >= datetime(2026, 9, 29),
             func.json_extract(t.c.features, "$.key_level_n").is_not(None),
             t.c.outcome.in_(("win", "loss")),
+            t.c.best_stage.not_in(qual_fail), t.c.rr >= 2.0,
+            or_(t.c.strategy != "4h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
             cond(t),
         )
     ) or 0
@@ -413,7 +465,7 @@ async def _p_key_level_filter(db: AsyncSession) -> Progress:
     """Key level'siz (key_level_n = 0) ve key level'li sonuclanmis setup; her grupta 20."""
     none = await _kl_count(db, lambda t: func.json_extract(t.c.features, "$.key_level_n") == 0)
     some = await _kl_count(db, lambda t: func.json_extract(t.c.features, "$.key_level_n") > 0)
-    return Progress(bars=[Bar("key level'siz", none, 20), Bar("key level'li", some, 20)])
+    return Progress(bars=[Bar("key level'siz", none, 30), Bar("key level'li", some, 30)])
 
 
 async def _p_liq_beyond(db: AsyncSession) -> Progress:
@@ -423,17 +475,40 @@ async def _p_liq_beyond(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("yakında (≤ 0.5 ATR)", near, 20), Bar("uzak / yok", far, 20)])
 
 
+async def _p_liq_near_bonus(db: AsyncSession) -> Progress:
+    """Purge otesinde <= 0.5 ATR alinmamis likidite olan / olmayan sonuclanmis setup, YALNIZ 02.10+ (her grupta 50).
+
+    Hipotez 29.09-01.10 verisinden cikti; karar ayni veriyle verilirse sonuc sisik olur, o yuzden sayac taze veriden
+    baslar. Kume: motorun CRT saydigi + RR >= 2 + 4H'te C2 kapali donmus.
+    """
+    t = SetupJournal.__table__
+    notcrt = tuple(PRE_SETUP_STAGES - {"not_selected"})
+    atr = func.json_extract(t.c.features, "$.liq_beyond_atr")
+
+    async def _n(cond) -> int:
+        return await db.scalar(select(func.count()).select_from(t).where(
+            t.c.first_seen >= datetime(2026, 10, 2),
+            func.json_extract(t.c.features, "$.key_level_n").is_not(None),
+            t.c.outcome.in_(("win", "loss")), t.c.best_stage.not_in(notcrt), t.c.rr >= 2.0,
+            or_(t.c.strategy != "4h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+            cond,
+        )) or 0
+    near = await _n(atr <= 0.5)
+    other = await _n(func.coalesce(atr, 99) > 0.5)
+    return Progress(bars=[Bar("yakın (≤ 0.5 ATR)", near, 50), Bar("uzak / yok", other, 50)])
+
+
 async def _p_c1_shape(db: AsyncSession) -> Progress:
-    """C1-C2 ayni renk / zit renk sonuclanmis setup (motorun CRT saydigi); her grupta 20."""
+    """C1-C2 ayni renk / zit renk sonuclanmis setup (motorun CRT saydigi, RR >= 2); her grupta 50 (01.10)."""
     t = SetupJournal.__table__
     notcrt = tuple(PRE_SETUP_STAGES - {"not_selected"})
     col = func.json_extract(t.c.features, "$.c1_same_color")
 
     async def _n(v: int) -> int:
         return await db.scalar(select(func.count()).select_from(t).where(
-            col == v, t.c.outcome.in_(("win", "loss")), t.c.best_stage.not_in(notcrt),
+            col == v, t.c.outcome.in_(("win", "loss")), t.c.best_stage.not_in(notcrt), t.c.rr >= 2.0,
         )) or 0
-    return Progress(bars=[Bar("aynı renk", await _n(1), 20), Bar("zıt renk / doji", await _n(0), 20)])
+    return Progress(bars=[Bar("aynı renk", await _n(1), 50), Bar("zıt renk / doji", await _n(0), 50)])
 
 
 async def _p_cisd_mss(db: AsyncSession) -> Progress:
@@ -639,32 +714,82 @@ async def _p_tight_stop_gate(db: AsyncSession) -> Progress:
 
 
 async def _p_missed_quality(db: AsyncSession) -> Progress:
-    """Retest skor kapisinda elenip SONUCU BELLI olan setup (karar esigi 20) + C2 zamanlama dilimi.
+    """Retest skor kapisinda elenip SONUCU BELLI olan setup, C2 zamanlama dilimine gore (dilim basina 30).
 
-    Dilim sayilari `note`'a yazilir, ayri CUBUK olarak DEGIL: `Progress.ready` butun cubuklarin
-    dolmasini istiyor, dilim cubugu eklemek ana hatirlatmayi saklardi (CLAUDE.md uyarisi).
+    01.10'dan beri iki cubuk: karar (H3) iki dilimin BIRDEN dolmasini istiyor, `Progress.ready` de
+    tam bunu yapiyor. Kume raporla ayni: aktif strateji + RR >= 2 (`missed_quality_stat`).
     """
     t = _journal_table()
     rows = (await db.execute(
         select(t.c.outcome, t.c.rr, t.c.strategy, t.c.purge_time, t.c.entry_touched_at)
-        .where(t.c.best_stage == "missed_quality", t.c.outcome.in_(("win", "loss")))
+        .where(t.c.best_stage == "missed_quality", t.c.outcome.in_(("win", "loss")),
+               t.c.levels_at.is_not(None),
+               t.c.strategy.in_(("4h", "1d", "1w")), t.c.rr >= 2.0)
     )).all()
+    span = {"4h": timedelta(hours=4), "1d": timedelta(days=1), "1w": timedelta(weeks=1)}
+    early = [r for r in rows if r.purge_time and r.entry_touched_at
+             and r.entry_touched_at < r.purge_time + span[r.strategy]]
+    late = [r for r in rows if r.purge_time and r.entry_touched_at
+            and r.entry_touched_at >= r.purge_time + span[r.strategy]]
     total = sum((float(r.rr or 0) if r.outcome == "win" else -1.0) for r in rows)
-    note = f"{len(rows)} elenen setup çözüldü"
+    note = f"{len(rows)} elenen setup çözüldü (RR ≥ 2, 4H/1D/1W)"
     if rows:
         w = sum(1 for r in rows if r.outcome == "win")
+        ew = sum(1 for r in early if r.outcome == "win")
+        lw = sum(1 for r in late if r.outcome == "win")
+        note += (f" · {w} TP · R/işlem {total / len(rows):+.2f}"
+                 f" · retest C2 açıkken {ew}/{len(early)} TP, C2 kapalıyken {lw}/{len(late)} TP")
+    return Progress(bars=[Bar("retest C2 açıkken", len(early), 30),
+                          Bar("retest C2 kapalıyken", len(late), 30)], note=note)
+
+
+async def _p_sticky_delete(db: AsyncSession) -> Progress:
+    """02.10+ silinen (kalici silme canli), sonucu belli, RR >= 2 setup; past_sl/past_tp haric (tanim geregi SL/TP)."""
+    t = _journal_table()
+    rows = (await db.execute(
+        select(t.c.outcome, t.c.rr).where(
+            t.c.best_stage == "waiting", t.c.deleted_reason.is_not(None),
+            t.c.deleted_reason.not_in(("past_sl", "past_tp", "no_levels", "week_close")),
+            t.c.deleted_at >= datetime(2026, 10, 2), t.c.rr >= 2.0, t.c.outcome.in_(("win", "loss")),
+        )
+    )).all()
+    note = f"{len(rows)} engellenen setup çözüldü"
+    if rows:
+        w = sum(1 for o, _ in rows if o == "win")
+        total = sum((float(rr or 0) if o == "win" else -1.0) for o, rr in rows)
         note += f" · {w} TP · R/işlem {total / len(rows):+.2f}"
-        span = {"4h": timedelta(hours=4), "1d": timedelta(days=1), "1h": timedelta(hours=1)}
-        early = [r for r in rows if r.purge_time and r.entry_touched_at and span.get(r.strategy or "")
-                 and r.entry_touched_at < r.purge_time + span[r.strategy]]
-        late = [r for r in rows if r.purge_time and r.entry_touched_at and span.get(r.strategy or "")
-                and r.entry_touched_at >= r.purge_time + span[r.strategy]]
-        if early or late:
-            ew = sum(1 for r in early if r.outcome == "win")
-            lw = sum(1 for r in late if r.outcome == "win")
-            note += (f" · retest C2 açıkken {ew}/{len(early)} TP,"
-                     f" C2 kapalıyken {lw}/{len(late)} TP (H3 için her dilimde 10 gerek)")
-    return Progress(bars=[Bar("çözülmüş elenen setup", len(rows), 20)], note=note)
+    return Progress(bars=[Bar("çözülmüş engellenen setup", len(rows), 30)], note=note)
+
+
+async def _p_stale_days(db: AsyncSession) -> Progress:
+    """02.10+ temiz kume (tmp_stale_days_cf ile ayni suzgec, yaklasik): CRT sayilan, skor kirilimi var, 4H'te C2 kapali,
+    sonuc belli (win/loss/tp_before_entry/no_touch), RR >= 2, dar stop degil. Hedef 300 (01.10 kumesi 294)."""
+    t = SetupJournal.__table__
+    srm = func.json_extract(t.c.features, "$.stop_range_mult")
+    n = await db.scalar(select(func.count()).select_from(t).where(
+        t.c.levels_at >= datetime(2026, 10, 2),
+        t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)),
+        func.json_extract(t.c.parts_at_levels, "$.raw").is_not(None),
+        or_(t.c.strategy != "4h", func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1),
+        t.c.outcome.in_(("win", "loss", "tp_before_entry", "no_touch")),
+        t.c.rr >= 2.0, or_(srm.is_(None), srm >= 1.0),
+    )) or 0
+    return Progress(bars=[Bar("taze temiz setup (02.10+)", n, 300)],
+                    note="kesin sayım ve kollar: python tmp/tmp_stale_days_cf.py")
+
+
+async def _p_cluster_recheck(db: AsyncSession) -> Progress:
+    """Kume limitinin eledigi, islem acilabilir (RR >= 2), sonucu belli setup (hedef 60). Hepsi 4H kripto."""
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.outcome, t.c.rr).where(
+        t.c.best_stage == "cluster_limit", t.c.rr >= 2.0, t.c.outcome.in_(("win", "loss")),
+    ))).all()
+    note = f"{len(rows)} çözülmüş"
+    if rows:
+        w = sum(1 for o, _ in rows if o == "win")
+        total = sum((float(rr or 0) if o == "win" else -1.0) for o, rr in rows)
+        note += f" · {w} TP · R/işlem {total / len(rows):+.2f}"
+    return Progress(bars=[Bar("elenen RR ≥ 2 setup", len(rows), 60)], note=note)
 
 
 async def _p_bias_1h(db: AsyncSession) -> Progress:
@@ -892,11 +1017,21 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_retrace_for("1w", 10),
     ),
     WatchItem(
+        key="rr_cap", status="open", started="01.10", onem=1,
+        title="Yüksek RR'li setupta 3–4R civarındaki girişe geçmek (RR tavanı)",
+        trigger="20 first_bar'lı çözülmüş, girişi değişen setup (bugünkü RR > 4 ve 3–4R bandında CISD/MSS/IFVG/BPR adayı "
+                "var; havuz): bant girişi aynı setuplarda bugünkü girişi +0.15 R/setup ve iki zaman yarısında geçerse mum "
+                "re-track'i (kısmi kâr + BE), sonra kullanıcıya; geçmezse giriş kalır. Tek strateji 10 setupla ayrıca okunabilir",
+        measure="python scripts/rr_cap_stat.py [--strategy 4h|1d|1w]",
+        md="Yüksek RR'li setupta 3–4R civarındaki girişe geçmek (RR tavanı)",
+        progress_fn=_p_rr_cap,
+    ),
+    WatchItem(
         key="entry_models", status="done", started="18.09",
         title="Entry modeli karşılaştırması",
         trigger="Varyant başına 60 karar verilebilir setup (ilk okuma 28.09.2026)",
         measure="python scripts/entry_model_stat.py",
-        md="Entry modeli karşılaştırması (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
+        md="Entry modeli karşılaştırması (18.09.2026 — kapandı 21.09)",
         result="Bugünkü entry modeli KALIYOR (21.09): 230 karar verilebilir setupta hiçbir varyant "
                "chosen'ı 0.15R geçmedi (chosen -0.281, en iyisi ifvg_far -0.253 R/setup); H2 de "
                "geçmedi (alt kenar dolum -4.5 puan, R/setup yalnız +0.025). DFVG modeli reddedildi. "
@@ -908,7 +1043,7 @@ ITEMS: list[WatchItem] = [
         title="BPR entry modeli",
         trigger="40 BPR'li çözülmüş setup: bpr_near, ifvg_near'ı 0,15 R/setup geçiyor mu",
         measure="python scripts/entry_model_stat.py",
-        md="BPR entry modeli (canlıya alındı 21.09.2026, ⏰ tetik: 40 BPR'li çözülmüş setup)",
+        md="BPR entry modeli (21.09.2026 — kapandı 24.09)",
         result="BPR KALIYOR, skor ve skor-7 kapısı DEĞİŞMİYOR (24.09): aynı 54 setupta bpr_near "
                "+0.015 vs ifvg_near -0.031 R/setup, fark +0.046 -- bandın içinde. C2 kapalı dilimde "
                "de aynı yön (+0.094, n=32).",
@@ -921,7 +1056,7 @@ ITEMS: list[WatchItem] = [
         result="KESİŞİM KALIYOR (28.09): aynı 143 setupta bacak −0.054 vs kesişim −0.051 R/setup (fark −0.004, "
                "bant ±0.15); bacak 2 kazanç fazla dolduruyor ama düşük RR bunu siliyor. bfvg ölçüm olarak duruyor.",
         measure="python scripts/entry_model_stat.py (bölüm 2)",
-        md="BPR bacağı — kesişim yerine bacağın kendisinden mi girmeli? (ölçüm başladı 22.09.2026)",
+        md="BPR bacağı — kesişim yerine bacağın kendisinden mi girmeli? (22.09.2026 — kapandı 28.09)",
         progress_fn=_p_bpr_leg,
     ),
     WatchItem(
@@ -929,7 +1064,7 @@ ITEMS: list[WatchItem] = [
         title="CISD kırılım FVG'si — onaydan sonra bırakılan boşluktan giriş",
         trigger="60 eşlenmiş setup: cfvg_* varyantlarından biri chosen'ı 0,15 R/setup geçiyor mu",
         measure="python scripts/entry_model_stat.py (bölüm 3)",
-        md="CISD kırılım FVG'si — onaydan sonra bırakılan boşluktan giriş (ölçüm başladı 22.09.2026)",
+        md="CISD kırılım FVG'si — onaydan sonra bırakılan boşluktan giriş (22.09.2026 — kapandı 24.09)",
         result="CISD entry'si KALIYOR (24.09): eşlenmiş 98-106 setupta üç cfvg varyantı da chosen'ın "
                "0.06-0.08 R/setup altında -- bandın içinde, geçen yok. C2 kapalı dilimde de aynı "
                "(far -0.084 vs +0.010, n=61). Kırılım setupların %39'unda FVG bırakmıyor. cfvg "
@@ -1019,41 +1154,58 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c2_refreeze,
     ),
     WatchItem(
-        key="purge_threshold", status="open", started="28.09", onem=1,
+        key="purge_threshold", status="done", started="28.09", onem=1,
         title="Purge eşiği kaldırıldı (%0.05 → 0)",
         trigger="03.10.2026 ya da restart sonrası 30 sonuçlanmış eşik altı (sweep_pct < 0.05) setup: "
                 "eşik altı ≥ 0.3 R/setup kötüyse eşik geri gelir (C1 aralığına oranlı)",
         measure="setup_journal.features.sweep_pct · outcome (düz TP/SL)",
-        md="Purge eşiği kaldırıldı (28.09.2026, restart bekliyor)",
+        md="Purge eşiği kaldırıldı (28.09.2026 — kapandı 01.10)",
+        result="(01.10) EŞİK KALDIRILMIŞ KALIYOR (H2): eşik altı süpürmeler kötü değil — tüm adaylarda 136 vs 795 setup, "
+               "fark −0.05 R/setup (%90 aralık −0.22…+0.14, 0.3'lük kötülük dışlandı); CRT + RR ≥ 2'de −0.07 (n 36/106), "
+               "FX'te eşik altı tersine daha iyi. Kapı koşullu küme 3/15 — karar kuralının izin verdiği geniş kümeden.",
         progress_fn=_p_purge_threshold,
     ),
     WatchItem(
         key="key_level_filter", status="open", started="29.09", onem=0, pinned=True,
         title="Key level teması yoksa işlem açılmasın mı? (+ EQ/SSL puan almalı mı)",
-        trigger="29.09 sonrası her grupta 20 sonuçlanmış setup: key level'siz grup ≥ 0.3 R/setup kötüyse hard filtre, "
+        trigger="29.09 sonrası her grupta 30 sonuçlanmış setup (kapı geçmiş, RR ≥ 2; 01.10'da 20 → 30) + fark tek yönlü "
+                "bootstrap p < 0.10: key level'siz grup ≥ 0.3 R/setup kötüyse hard filtre, "
                 "0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay); EQ/SSL'li grup PDL/PWL'li kadar "
                 "iyiyse +1 puan adayı",
         measure="setup_journal.features.key_level_n (EQ/SSL dahil etiket sayısı) · outcome (düz TP/SL)",
-        md="Key level teması yoksa işlem açılmasın mı? (29.09.2026, restart bekliyor)",
+        md="Key level teması yoksa işlem açılmasın mı? (başladı 29.09.2026, ⏰ tetik: kapı geçmiş setupta grup başına 30)",
         progress_fn=_p_key_level_filter,
     ),
     WatchItem(
-        key="liq_beyond", status="open", started="29.09", onem=0,
+        key="liq_beyond", status="done", started="29.09", onem=0,
         title="Purge ötesinde alınmamış likidite varsa setup daha çok stop mu oluyor?",
         trigger="29.09 sonrası her grupta 20 sonuçlanmış setup: 0.5 ATR içinde alınmamış likidite olan grup "
                 "≥ 0.3 R/setup kötüyse kapı/ceza adayı (önce tek replay)",
         measure="setup_journal.features.liq_beyond_atr / liq_beyond_frac · outcome (düz TP/SL)",
-        md="Purge ötesinde alınmamış likidite (29.09.2026, restart bekliyor)",
+        md="Purge ötesinde alınmamış likidite (29.09.2026 — kapandı 01.10)",
+        result="(01.10) KAPI YOK — hipotezin tersi: 0.5 ATR içinde alınmamış likidite olan setup daha İYİ gidiyor "
+               "(CRT + RR ≥ 2: yakın 24 setup WR %45.8 / +0.95 R, uzak/yok 55 setup %12.7 / −0.53 R); her gün × yön "
+               "hücresinde aynı yönde. Veri 2 günlük — puan adayı olarak ayrı soru, karar değil.",
         progress_fn=_p_liq_beyond,
+    ),
+    WatchItem(
+        key="liq_near_bonus", status="open", started="01.10", onem=1,
+        title="Purge yakınında alınmamış likidite: +1 puan hak ediyor mu?",
+        trigger="02.10 sonrası her grupta 50 sonuçlanmış setup (CRT + RR ≥ 2): yakın grup ≥ 0.3 R/setup iyi, iki yarıda "
+                "aynı yön ve tek yönlü bootstrap p < 0.10 ise +1 puan adayı (önce tek replay)",
+        measure="setup_journal.features.liq_beyond_atr ≤ 0.5 · outcome (düz TP/SL) · okuma tmp/tmp_kl_liq_read.py",
+        md="Purge yakınında alınmamış likidite: +1 puan hak ediyor mu? (başladı 01.10.2026, ⏰ tetik: grup başına 50 taze setup)",
+        progress_fn=_p_liq_near_bonus,
     ),
     WatchItem(
         key="c1_shape", status="open", started="29.09", onem=0,
         title="C1'in şekli: C2 ile aynı renk / TP'si fitil tepesi olan setup daha kötü mü?",
-        trigger="her grupta 20 sonuçlanmış setup: aynı renk (H1) ya da TP fitili ≥ 0.40 (H2) grubu ≥ 0.3 R/setup "
+        trigger="her grupta 50 sonuçlanmış RR ≥ 2 setup (01.10'da 20 → 50) + fark tek yönlü bootstrap p < 0.10: "
+                "aynı renk (H1) ya da TP fitili ≥ 0.40 (H2) grubu ≥ 0.3 R/setup "
                 "kötüyse hard filtre, 0.15–0.3 ise −2 ceza, < 0.15 ise değişiklik yok (önce tek replay)",
         measure="python scripts/c1_shape_stat.py · setup_journal.features.c1_same_color / c1_body_frac / c1_tp_wick_frac"
                 " · 30.09: 4H'te C1 gövdesi < %30 filtrelendi (c1_weak, kullanıcı kararı)",
-        md="C1'in şekli — aynı renk C1 ve fitil tepesine TP (29.09.2026, restart bekliyor)",
+        md="C1'in şekli — aynı renk C1 ve fitil tepesine TP (başladı 29.09.2026, ⏰ tetik: RR ≥ 2'de grup başına 50)",
         progress_fn=_p_c1_shape,
     ),
     WatchItem(
@@ -1120,8 +1272,17 @@ ITEMS: list[WatchItem] = [
                "(0–∞, yalnız ict) +5R şartına yaklaşmadı; eşik setupların yalnız 0–1'ini (C2 açık dahil ≤14) "
                "değiştiriyor. htf +2 sorusu 'Skor kalemleri — 4H'e devredildi (1H'te +2 kanıtlı). Karne ölçümü sürüyor.",
         measure="python scripts/bias_stat.py",
-        md="1D bias tahmin karnesi (başladı 18.09.2026, ⏰ ilk okuma 28.09.2026)",
+        md="1D bias tahmin karnesi (18.09.2026 — kapandı 28.09)",
         progress_fn=_p_bias_journal,
+    ),
+    WatchItem(
+        key="stale_days_recheck", status="open", started="01.10", onem=1,
+        title="STRUCTURE_STALE_DAYS 7 → 2 mi? (28.09 kararının denetimi)",
+        trigger="02.10 sonrası 300 temiz setup: N=2 kolu taze veride A'dan (N=7) > 0 R, 4H'te negatif değil VE tüm veride "
+                "≥ +5R + iki yarı > 0 → tek replay; aksi halde 7 kalır",
+        measure="python tmp/tmp_stale_days_cf.py (taze dilim: --since 2026-10-02)",
+        md="STRUCTURE_STALE_DAYS 7 → 2 mi? (denetim 01.10.2026, ⏰ tetik: 300 taze temiz setup)",
+        progress_fn=_p_stale_days,
     ),
     WatchItem(
         key="bias_fidelity", status="open", started="24.09", onem=2,  # 28.09: 1 -> 2, 24.09 duzeltmesinin dogrulamasi
@@ -1138,7 +1299,7 @@ ITEMS: list[WatchItem] = [
         result="KAPI AÇILMIYOR (28.09): hipotezin tersi — dolumdan önce TP yolunun ≥%50'sini koşan setup %41.6 "
                "kazanıyor, 0-25% kovası %22.2 (n 166 / 2727). ENA #71 tek vaka olarak kalır.",
         measure="python scripts/prefill_stat.py",
-        md="Dolum öncesi koşu (18.09.2026, restart bekliyor)",
+        md="Dolum öncesi koşu (18.09.2026 — kapandı 28.09)",
         progress_fn=_p_prefill,
     ),
     WatchItem(
@@ -1167,7 +1328,7 @@ ITEMS: list[WatchItem] = [
                "(LONG 31 / SHORT 29 işlem, fark +2.7 puan, 4H'te ikisi de %40). Journal taban oranında SHORT 8 puan geride "
                "= piyasa yönü. Dashboard hatırlatması kaldırıldı; rapor scripts/direction_stat.py duruyor.",
         measure="python scripts/direction_stat.py",
-        md="LONG/SHORT ayrışması + 16.09 FOMC etkisi (ilk ölçüm 17.09.2026, ⏰ tetik: her yönde 30 işlem)",
+        md="LONG/SHORT ayrışması + 16.09 FOMC etkisi (17.09.2026 — kapandı 28.09)",
         progress_fn=_p_direction,
     ),
     WatchItem(
@@ -1192,17 +1353,18 @@ ITEMS: list[WatchItem] = [
         title="Dar stop kapısı — elenen setup TP'ye gidiyor mu?",
         trigger="20 çözülmüş elenen setup (kapı haftada ~1–2 eliyor)",
         measure="python scripts/tight_stop_stat.py",
-        md="Dar stop kapısı — elenen setup TP'ye gidiyor mu? (başladı 18.09.2026, ⏰ tetik: 20 çözülmüş setup)",
+        md="Dar stop kapısı — elenen setup TP'ye gidiyor mu? (18.09.2026 — kapandı 29.09)",
         result="(29.09) Kapı KALIYOR: elenen 10 çözülmüş setupun 10'u kayıp (−10R), taban WR %22.4. Eşik (20) "
-               "dolmadan kapandı — dar stoplu bölge artık atlandığı için elenen akışı azalıyor.",
+               "dolmadan kapandı — dar stoplu bölge artık atlandığı için elenen akışı azalıyor. Denetim 01.10: 12/12 SL, "
+               "aç-kapa sızıntısı kalıcı silmeyle kapandı.",
         progress_fn=_p_tight_stop_gate,
     ),
     WatchItem(
         key="missed_quality", status="open", started="21.09", onem=0,
         title="Retest skor kapısı — kazanan mı eliyor?",
-        trigger="20 çözülmüş elenen setup (H3 için ayrıca her zamanlama diliminde 10)",
+        trigger="her C2 zamanlama diliminde 30 çözülmüş elenen setup (RR ≥ 2, 4H/1D/1W; 01.10'da 20 → 30/dilim)",
         measure="python scripts/missed_quality_stat.py",
-        md="Retest skor kapısı — kazanan mı eliyor? (başladı 21.09.2026, ⏰ tetik: 20 çözülmüş setup)",
+        md="Retest skor kapısı — kazanan mı eliyor? (başladı 21.09.2026, ⏰ tetik: dilim başına 30 çözülmüş setup)",
         progress_fn=_p_missed_quality,
     ),
     WatchItem(
@@ -1210,7 +1372,7 @@ ITEMS: list[WatchItem] = [
         title="C1 ucu stop — gölge izleme",
         trigger="28.09.2026 değerlendirmesi (kardeş madde “Dar stop” ile aynı oturumda)",
         measure="python scripts/c1_stop_stat.py",
-        md="C1 ucu stop — gölge izleme (başladı 17.09.2026, ⏰ değerlendirme 28.09.2026)",
+        md="C1 ucu stop — gölge izleme (17.09.2026 — kapandı 21.09)",
         result="C1 ucu stop KULLANILMIYOR (21.09): H1 her dilimde battı (havuz -0.096, 4H -0.082, "
                "1H -0.160 R/işlem). Bugünkü SL'le TP olan 136 setupun 45'i C1'le stop olurdu, C1'in "
                "kurtardığı sıfır. Fikri açık tutan skor>=7 dilimi n=102'de -0.009'a oturdu; kural "
@@ -1218,12 +1380,25 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c1_stop,
     ),
     WatchItem(
-        key="deleted_gate", status="open", started="19.09", onem=1,
+        key="deleted_gate", status="done", started="19.09", onem=1,
         title="Silinen waiting setup — kapı kazanan sinyal mi eliyor?",
         trigger="20 çözülmüş silinen setup (~7/gün siliniyor; skor kapıları ~1,3/gün)",
         measure="python scripts/deleted_gate_stat.py",
-        md="Silinen waiting setup — kapı kazanan sinyal mi eliyor? (başladı 19.09.2026, ⏰ tetik: 20 çözülmüş setup)",
+        md="Silinen waiting setup — kapı kazanan sinyal mi eliyor? (19.09.2026 — kapandı 01.10)",
+        result="(01.10) Skor elemesi kazanan kesmiyor: skor nedenleriyle silinen 11 setup 1 TP / 10 SL (−0.70 R/işlem); "
+               "kapılar kalıyor. H3: silinip geri doğan 13 işlem 2 TP / 11 SL (−0.68), kalan 54 işlem +0.17 → "
+               "KALICI SİLME canlıya alındı (kullanıcı kararı): bir kez silinen CRT yeniden sinyal açmaz. "
+               "Doğrulaması 'Kalıcı silme' maddesinde.",
         progress_fn=_p_deleted_gate,
+    ),
+    WatchItem(
+        key="sticky_delete", status="open", started="01.10", onem=2,
+        title="Kalıcı silme — engellenen setup TP'ye gidiyor mu?",
+        trigger="02.10 sonrası silinen 30 çözülmüş setup (RR ≥ 2, past_sl/past_tp hariç): R/işlem > +0.3 ve "
+                "bootstrap p < 0.10 ise kural kazanç kesiyor → kullanıcıya geri alma önerisi",
+        measure="python scripts/deleted_gate_stat.py · log SKIPPED (DELETED BEFORE) · radar deleted_before",
+        md="Kalıcı silme — engellenen setup TP'ye gidiyor mu? (başladı 01.10.2026, ⏰ tetik: 30 çözülmüş setup)",
+        progress_fn=_p_sticky_delete,
     ),
     WatchItem(
         key="bias_1h", status="done", started="20.09", onem=1,
@@ -1234,7 +1409,7 @@ ITEMS: list[WatchItem] = [
                "+3.0 — orada karar 'Skor kalemleri — 4H' maddesinde. ⚠️ +8.3 bütün skor bantlarından; seçilimsiz bant 0–6'da "
                "+1.6 — +2 sorusu 'hizalı setup'a +2' maddesinde yeniden okunuyor.",
         measure="python scripts/bias_1h_stat.py",
-        md="1D bias 1H'te iki kez mi eliyor? (başladı 20.09.2026, ⏰ tetik: 25 çözülmüş elenen setup)",
+        md="1D bias 1H'te iki kez mi eliyor? (20.09.2026 — kapandı 28.09)",
         progress_fn=_p_bias_1h,
     ),
     WatchItem(
@@ -1297,7 +1472,7 @@ ITEMS: list[WatchItem] = [
         title="Dar stop — gölge izleme (4H/1D/1H)",
         trigger="28.09.2026 değerlendirmesi",
         measure="python scripts/stop_width_stat.py · scripts/c1_stop_stat.py · /setup-journal → shadow",
-        md="Dar stop — gölge izleme, 4H/1D/1H (başladı 14.09.2026, ⏰ değerlendirme 28.09.2026)",
+        md="Dar stop — gölge izleme, 4H/1D/1H (14.09.2026 — kapandı 21.09)",
         result="SL purge ucunda KALIYOR (21.09): 162 çözülmüş kazananla eğri monoton düşüyor "
                "(k=1 -0.472 → k=0.75 -0.567) ve tepe k=1.00, ızgaranın kenarında — kazanç varsa daha "
                "GENİŞ stop tarafında. 18.09'un 'tepe 0.75-0.85' okuması (21 kazanan) yanlışlandı. "
@@ -1358,12 +1533,22 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="cluster", status="done", started="09.09",
         result="Limit KORUYUCU (19.09): elediği 49 sonuçlanmış setup 12 win / 37 loss = "
-               "−18.1R. Gevşetme adayı değil; ayarlar aynen kalıyor.",
+               "−18.1R. Gevşetme adayı değil; ayarlar aynen kalıyor. Denetim 01.10: −18R'nin çoğu RR < 2 setuplardan; "
+               "RR ≥ 2'de elenenler −0.02 R/işlem (n 36) → 'koruyucu' desteklenmiyor, yeniden izleniyor.",
         title="Kripto küme limiti",
         trigger="Küme limiti kazananları eliyorsa (kapı hunisinde gevşetme adayı)",
         measure="/setup-journal → best_stage = cluster_limit",
         md="3. Kripto küme limiti",
         progress_fn=_p_cluster,
+    ),
+    WatchItem(
+        key="cluster_recheck", status="open", started="01.10", onem=1,
+        title="Küme limiti — işlem açılabilir setuplarda kazanan mı eliyor?",
+        trigger="60 çözülmüş elenen RR ≥ 2 setup: R/işlem ≥ +0.15 ve %90 alt sınır > 0 ise gevşetme önerisi; "
+                "aksi halde limit risk kontrolü olarak kalır",
+        measure="/setup-journal → best_stage = cluster_limit, rr ≥ 2 · düz TP/SL",
+        md="Küme limiti — işlem açılabilir setuplarda kazanan mı eliyor? (başladı 01.10.2026, ⏰ tetik: 60 çözülmüş setup)",
+        progress_fn=_p_cluster_recheck,
     ),
     WatchItem(
         key="daily_bias", status="done", started="09.09",

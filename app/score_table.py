@@ -226,6 +226,8 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "Kapı", "label": "Aynı sembolde açık sinyal olmamalı", "stage": "has_open", "on": True},
         {"group": "Kapı", "label": "Korele paritede açık sinyal olmamalı", "stage": "corr_open", "on": True},
         {"group": "Kapı", "label": "Aynı setup daha önce kaydedilmemiş olmalı", "stage": "duplicate", "on": True},
+        {"group": "Kapı", "label": "Aynı setup daha önce silinmemiş olmalı (silinen CRT yeniden açılmaz)",
+         "stage": "deleted_before", "on": bool(sc.STICKY_DELETE_ENABLED)},
         {"group": "Kapı",
          "label": f"Kripto aynı yön küme limiti (muaf: BTC/ETH ve skor ≥ {sc.CLUSTER_EXEMPT_MIN_SCORE})",
          "stage": "cluster_limit", "on": crypto_alts,

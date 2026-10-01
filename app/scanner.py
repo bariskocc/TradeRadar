@@ -65,7 +65,7 @@ from app.exchange import (
     market_of,
     to_display_symbol,
 )
-from app.models import PotentialNotice, Signal
+from app.models import PotentialNotice, SetupJournal, Signal
 from app import setup_journal as journal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
@@ -591,6 +591,61 @@ async def _is_duplicate_setup(session: AsyncSession, setup: CRTSetup) -> bool:
     return result.scalars().first() is not None
 
 
+# Kalici silme (01.10, kullanici karari — IZLEME.md "Silinen waiting setup" H3): bekleyen kayit bir kez
+# silindiyse ayni CRT'den (strateji + sembol + yon + purge) bir daha sinyal acilmaz. Kapi girdileri (skor, dar
+# stop esigi, CRT penceresi) mum mum oynadigi icin sinirdaki setup silinip ilk gectigi mumda yeniden doguyordu:
+# 09.09–01.10'da boyle dogan 13 islem 2 TP / 11 SL (−0.68 R/islem), kalan 54 islem +0.17. Muaf: `no_levels`
+# (seviye henuz yok — veri), `week_close` (hafta boslugu kapisi zaten tutar). Restart'ta Journal'in
+# `deleted_reason` satirlarindan yuklenir (yeni tablo yok). False yapmak eski davranisi geri getirir.
+STICKY_DELETE_ENABLED = True
+_STICKY_EXEMPT_REASONS = frozenset({"no_levels", "week_close"})
+_STICKY_LOOKBACK = timedelta(days=60)
+_STICKY: set[tuple] = set()
+_STICKY_LOADED = False
+# Engellenen setup her LTF kapanisinda yeniden degerlendiriliyor; log satiri anahtar basina bir kez yazilir.
+_STICKY_LOGGED: set[tuple] = set()
+
+
+def _sticky_key(strategy: str | None, symbol: str | None, direction: str | None, purge_time) -> tuple:
+    return (strategy or STRATEGY_4H, symbol, (direction or "").upper(), _as_naive(purge_time))
+
+
+def _mark_sticky(s: Signal, reason: str) -> None:
+    if reason in _STICKY_EXEMPT_REASONS or getattr(s, "purge_time", None) is None:
+        return
+    _STICKY.add(_sticky_key(s.timeframe, s.symbol, s.direction, s.purge_time))
+
+
+async def _load_sticky(session: AsyncSession) -> None:
+    """Ilk cagrida Journal'daki silinmis setup anahtarlarini yukler (son 60 gun)."""
+    global _STICKY_LOADED
+    if _STICKY_LOADED:
+        return
+    _STICKY_LOADED = True
+    since = _as_naive(datetime.now(timezone.utc) - _STICKY_LOOKBACK)
+    t = SetupJournal
+    rows = (await session.execute(
+        select(t.strategy, t.symbol, t.direction, t.purge_time).where(
+            t.deleted_reason.is_not(None),
+            t.deleted_reason.not_in(tuple(_STICKY_EXEMPT_REASONS)),
+            t.deleted_at >= since,
+        )
+    )).all()
+    for r in rows:
+        _STICKY.add(_sticky_key(r.strategy, r.symbol, r.direction, r.purge_time))
+    log.info("STICKY DELETE: %d silinmis setup anahtari yuklendi", len(rows))
+
+
+async def _was_deleted_before(session: AsyncSession, setup: CRTSetup) -> bool:
+    if not STICKY_DELETE_ENABLED or setup.purge_time is None:
+        return False
+    try:
+        await _load_sticky(session)
+    except Exception:
+        log.exception("sticky delete load failed")
+    return _sticky_key(setup.timeframe, setup.symbol, setup.direction, setup.purge_time) in _STICKY
+
+
 async def _has_open_signal_for_symbol(
     session: AsyncSession,
     symbol: str,
@@ -693,6 +748,7 @@ def _note_deleted(s: Signal, reason: str) -> None:
     yuzden gereken alanlar burada kopyalanir, gonderim `_flush_potential_outbox`'ta.
     """
     journal.note_deleted(s, reason)
+    _mark_sticky(s, reason)
     try:
         mid = getattr(s, "tg_potential_id", None)
         if mid:
@@ -2444,6 +2500,7 @@ async def _detect_and_create_waiting_locked(
                 "VOID FILL (LOW QUALITY AT ENTRY): %s %s fill=%s score_asof=%s",
                 setup.symbol, setup.direction, open_sig.entry_filled_time, q_fill,
             )
+            _mark_sticky(open_sig, "missed_quality")
             await session.delete(open_sig)
             await session.commit()
             _OPEN_SYMBOLS.discard((setup.symbol, strategy))
@@ -2476,6 +2533,17 @@ async def _detect_and_create_waiting_locked(
                    score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
                    smt=setup.smt_pair, pd=setup.pd_array)
         await _gated("duplicate")
+        return None
+
+    if existing_pending is None and await _was_deleted_before(session, setup):
+        _radar("deleted_before", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        sk = _sticky_key(setup.timeframe, setup.symbol, setup.direction, setup.purge_time)
+        if sk not in _STICKY_LOGGED:
+            _STICKY_LOGGED.add(sk)
+            log.info("SKIPPED (DELETED BEFORE): %s %s purge=%s bir kez silindi, yeniden acilmaz.",
+                     setup.symbol, setup.direction, setup.purge_time)
         return None
 
     if (

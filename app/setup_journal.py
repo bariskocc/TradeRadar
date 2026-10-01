@@ -60,6 +60,7 @@ STAGES: list[tuple[str, str]] = [
     ("corr_open", "Correlated pair open"),
     ("has_open", "Open signal exists"),
     ("duplicate", "Already saved"),
+    ("deleted_before", "Deleted once — not reopened"),
     ("c2_open", "Waiting for C2 close"),
     ("waiting", "Signal opened"),
     ("week_close", "Cancelled at week close"),
