@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import crt_engine as ce
 from app import scanner as sc
 from app.models import SetupJournal
+from app import score_outcome as so
 from app.setup_journal import PRE_SETUP_STAGES
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,18 @@ RULES_SINCE = {
     "1w": datetime(2026, 9, 28, tzinfo=timezone.utc),
 }
 WINDOW = timedelta(days=7)
+
+# 04.10 (kullanici: "efektif calismali, bilgi vermeli"): kalem basina SONUC -- puani alan setup TP'ye mi SL'ye mi
+# gitti. Pencere 7 gun degil, kalemin bugunku tanimindan beri (TP/SL icin 7 gun cok az). Tanim degisince guncelle.
+OUTCOME_SINCE = {
+    "4h": datetime(2026, 9, 16),      # kalem kirilimi 16.09'dan beri kayitli
+    "1d": datetime(2026, 9, 25),      # 25.09: 1D C2 rengi / c2_closed kurali degisti
+    "1w": datetime(2026, 9, 28),      # strateji acildi
+}
+ITEM_SINCE = {
+    "pd_major": datetime(2026, 9, 29), "pd_monthly": datetime(2026, 9, 29), "pd_struct": datetime(2026, 9, 29),
+    "reclaim": datetime(2026, 9, 19),  # 19.09: ceza -2 -> -4
+}
 MIN_N = 10            # bunun altinda "veri az" -- oran yorumlanmaz
 ALWAYS_FRAC = 0.95    # kalem setuplarin >= %95'inde puan veriyorsa ayirt etmiyor
 
@@ -244,7 +257,7 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "Kapı", "label": "CISD'den sonra SL görülmemiş olmalı", "stage": "past_sl", "on": True},
         {"group": "Kapı", "label": "CRT %60 geçilmemiş olmalı", "stage": "invalidated",
          "on": bool(sc.REQUIRE_CRT_MID_INVALIDATION), "off_note": "Kapalı (10.09)"},
-        {"group": "Kapı", "label": f"Retest anında skor ≥ {lim['min']}", "stage": "missed_quality", "on": True},
+        {"group": "Kapı", "label": f"Retest anında skor ≥ {lim['min']} (SMT dahil, 04.10)", "stage": "missed_quality", "on": True},
         {"group": "Kapı", "label": f"Retest {backfill} LTF mumundan eski olmamalı", "stage": "stale", "on": True},
         # --- Dolum ---
         {"group": "Dolum", "label": "C2 kapanmadan sinyal / dolum yok", "stage": None,
@@ -278,20 +291,20 @@ def _score_health(rows: list[dict], parts_list: list[dict], lim: dict) -> dict:
         top_v, top_n = max(Counter(vals).items(), key=lambda kv: kv[1]) if vals else (0, 0)
         if bad:
             wrong = ", ".join(f"{v:+d}" for v in sorted({v for v in vals if v not in r["allowed"]}))
-            r["health"] = _h("bad", "Hatalı", f"{bad} setupa kurala aykırı puan verdi ({wrong}).")
+            r["health"] = _h("bad", "Hesap hatalı", f"{bad} setupa kurala aykırı puan verdi ({wrong}).")
         elif n < MIN_N:
             r["health"] = _h("na", "Yetersiz veri", f"Son 7 günde {n} setup var, karar için en az {MIN_N} gerekli.")
         elif r["absent"]:
-            r["health"] = _h("ok", "Doğru çalışıyor", "Bu stratejide kullanılmıyor; beklendiği gibi hiç puan vermedi.")
+            r["health"] = _h("ok", "Hesap doğru", "Bu stratejide kullanılmıyor; beklendiği gibi hiç puan vermedi.")
         elif top_n / n >= ALWAYS_FRAC and top_v == 0:
-            r["health"] = _h("warn", "Etkisi yok",
+            r["health"] = _h("warn", "Hep aynı puan",
                              f"Neredeyse hiçbir setupa puan vermiyor ({n} setupta {n - top_n}); skoru değiştirmiyor.")
         elif top_n / n >= ALWAYS_FRAC:
-            r["health"] = _h("warn", "Etkisi yok",
+            r["health"] = _h("warn", "Hep aynı puan",
                              f"Neredeyse her setup aynı puanı alıyor ({n} setupta {top_n} kez {top_v:+d}); "
                              "iyiyi kötüden ayırmıyor.")
         else:
-            r["health"] = _h("ok", "Doğru çalışıyor", "Kurala uygun puan veriyor, setupları ayırıyor.")
+            r["health"] = _h("ok", "Hesap doğru", "Kurala uygun puan veriyor; puanlar setuplara dağılıyor.")
     raw_bad = sum(
         1 for p in parts_list
         if sum(int(p.get(k) or 0) for k in item_keys) != int(p.get("raw") or 0)
@@ -300,8 +313,8 @@ def _score_health(rows: list[dict], parts_list: list[dict], lim: dict) -> dict:
     if n < MIN_N:
         return _h("na", "Yetersiz veri", f"Son 7 günde {n} setup var, karar için en az {MIN_N} gerekli.")
     if raw_bad or score_bad:
-        return _h("bad", "Hatalı", f"{raw_bad + score_bad} setupta toplam skor kalemlerden yanlış hesaplanmış.")
-    return _h("ok", "Doğru çalışıyor", "Toplam skor her setupta kalemlerden ve tavandan doğru hesaplanıyor.")
+        return _h("bad", "Hesap hatalı", f"{raw_bad + score_bad} setupta toplam skor kalemlerden yanlış hesaplanmış.")
+    return _h("ok", "Hesap doğru", "Toplam skor her setupta kalemlerden ve tavandan doğru hesaplanıyor.")
 
 
 def _h(level: str, text: str, detail: str = "") -> dict:
@@ -341,6 +354,7 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
         error = str(exc)
 
     total = _score_health(rows, parts_list, lim)
+    ranking = _attach_outcomes(rows, await _outcome_rows(db, strategy), strategy)
     for f in filters:
         cnt = stage_counts.get(f["stage"], 0) if f["stage"] else None
         f["count"] = cnt
@@ -374,4 +388,120 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
         "issues": issues,
         "warns": warns,
         "error": error,
+        "ranking": ranking,
+        "outcome_since": OUTCOME_SINCE.get(strategy),
     }
+
+
+async def _outcome_rows(db: AsyncSession, strategy: str) -> list[dict]:
+    """Journal'dan sonuc analizi kumesi (`score_outcome.collect`). Hata yutulur: sayfa bozulmasin."""
+    t = SetupJournal.__table__
+    try:
+        res = await db.execute(select(t).where(
+            t.c.strategy == strategy, t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
+            t.c.first_seen >= OUTCOME_SINCE.get(strategy, datetime(2026, 9, 16)),
+        ))
+        return so.collect(res.mappings().all(), strategy=strategy)
+    except Exception as exc:
+        log.warning("score_table: sonuc kumesi okunamadi: %s", exc)
+        return []
+
+
+def _fs(x) -> datetime | None:
+    v = x.get("first_seen")
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    return v
+
+
+# Kalem degerlendirmesi (04.10, kullanici: "iyi mi degil mi yazsin, negatif seyler de olmali -- sistem iyi calismiyor").
+# Hukum karar bandindan (score_outcome.judge); metin degerlendirme dilinde.
+_VERDICT_TEXT = {
+    "ok": "İyi",
+    "warn": "İşe yaramıyor",
+    "bad": "Zararlı",
+    "na": "Belirsiz",
+}
+_VERDICT_TAG = {"ok": "iyi", "warn": "işe yaramıyor", "bad": "zararlı", "na": "belirsiz"}  # str.lower() "İ"yi bozuyor
+_VERDICT_WHY = {   # (seviye, ceza mi)
+    ("ok", False): "Puan verdiği setuplar belirgin daha iyi gidiyor; kazananı seçiyor.",
+    ("ok", True): "Ceza verdiği setuplar belirgin daha kötü gidiyor; kaybedeni eliyor.",
+    ("warn", False): "Puan veriyor ama sonucu değiştirmiyor: puan alan ile almayan aynı gidiyor. Skoru boşuna şişiriyor.",
+    ("warn", True): "Ceza veriyor ama ceza alan ile almayan aynı gidiyor; iyi setupları boşuna eliyor olabilir.",
+    ("bad", False): "Puan verdiğimiz setuplar DAHA KÖTÜ gidiyor; kalem kaybedeni seçiyor.",
+    ("bad", True): "Ceza verdiğimiz setuplar DAHA İYİ gidiyor; kalem kazananı eliyor.",
+    ("na", False): "Karar için yeterli çözülmüş setup yok.",
+    ("na", True): "Karar için yeterli çözülmüş setup yok.",
+}
+
+
+def _lean(part: list[dict], key: str, v: int) -> str:
+    """Veri azken egilim: tum bantlarda kontrollu fark (bu kalem haric skor ayni) -- hukum degil, yon bilgisi."""
+    d = so.controlled_diff(part, key, v)
+    if d is None:
+        return ""
+    good = -d if v < 0 else d
+    word = "olumlu" if good >= so.BAND else ("olumsuz" if good <= -so.BAND else "nötr")
+    return f"eğilim {word} ({v:+d}: fark {d:+.2f}, örneklem küçük)"
+
+
+def _attach_outcomes(rows: list[dict], sub: list[dict], strategy: str) -> dict:
+    """Her kalem satirina `out` = {cells, level, text, detail}; toplam skor sirasini doner."""
+    thr = so.THR.get(strategy, 7)
+    for r in rows:
+        if r.get("absent"):
+            r["out"] = None
+            continue
+        since = ITEM_SINCE.get(r["key"])
+        part = [x for x in sub if since is None or (_fs(x) and _fs(x) >= since)]
+        io = so.item_outcomes(part, r["key"], thr)
+        cells = [dict(v=v, w=io["by"][v]["w"], l=io["by"][v]["l"], rps=io["by"][v]["rps"]) for v in io["vals"]]
+        n_res = sum(io["by"][v]["res"] for v in io["vals"])
+        if io["single"] and n_res < so.MIN_TOTAL:
+            out = _h("na", _VERDICT_TEXT["na"], f"{n_res} çözülmüş setup; hepsi aynı puanı almış.")
+        elif io["single"]:
+            out = _h("warn", _VERDICT_TEXT["warn"],
+                     "Bütün setuplar aynı puanı alıyor; hiçbir setupu diğerinden ayırmıyor, skoru boşuna şişiriyor.")
+        elif not io["verdicts"]:
+            out = _h("na", _VERDICT_TEXT["na"], "Karşılaştırılacak 0 puanlı setup yok.")
+        else:
+            # Birden cok deger (bias +2 / -2): en kotu hukum basa, detayda hepsi.
+            order = {"bad": 0, "warn": 1, "ok": 2, "na": 3}
+            vds = sorted(io["verdicts"], key=lambda z: order[z["level"]])
+            lvl = vds[0]["level"]
+            parts = []
+            for z in io["verdicts"]:
+                g, b = z["g"], z["b"]
+                tag = _VERDICT_TAG[z["level"]]
+                if z["level"] == "na":
+                    ln = _lean(part, r["key"], z["v"])
+                    parts.append(f"{z['v']:+d}: belirsiz ({g['res']}/{b['res']} çözülmüş, taraf başına {so.MIN_FLIP})"
+                                 + (f" — {ln}" if ln else ""))
+                else:
+                    parts.append(f"{z['v']:+d} {tag}: alan {g['w']} TP / {g['l']} SL (R {g['rps']:+.2f}) vs almayan "
+                                 f"{b['w']} TP / {b['l']} SL (R {b['rps']:+.2f})")
+            out = _h(lvl, _VERDICT_TEXT[lvl], _VERDICT_WHY[(lvl, vds[0]["v"] < 0)] + " " + " · ".join(parts))
+        out["cells"] = cells
+        out["since"] = since
+        r["out"] = out
+    tr = so.total_ranking(sub, thr)
+    hi, lo = tr["hi"], tr["lo"]
+
+    def side(st):
+        return (f"{st['w']} TP / {st['l']} SL · WR {st['wr']:.0f}% · R/setup {st['rps']:+.2f}" if st["res"]
+                else "çözülmüş yok")
+
+    tr["text"] = {"ok": "İyi — skor kazananı seçiyor",
+                  "warn": "Kötü — skor kazananı seçmiyor (≥ eşik olanlar elenenlerden iyi değil)",
+                  "bad": "Çok kötü — skor ters çalışıyor (≥ eşik olanlar elenenlerden kötü)",
+                  "na": "Belirsiz — veri az"}[tr["level"]]
+    if tr["level"] == "warn":
+        tr["level"] = "bad"          # sistem kazanmiyorken "siralamiyor" uyari degil sorun (kullanici 04.10)
+    tr["thr"] = thr
+    tr["hi_txt"], tr["lo_txt"] = side(hi), side(lo)
+    tr["n"] = len(sub)
+    tr["counts"] = {k: sum(1 for r in rows if r.get("out") and r["out"]["level"] == k) for k in ("ok", "warn", "bad", "na")}
+    return tr

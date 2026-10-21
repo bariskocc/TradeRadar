@@ -449,6 +449,34 @@ async def send_potential_cancel(
     return mid is not None
 
 
+def _format_signal_void(symbol: str, direction: str, strategy: str | None, score_asof, min_score) -> str:
+    label = {"1h": "1H-5M", "1w": "1W-4H", "1d": "1D-1H"}.get(strategy or "", "4H-15M")
+    return (
+        f"❌ <b>İPTAL – {symbol} ({label})</b>\n"
+        f"\n"
+        f"\U0001f4cd <b>{direction}</b> | <b>Neden:</b> dolum anındaki skor {score_asof} "
+        f"(eşik {min_score}) — işlem geçersiz sayıldı ve silindi."
+    )
+
+
+async def send_signal_void(
+    symbol: str, direction: str, strategy: str | None, reply_to: int, score_asof, min_score,
+) -> bool:
+    """Dolmus sinyal VOID FILL ile silindi (04.10): aktif mesajina IPTAL reply'i.
+
+    Eskiden sessizdi; kullanicida 'aktif' mesaji asili kaliyor, Open Signals'ta islem yoktu.
+    """
+    if not is_configured():
+        return False
+    mid = await _send_message(
+        _format_signal_void(symbol, direction, strategy, score_asof, min_score),
+        reply_to_message_id=reply_to,
+    )
+    if mid:
+        log.info("Telegram: void sent for %s %s (reply_to=%s)", symbol, direction, reply_to)
+    return mid is not None
+
+
 async def send_test_message() -> bool:
     mid = await _send_message("\u2705 <b>TradeRadar</b> – Telegram bağlantısı başarılı!")
     return mid is not None

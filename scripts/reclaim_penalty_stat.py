@@ -30,10 +30,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from app import crt_engine as CE  # noqa: E402
+from app.setup_journal import analysis_parts, levels_final  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--db", default=str(REPO / "traderadar.db"))
 ap.add_argument("--since", default="2026-09-19")
+ap.add_argument("--all-levels", action="store_true", help="1D/1W: C2 acikken donmus (yanli) eski satirlar da")
 A = ap.parse_args()
 
 PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
@@ -62,8 +64,14 @@ for r in con.execute("select * from setup_journal where entry is not null and pa
                      "and first_seen >= ?", (A.since,)):
     if r["best_stage"] in PRE or r["strategy"] not in CAP:
         continue
-    pal = json.loads(r["parts_at_levels"])
-    if r["strategy"] == "4h" and pal.get("c2_closed") != 1:
+    if r["strategy"] == "4h" and (json.loads(r["parts_at_levels"]) or {}).get("c2_closed") != 1:
+        continue
+    # 03.10: 1D/1W'de skor sinyal / C2 kapanisi anindan (`analysis_parts`), yalniz seviyesi kesin satir (`levels_final`)
+    # -- `parts_at_levels` ilk gorulmede (genelde C2 acik) donuyordu, seviyeler kosan SL'li.
+    if r["strategy"] != "4h" and not A.all_levels and not levels_final(r):
+        continue
+    pal, _ = analysis_parts(r)
+    if not pal:
         continue
     rec = pal.get("reclaim")
     if rec not in (0, PEN):

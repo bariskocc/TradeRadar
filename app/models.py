@@ -196,6 +196,10 @@ class SetupJournal(Base):
     # degerlendirmede YENIDEN dondurulur; eski seviyeler + eski sonuc/best_stage burada (JSON).
     # Dolu satir = seviyeler ve takipler C2 kapanisindan; NULL = ilk dondurma (eski kural).
     pre_c2 = Column(String, nullable=True)
+    # 03.10: skorun SINYAL ya da C2 KAPANISI anindaki kopyasi (JSON: why/at/stage/parts/features/rr). Seviyeler (ve
+    # parts_at_levels) ilk goruldugunde donuyor -- 1D/1W'de genelde C2 acikken, skor sonra yukselip sinyal o zaman
+    # aciliyor (GBPJPY 1D #136: donmus skor 0, sinyal 7). Analiz 1D/1W'de skoru buradan okur. NULL = 03.10 oncesi.
+    parts_final = Column(String, nullable=True)
 
     # Golge izleme (14.09, dar stop sorusu; 4H/1D/1H): ayni setup farkli SL kesirleriyle izlenir.
     # JSON: {"1": {...}, "0.75": {...}, "0.5": {...}} -> sl, rr, o (outcome), e (entry), at, until.

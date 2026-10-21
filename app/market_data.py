@@ -368,7 +368,7 @@ class BingXMarketData:
         day_ms = int(day_start.value // 1_000_000)
         self.store.upsert_candle(symbol, "1d", day_ms, row)
 
-    def _sync_1d_from_4h(self, symbol: str, prev_dt: pd.Timestamp) -> None:
+    def _sync_1d_from_4h(self, symbol: str, prev_dt: pd.Timestamp, now_dt: pd.Timestamp | None = None) -> None:
         """Kapanan 4H barinin gununu (ve yeni barin gununu) 4H serisinden yeniden kur.
 
         1H akisi olmayan kripto (4H evreni altcoinleri) icin. Onlarin 1D serisi yalniz REST'ten,
@@ -381,6 +381,9 @@ class BingXMarketData:
         4H barlari UTC'ye hizali oldugu icin gunluk bar kayipsiz cikar (seans sentezinde ayni
         yontem 198/198 birebir). Gun eksiksiz degilse (ilk 4H bari gun basinda degil ya da kapali
         gunde 6 bar yok) satira DOKUNULMAZ -- yanlis acilis/uc yazmaktansa eski hali kalsin.
+
+        `now_dt` (03.10): 15m kapanisindan cagrildiginda yeni 4H bari henuz store'da olmayabilir; gunun
+        kapandigina serinin son bari degil `now_dt` da karar verir (kapali gunde yine 6 bar sart).
         """
         if not self.store.get_df(symbol, "1h").empty:
             return  # 1H akisi var: `_rebuild_forming_1d` zaten her mesajda guncelliyor
@@ -397,7 +400,8 @@ class BingXMarketData:
             bars = tail[mask]
             if bars.empty or idx[mask][0] != day_start:
                 continue
-            day_closed = day_start + pd.Timedelta(days=1) <= idx[-1]
+            last = idx[-1] if now_dt is None else max(idx[-1], pd.Timestamp(now_dt).tz_convert("UTC"))
+            day_closed = day_start + pd.Timedelta(days=1) <= last
             if day_closed and len(bars) != 6:
                 log.debug("1D<-4H atlandi %s %s: %d bar", symbol, day_start.date(), len(bars))
                 continue
@@ -655,6 +659,12 @@ class BingXMarketData:
             if tf == "4h" and not session_sym:
                 # Kapanis olayi kuyruga girmeden ONCE: 00:00 taramasi dunun tam mumunu gorsun.
                 self._sync_1d_from_4h(symbol, prev_dt)
+            elif tf == "15m" and not session_sym and prev_dt.normalize() != cur_dt.normalize():
+                # 03.10: 15m ve 4h ayri akislar; 00:00'da 15m'in yeni mesaji 4h'inkinden ONCE gelirse 15m
+                # kapanisi 4H stratejisini 4H senkronundan once tetikliyordu -> dunun eksik 1D mumuyla bias
+                # (XLM 27.09 00:00:13, ONDO 01.10 00:00:12: once NEUTRAL, saniyeler sonra BULLISH). O anda
+                # store'daki 20:00 4H bari son WS degerlerini tasiyor; 4h kapanis mesaji gelince kesinlesir.
+                self._sync_1d_from_4h(symbol, prev_dt, now_dt=cur_dt)
             if not prev_dead:
                 await self._closed_queue.put((symbol, tf))
             if tf == "1h" and session_sym:

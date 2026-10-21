@@ -157,3 +157,48 @@ for name, pop in (("KAPILARI GECMIS", [x for x in recs if x["gp"]]), ("TUM GERCE
     table("first_bar (26.09+, KARAR DILIMI)", [x for x in pop if x["fb"]])
     table("kripto", [x for x in pop if x["r"]["market_type"] == "crypto"])
     table("kripto disi", [x for x in pop if x["r"]["market_type"] != "crypto"])
+
+
+# 03.10 (kullanici): 4H / 1D / 1W'nin karar kumesi KAPILARI GECMIS first_bar dilimi (analiz kumesi kurali, 27.09).
+# Kollar market %90 ve %80 RR>=2; her kol 50 cozulmus islem (TP+SL) birikince okunur. Hukum IKI OLCUDE AYRI verilir
+# (kullanici: "karari sadece komisyonlu farkla verme, ikisini de soyle"): komisyonlu ve komisyonsuz fark >= +0.15 R/setup
+# VE iki zaman yarisinda da > 0 -> H1 (mum re-track'i adayi); degilse H2. Iki olcu ayrisirsa karar kullanicinin.
+# IZLEME "Market vs limit giriş — 4H" / "— 1D" / "— 1W".
+DECISION_ARMS = ((0.9, "market stop %90 RR>=2"), (0.8, "market stop %80 RR>=2"))
+DECISION_TRADES = 50
+DECISION_EDGE = 0.15
+DECISION_STRATEGIES = ("4h", "1d", "1w")
+sub = [x for x in recs if x["gp"] and x["fb"]] if A.strategy in DECISION_STRATEGIES else []
+if A.strategy in DECISION_STRATEGIES:
+    print("\n" + "=" * 110 + f"\nKARAR (03.10 kurali, {A.strategy}): kapilari gecmis + first_bar, market %90 / %80 RR>=2"
+          + "\n" + "=" * 110)
+    if A.strategy == "1w":
+        print("   (1W: 01.10'dan beri Journal SL'i motorun %80 stopu -> market %90 / %80 o SL'e olan mesafenin %90 / %80'i)")
+    if not sub:
+        print(f"   kapilari gecmis first_bar'li {A.strategy} setup yok -- veri birikiyor (0/{DECISION_TRADES})")
+if sub:
+    half = sorted(x["r"]["first_seen"] for x in sub)[len(sub) // 2]
+    h1 = [x for x in sub if x["r"]["first_seen"] < half]
+    h2 = [x for x in sub if x["r"]["first_seen"] >= half]
+    lim = arm(sub, "limit", 1.0, True)
+    l1, l2 = arm(h1, "limit", 1.0, True), arm(h2, "limit", 1.0, True)
+    for k, name in DECISION_ARMS:
+        n, tp, sl, g, nt, fm = arm(sub, "market", k, True)
+        m1, m2 = arm(h1, "market", k, True), arm(h2, "market", k, True)
+        d, dg = nt - lim[4], g - lim[3]
+        d1, d2 = m1[4] - l1[4], m2[4] - l2[4]
+        g1, g2 = m1[3] - l1[3], m2[3] - l2[3]
+        per, perg = d / len(sub), dg / len(sub)
+        ready = tp + sl >= DECISION_TRADES
+
+        def verdict(x, x1, x2):
+            if not ready:
+                return "veri birikiyor"
+            return "H1 (market onde)" if x >= DECISION_EDGE and x1 > 0 and x2 > 0 else "H2 (limit kalir)"
+
+        vn, vg = verdict(per, d1, d2), verdict(perg, g1, g2)
+        print(f"   {name:<24} islem {tp + sl:>3}/{DECISION_TRADES} ({tp} TP / {sl} SL), {len(sub)} setup")
+        print(f"      komisyonlu  : fark {d:+6.1f} R = {per:+.3f} R/setup · yarilar {d1:+.1f} / {d2:+.1f} · {vn}")
+        print(f"      komisyonsuz : fark {dg:+6.1f} R = {perg:+.3f} R/setup · yarilar {g1:+.1f} / {g2:+.1f} · {vg}")
+        if ready and vn != vg:
+            print("      -> iki olcu AYRISIYOR: karar kullanicinin")

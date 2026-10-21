@@ -178,6 +178,9 @@ class CISDConfirmation:
     # ayni setupta ikisini de izlemek zorunda. YALNIZ OLCUM -- motor karari bunlari kullanmaz.
     cisd_level: Optional[float] = None
     mss_level: Optional[float] = None
+    # Giris bolgeden (ifvg/bpr) alindiysa bolgenin BILINDIGI son mumun acilisi (02.10): dolum ancak
+    # bu mumdan SONRAKI mumda olabilir. Scanner yazar; cisd/mss girisinde None.
+    zone_ready_time: Optional[datetime] = None
 
     @property
     def confirmed(self) -> bool:
@@ -599,6 +602,10 @@ SCORE_FEATURE_KEYS = (
     "key_level_n", "liq_beyond_atr", "liq_beyond_frac", "liq_beyond_kind",
     # 29.09: C1 sekli -- C2 ile ayni renk (1/0), govde orani, TP tarafindaki fitil / C1 range
     "c1_same_color", "c1_body_frac", "c1_tp_wick_frac",
+    # 03.10: SMT'nin C1 ucuna bagli tanimlari (yalniz olcum, `smt_level_features`) + cift turu
+    "smt_htf", "smt_lvl", "smt_main_sweep", "smt_corr_sweep", "smt_kind",
+    # 21.10: CISD onay mumunun gucu (govde / ort. LTF mum; scanner._cisd_features) -- "Skor tablosu yeni adaylar"
+    "cisd_disp",
 )
 
 
@@ -1039,6 +1046,86 @@ def check_smt_divergence(
     # Simetri: pivotlari hem ana sembolde hem korele paritede ara; herhangi
     # birinin son iki pivotunda ayrisma varsa SMT var kabul et.
     return _pivot_divergence(m, c, kind) or _pivot_divergence(c, m, kind)
+
+
+def smt_level_features(
+    df_main: Optional[pd.DataFrame],
+    df_corr: Optional[pd.DataFrame],
+    direction: str,
+    c1_time: Optional[datetime],
+    purge_time: Optional[datetime],
+    bar_hours: float,
+) -> dict:
+    """SMT'nin C1 ucuna bagli iki tanimi -- YALNIZ OLCUM, skoru degistirmez (03.10, kullanici: "SMT onemli konfirme,
+    cikarmak yerine duzeltelim").
+
+    Bugunku SMT (`check_smt_divergence`) C2 cevresindeki herhangi iki LTF mini-swing'i karsilastiriyor; ICT/CRT
+    kaynaklarinda SMT LTF'de okunur ama HTF'deki KILIT seviyede: bir varlik seviyeyi supururken korele olan supuremez.
+    CRT'de o seviye C1'in ucu (LONG'da dip, SHORT'ta tepe). Iki tanim, ikisi de LTF mumlarindan (HTF serisi gerekmez,
+    seans hizasi LTF'te zaten var):
+      smt_htf : ana sembol C1 ucunu C1 sonrasindan C2 sonuna kadar supurdu, korele sembol KENDI C1 ucunu hic supurmedi.
+      smt_lvl : ana sembolun supurme ucunun yapildigi LTF mumuna kadar korele sembol kendi C1 ucunu supurmedi
+                (korele sonradan supurse de "supurme aninda tuttu"). smt_htf => smt_lvl.
+    Surekli: smt_main_sweep / smt_corr_sweep = C1 ucunun otesine gidis / o sembolun C1 araligi (<= 0: supurmedi).
+    Bar suresi `bar_hours` (4H 4, 1D 24, 1W 168). Pencere eksikse bos dict.
+    """
+    out: dict = {}
+    if df_main is None or df_corr is None or df_main.empty or df_corr.empty or c1_time is None or purge_time is None:
+        return out
+
+    def _utc(t):
+        t = pd.Timestamp(t)
+        return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+    def _norm(df):
+        df = df.sort_index()
+        idx = df.index
+        if getattr(idx, "tz", None) is None:
+            df = df.copy()
+            df.index = idx.tz_localize("UTC")
+        return df
+
+    m, c = _norm(df_main), _norm(df_corr)
+    bar = pd.Timedelta(hours=bar_hours)
+    c1, pt = _utc(c1_time), _utc(purge_time)
+    c1_end, c2_end = c1 + bar, pt + bar
+    low = direction == "LONG"
+    col = "low" if low else "high"
+
+    def _c1(df):
+        w = df[(df.index >= c1) & (df.index < c1_end)]
+        if w.empty:
+            return None
+        rng = float(w["high"].max()) - float(w["low"].min())
+        ext = float(w["low"].min()) if low else float(w["high"].max())
+        return ext, rng
+
+    def _depth(ext, rng, v):
+        if rng <= 0:
+            return None
+        return (ext - v) / rng if low else (v - ext) / rng
+
+    mc1, cc1 = _c1(m), _c1(c)
+    mpost = m[(m.index >= c1_end) & (m.index < c2_end)]
+    cpost = c[(c.index >= c1_end) & (c.index < c2_end)]
+    if mc1 is None or cc1 is None or mpost.empty or cpost.empty:
+        return out
+    m_ext_t = mpost[col].idxmin() if low else mpost[col].idxmax()
+    m_val = float(mpost[col].min()) if low else float(mpost[col].max())
+    c_val = float(cpost[col].min()) if low else float(cpost[col].max())
+    c_upto = cpost[cpost.index <= m_ext_t]
+    c_val_at = (float(c_upto[col].min()) if low else float(c_upto[col].max())) if not c_upto.empty else None
+    ms = _depth(mc1[0], mc1[1], m_val)
+    cs = _depth(cc1[0], cc1[1], c_val)
+    cs_at = _depth(cc1[0], cc1[1], c_val_at) if c_val_at is not None else None
+    if ms is None or cs is None:
+        return out
+    out["smt_main_sweep"] = round(ms, 4)
+    out["smt_corr_sweep"] = round(cs, 4)
+    out["smt_htf"] = int(ms > 0 and cs <= 0)
+    if cs_at is not None:
+        out["smt_lvl"] = int(ms > 0 and cs_at <= 0)
+    return out
 
 
 # ──────────────────── PD Array (Price Delivery) tespiti ────────────────────

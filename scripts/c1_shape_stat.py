@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO))
 from app.setup_journal import PRE_SETUP_STAGES  # noqa: E402
 
 NOT_CRT = tuple(PRE_SETUP_STAGES - {"not_selected"})
-MIN_N = 20
+MIN_N = 100   # 03.10 (kullanici): grup basina 100 (01.10'da 50 olmustu, betik 20'de kalmisti)
 LONG_TP_WICK = 0.40   # "uzun TP fitili" esigi; ilk bakistan ONCE kondu (SEI: 0.64)
 
 

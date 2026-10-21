@@ -95,12 +95,6 @@
                     </div>
                     <p class="mt-1 text-xs text-gray-400"><span class="text-gray-500">Tetikleyici:</span> {{ row.item.trigger }}</p>
                     {{ progress_block(row.progress) }}
-                    {% if row.item.measure %}
-                    <p class="mt-2 text-[11px]">
-                        <span class="text-gray-500">nereden ölçülür:</span>
-                        <code class="px-1.5 py-0.5 rounded bg-dark-900 text-accent-blue">{{ row.item.measure }}</code>
-                    </p>
-                    {% endif %}
                     {{ detail_block(row) }}
                 </div>
                 {% endfor %}
@@ -122,12 +116,6 @@
                     </div>
                     <p class="mt-1 text-xs text-gray-400"><span class="text-gray-500">Tetik doldu:</span> {{ row.item.trigger }}</p>
                     {{ progress_block(row.progress) }}
-                    {% if row.item.measure %}
-                    <p class="mt-2 text-[11px]">
-                        <span class="text-gray-500">şimdi çalıştır:</span>
-                        <code class="px-1.5 py-0.5 rounded bg-dark-900 text-accent-yellow">{{ row.item.measure }}</code>
-                    </p>
-                    {% endif %}
                     {{ detail_block(row) }}
                 </div>
                 {% endfor %}
@@ -177,12 +165,6 @@
                         <span class="text-gray-500">Tetikleyici:</span> {{ row.item.trigger }}
                     </p>
                     {{ progress_block(row.progress) }}
-                    {% if row.item.measure %}
-                    <p class="mt-2 text-[11px]">
-                        <span class="text-gray-500">nereden ölçülür:</span>
-                        <code class="px-1.5 py-0.5 rounded bg-dark-900 text-accent-blue">{{ row.item.measure }}</code>
-                    </p>
-                    {% endif %}
                     {{ detail_block(row) }}
                 </div>
                 {% endfor %}
@@ -210,11 +192,6 @@
                         <p class="mt-1 text-[11px] text-gray-500">
                             <span class="text-gray-600">Tetikleyici:</span> {{ row.item.trigger }}
                         </p>
-                        {% if row.item.measure %}
-                        <p class="mt-1 text-[11px] text-gray-600">
-                            nereden ölçülür: <code class="px-1 py-0.5 rounded bg-dark-900 text-gray-400">{{ row.item.measure }}</code>
-                        </p>
-                        {% endif %}
                         {{ detail_block(row) }}
                     </div>
                     {% endfor %}

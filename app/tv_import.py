@@ -146,7 +146,7 @@ def parse_trades(text: str) -> tuple[list[dict], list[str]]:
     used: set = set()
     c = {
         "symbol": _find(heads, "sembol", "symbol", used=used),
-        "trade": _find(heads, "trade number", "trade no", "islem no", used=used),
+        "trade": _find(heads, "trade number", "trade no", "islem numarasi", "islem no", used=used),
         "type": _find(heads, "tip", "type", used=used),
         "dt": _find(heads, "tarih ve saat", "tarih", "date/time", "date", used=used),
         "order": _find(heads, "emir no", "order id", "order no", used=used),
@@ -175,7 +175,8 @@ def parse_trades(text: str) -> tuple[list[dict], list[str]]:
             kind = _norm(row.get(c["type"]))
             parsed.append({
                 "entry": ("entry" in kind or "giris" in kind),
-                "short": "short" in kind or "sat" in kind,
+                # "Entry short" ya da Turkce export'ta "Kısa pozisyon girişi" (04.10).
+                "short": "short" in kind or "sat" in kind or "kisa" in kind,
                 "dt": parse_dt(row.get(c["dt"])),
                 "price": _num(row.get(c["price"])),
                 "qty": _num(row.get(c["qty"])) or 0.0,

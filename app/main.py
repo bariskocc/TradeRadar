@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, Form, Depends, Query, File, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, func, desc, case, or_
+from sqlalchemy import select, func, desc, case, or_, and_, cast, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import BASE_DIR
@@ -364,7 +364,7 @@ _TSI = timezone(TSI_OFFSET)
 # Kismi kar (%50'de yari + BE) vs sadece BE karsilastirmasi: bu kadar kismi karli islem birikince
 # Dashboard "Dikkat" panosu olcumu hatirlatir (scripts/partial_vs_be.py). Karar kurali ve sinirlar:
 # IZLEME.md -> "Kismi kar vs BE-only". Olcum yapilinca esigi yukselt ya da hatirlatmayi kaldir.
-PARTIAL_REVIEW_MIN_TRADES = 25
+PARTIAL_REVIEW_MIN_TRADES = 100   # 03.10 (kullanici): 25 -> 100
 # 1H-5M 28.09'da kapandi (1W-4H geldi); gecmis 1H islemleri Signals sayfasinda duruyor.
 _DASH_TFS = ("4h", "1d", "1w")
 # "FX" = kripto disi tum seans sembolleri (fx/metal/endeks/petrol).
@@ -1270,6 +1270,7 @@ async def setup_journal_page(
     days: int = Query(default=7),
     page: int = Query(default=1),
     rows_open: int = Query(default=0),
+    min_score: str = Query(default=""),
 ):
     user = get_current_user(request)
     if not user:
@@ -1286,6 +1287,15 @@ async def setup_journal_page(
         filters.append(SetupJournal.strategy == tf)
     if symbol:
         filters.append(SetupJournal.symbol.ilike(f"%{symbol}%"))
+    # Min skor (04.10, kullanici istegi): DETAIL sutununda GORUNEN skor ("score N · ..."). `score`
+    # kolonu 30.09 oncesi 82 satirda detail'den farkli (C1 kimligi hatasi), ekrandaki sayiya uyulur.
+    # Skorsuz satir (detail "score" ile baslamiyor) filtre aciksa dusar. Ozet de bu filtreye uyar.
+    min_score_i = int(min_score) if min_score.strip().isdigit() and int(min_score) <= 11 else None
+    if min_score_i is not None:
+        filters.append(and_(
+            SetupJournal.detail.like("score %"),
+            cast(func.substr(SetupJournal.detail, 7), Integer) >= min_score_i,
+        ))
 
     # Ozet asama filtresinden ONCE ve SQL'de: hangi kapi kac kazanci engelledi / kac kaybi onledi.
     grouped = (await db.execute(
@@ -1350,7 +1360,8 @@ async def setup_journal_page(
             .order_by(desc(SetupJournal.last_seen))
             .offset((page - 1) * _JOURNAL_PAGE_SIZE).limit(_JOURNAL_PAGE_SIZE)
         )).scalars().all()
-    filter_qs = urlencode({"tf": tf, "stage": stage, "symbol": symbol, "days": days, "rows_open": 1})
+    filter_qs = urlencode({"tf": tf, "stage": stage, "symbol": symbol, "days": days,
+                           "min_score": "" if min_score_i is None else min_score_i, "rows_open": 1})
     return templates.TemplateResponse(request=request, name="setup_journal.html", context={
         "user": user,
         "active_page": "setup_journal",
@@ -1368,6 +1379,7 @@ async def setup_journal_page(
         "stage": stage,
         "symbol": symbol,
         "days": days,
+        "min_score": min_score_i,
         "stages": journal.STAGES,
         "stage_labels": journal.STAGE_LABELS,
         "outcome_labels": journal.OUTCOME_LABELS,

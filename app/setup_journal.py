@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.crt_engine import cisd_fvg_candidates
+from app.crt_engine import MIN_IFVG_GAP_RANGE_FRAC, cisd_fvg_candidates
 from app.models import SetupJournal
 
 log = logging.getLogger(__name__)
@@ -162,6 +162,18 @@ CFVG_BARS_AFTER = 2
 CFVG_STATE = "_cfvg"
 # CISD / MSS kapanisla kirilim tohumu (29.09): scanner `_break_seed` -> `retrace["brk"]`. Varyant degildir.
 BREAK_SEED = "_brk"
+# CISD retest SONRASI IFVG (rfvg, 03.10, kullanici istegi): CISD seviyesi retest edildikten sonra LTF'de
+# YENI bir FVG olusup ters kapanisla invert olursa (LONG: dusus FVG'si, kapanis ustunde) o bolgenin
+# ust/orta/alt noktasina limit emri. Soru: "retest sonrasi IFVG ikinci bir konfirme mi -- bu girisler
+# TP'ye CISD girisinden daha cok mu gidiyor?" Ayni setupta `cisd` varyantiyla eslenir (SL/TP ortak).
+# Retest = `cisd` varyantinin dolum mumu; FVG'nin sol mumu retest mumundan once olamaz; ILK invert
+# olan bolge alinir. Izleme inversion mumundan SONRA baslar (bolge o mumun kapanisinda bilinir).
+# Bolge bulunmadan biterse varyant "invalid" + why: no_retest (CISD hic retest edilmedi) /
+# cisd_win | cisd_loss | cisd_ambiguous (CISD islemi once sonuclandi) / no_fvg (ufuk) -- modelin ne
+# siklikta olusmadigi da olcumun parcasi. Motor KULLANMAZ. Rapor `scripts/retest_ifvg_stat.py`.
+RFVG_STATE = "_rfvg"
+RFVG_VARIANTS = ("rfvg_near", "rfvg_mid", "rfvg_far")
+_STATE_KEYS = (CFVG_STATE, RFVG_STATE)
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -227,6 +239,10 @@ def _entries_init(rec: dict) -> dict | None:
     if state is not None:
         out[CFVG_STATE] = state
         _cfvg_scan(rec, out)               # FVG seviyeler dondugunde zaten tamamsa hemen ekle
+    cv = out.get("cisd")
+    if cv is not None and cv.get("o") != "invalid":
+        out[RFVG_STATE] = {"o": "state", "done": False, "rt": None, "b": [],
+                           "avg": (seed or {}).get("avg"), "imm": bool(cv.get("imm"))}
     return out or None
 
 
@@ -396,6 +412,91 @@ def _cfvg_step(rec: dict, bar_ts, high: float, low: float) -> bool:
         # Mum akisi kesildi (seans kapanisi, sembol dustu): pencere ufukta zorla kapanir,
         # yoksa kayit "izleniyor" gorunup bellekte kalirdi.
         _cfvg_close(state, rec["entries"], why="no_bars")
+    return True
+
+
+# --- CISD retest sonrasi IFVG (rfvg): gec eklenen varyant ---------------------------------
+def _rfvg_close(state: dict, ents: dict, why: str) -> None:
+    state["done"] = True
+    if "rfvg_near" in ents:
+        return
+    for name in RFVG_VARIANTS:
+        ents[name] = {"e": None, "rr": None, "o": "invalid", "t": None, "at": None,
+                      "until": None, "why": why}
+
+
+def _rfvg_scan(rec: dict, state: dict) -> tuple | None:
+    """Tamponda retest sonrasi olusup invert olmus ILK bolge: (z_lo, z_hi, inversion iso, bosluk) | None."""
+    bars = state.get("b") or []
+    long = rec.get("direction") == "LONG"
+    avg = state.get("avg")
+    if not avg and len(bars) >= 5:
+        tail = bars[-20:]
+        avg = sum(r[1] - r[2] for r in tail) / len(tail)
+    min_gap = MIN_IFVG_GAP_RANGE_FRAC * float(avg) if avg else 0.0
+    best = None
+    for i in range(1, len(bars) - 1):
+        a, c = bars[i - 1], bars[i + 1]
+        if long:                       # LONG: dusus FVG'si (bear) -> kapanis ustunde invert
+            z_lo, z_hi = c[1], a[2]
+        else:                          # SHORT: yukselis FVG'si (bull) -> kapanis altinda invert
+            z_lo, z_hi = a[1], c[2]
+        if z_hi <= z_lo or (min_gap > 0 and z_hi - z_lo < min_gap):
+            continue
+        for k in range(i + 2, len(bars)):
+            cl = bars[k][3]
+            if cl is None:
+                continue
+            if (cl > z_hi) if long else (cl < z_lo):
+                if best is None or bars[k][0] < best[2]:
+                    best = (z_lo, z_hi, bars[k][0], z_hi - z_lo)
+                break
+    return best
+
+
+def _rfvg_step(rec: dict, bar_ts, high: float, low: float, close: float | None) -> bool:
+    """Kapanan mumu isle: retest'i bekle, sonra tampona ekle ve invert olmus ilk bolgeyi ara."""
+    ents = rec.get("entries") or {}
+    state = ents.get(RFVG_STATE)
+    if not state or state.get("done"):
+        return False
+    cv = ents.get("cisd") or {}
+    iso = _cfvg_iso(bar_ts)
+    if iso is None:
+        return False
+    if state.get("rt") is None:
+        if cv.get("t") is not None:
+            state["rt"] = _cfvg_iso(cv["t"])
+        elif cv.get("o") not in TRACKING or _naive_utc(bar_ts) >= rec["levels_at"] + _horizon(rec):
+            _rfvg_close(state, ents, "no_retest")
+            return True
+        else:
+            return False
+    bars = state.setdefault("b", [])
+    if iso < state["rt"] or (bars and iso <= bars[-1][0]):
+        return False                   # retest oncesi / ayni-eski mum (telafi)
+    bars.append([iso, float(high), float(low), float(close) if close is not None else None])
+    found = _rfvg_scan(rec, state)
+    if found is not None:
+        z_lo, z_hi, inv_iso, gap = found
+        long = rec.get("direction") == "LONG"
+        until = _naive_utc(datetime.fromisoformat(inv_iso))
+        for name, e in (("rfvg_near", z_hi if long else z_lo),
+                        ("rfvg_mid", round((z_lo + z_hi) / 2, 8)),
+                        ("rfvg_far", z_lo if long else z_hi)):
+            v = _entry_variant(rec, e, None)
+            v["until"] = until         # inversion mumu dahil degil: bolge o mumun kapanisinda bilinir
+            v["det"] = inv_iso
+            v["rt"] = state["rt"]
+            if state.get("avg"):
+                v["gf"] = round(gap / float(state["avg"]), 4)
+            ents[name] = v
+        state["done"] = True
+        return True
+    if cv.get("o") in ("win", "loss", "ambiguous"):
+        _rfvg_close(state, ents, "cisd_" + cv["o"])   # CISD islemi bolge cikmadan sonuclandi
+    elif _naive_utc(bar_ts) >= rec["levels_at"] + _horizon(rec):
+        _rfvg_close(state, ents, "no_fvg")
     return True
 
 
@@ -577,13 +678,18 @@ def _entries_active(rec: dict, bar_ts=None) -> bool:
         bar_ts is None or bar_ts <= rec["levels_at"] + _horizon(rec)
     ):
         return True            # CISD kirilim FVG'si henuz olusmadi: mum tamponu dolmaya devam
+    rstate = ents.get(RFVG_STATE)
+    if rstate is not None and not rstate.get("done") and (
+        bar_ts is None or bar_ts <= rec["levels_at"] + _horizon(rec)
+    ):
+        return True            # CISD retest sonrasi IFVG bekleniyor
     return any(
         v.get("o") in TRACKING and (bar_ts is None or v.get("until") is None or bar_ts > v["until"])
-        for name, v in ents.items() if name != CFVG_STATE
+        for name, v in ents.items() if name not in _STATE_KEYS
     )
 
 
-def _apply_entries(rec: dict, bar_ts, high: float, low: float) -> None:
+def _apply_entries(rec: dict, bar_ts, high: float, low: float, close: float | None = None) -> None:
     """_apply_bar'in ayni kurallari, her ENTRY varyanti icin ayri (SL/TP ortak).
 
     Sorunun ta kendisi: "bu seviyeye limit emri koysaydik dolar miydi, sonra ne olurdu?"
@@ -594,7 +700,7 @@ def _apply_entries(rec: dict, bar_ts, high: float, low: float) -> None:
     hit_sl = low <= sl if long else high >= sl
     horizon = HORIZON.get(rec["strategy"], timedelta(hours=48))
     for name, v in list(rec["entries"].items()):
-        if name == CFVG_STATE:
+        if name in _STATE_KEYS:
             continue
         if v.get("o") not in TRACKING or (v.get("until") is not None and bar_ts <= v["until"]):
             continue
@@ -624,6 +730,8 @@ def _apply_entries(rec: dict, bar_ts, high: float, low: float) -> None:
     # CISD kirilim FVG'si en sonda: bu mumda olustuysa varyantlar EKLENIR ama ayni muma
     # uygulanmaz (yakin kenar tanim geregi bu mumun ucu; dolum degil formasyon olurdu).
     _cfvg_step(rec, bar_ts, high, low)
+    # CISD retest sonrasi IFVG: `cisd` varyanti bu mumda guncellendikten SONRA (retest mumu bu mum olabilir).
+    _rfvg_step(rec, bar_ts, high, low, close)
 
 
 def _variants_dump(data: dict | None, ts_fields: tuple) -> str | None:
@@ -799,9 +907,41 @@ def _apply_partial_arm(v: dict, long: bool, e: float, tp: float, hit_e: bool, hi
 # seviyeleri C2 kapanisinda yeniden dondurulur"). 1D/1H C2 acikken gercekten islem actigi icin
 # oradaki C2-acik seviye sinyalin kendisidir, dokunulmaz. Esitligi tmp/tmp_c2_refreeze_check.py denetler.
 C2_REFREEZE_STRATEGIES = frozenset({"4h"})
+# 03.10 (kullanici onayi): 1D/1W C2 acikken islem acabildigi icin 4H kurali dogrudan uygulanamaz; iki an:
+#   - setup SINYALE donerse seviyeler sinyalinkiyle yeniden dondurulur (C2-acik donmus ya da farkliysa) --
+#     XAUUSD 1D #151: Journal SL'i 0.95R yakindaydi, golge SL dedi, canli islem kazandi;
+#   - sinyal olmadan C2 kapanirsa 4H gibi C2 kapanisinda (purge ucu kesinlesti).
+# 25.09+ 1D setuplarinin %88'i seviyeyi C2 acikken donduruyordu (kosan SL -> sonuc SL yonune yanli).
+FINAL_REFREEZE_STRATEGIES = frozenset({"1d", "1w"})
 _RESET_KEYS = ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
                "entry_touched_at", "tracked_until", "shadow", "entries", "entry_cands",
-               "retrace", "prefill", "parts_at_levels", "features_at_levels", "first_bar")
+               "retrace", "prefill", "parts_at_levels", "features_at_levels", "first_bar", "parts_final")
+
+
+def analysis_parts(row) -> tuple[dict | None, dict]:
+    """Rapor betikleri icin: setup'in ANALIZDE kullanilacak skor kirilimi ve olcumleri -- (parts, features).
+
+    03.10: `parts_at_levels` seviyelerle birlikte ilk gorulmede donar. 4H'te C2 kapanisinda yeniden dondurulur (27.09),
+    yani dogru an. 1D/1W'de C2 acikken donar ve skor sonra yukselip sinyal o zaman acilir (GBPJPY 1D #136: donmus 0,
+    sinyal 7; 25.09+ dort canli 1D sinyalin hicbiri donmus skorla >= 7 degildi). Bu yuzden 1D/1W'de once
+    `parts_final` (sinyal / C2 kapanisi anindaki kopya), yoksa `score_parts` (son skor -- 03.10 oncesi satirlar,
+    yaklasik). `row`: sqlite3.Row ya da dict (Journal kolonlari). Sonuc izleme yine donmus seviyelerle -- skor ile
+    sonuc farkli anlara ait olabilir, 1D'de bu bilerek kabul edilen sinir.
+    """
+    def get(k):
+        try:
+            return row[k]
+        except (KeyError, IndexError):
+            return None
+
+    pal, fal = _parts_load(get("parts_at_levels")), _parts_load(get("features_at_levels"))
+    feats = _parts_load(get("features")) or {}
+    if get("strategy") == "4h":
+        return pal, (fal or feats)
+    pf = _parts_load(get("parts_final"))
+    if pf and isinstance(pf.get("parts"), dict):
+        return pf["parts"], {**feats, **(pf.get("features") or {})}
+    return (_parts_load(get("score_parts")) or pal), ({**(fal or {}), **feats})
 
 
 def _iso(ts) -> str | None:
@@ -816,7 +956,7 @@ def _levels_c2_open(rec: dict) -> bool:
     return (rec.get("parts_at_levels") or {}).get("c2_closed") == 0
 
 
-def _refreeze_at_c2_close(rec: dict, stage: str, now) -> None:
+def _refreeze_at_c2_close(rec: dict, stage: str, now, why: str = "c2_close") -> None:
     """Eski (C2 acik) seviyeleri `pre_c2`'ye yedekle, seviyeleri/takipleri/best_stage'i sifirla.
 
     Ardindan `note` ayni cagrida seviyeleri C2 kapanisindaki haliyle dondurur (seviye tasiyorsa;
@@ -825,8 +965,18 @@ def _refreeze_at_c2_close(rec: dict, stage: str, now) -> None:
     seviyelerle olculdu, motor onlari C2 kapaninca yeniden sorar.
     """
     outcome = rec.get("outcome")
+    if rec.get("pre_c2") is not None:
+        # 1D/1W: once C2 kapanisinda, sonra sinyalde yeniden donduruldu -- ilk yedek (C2-acik kol) korunur.
+        rec["pre_c2"]["signal_at"] = _iso(now)
+        for k in _RESET_KEYS:
+            rec[k] = None
+        rec.pop("_lv_c2_open", None)
+        rec.pop("_lv_stage", None)
+        rec["best_stage"], rec["best_stage_at"] = stage, now
+        return
     rec["pre_c2"] = {
         "at": _iso(now),
+        "why": why,          # 03.10: "c2_close" | "signal" (1D/1W sinyalde yeniden dondurma)
         "entry": rec.get("entry"), "sl": rec.get("sl"), "tp": rec.get("tp"), "rr": rec.get("rr"),
         "levels_at": _iso(rec.get("levels_at")),
         # Seviyeler hangi asamada dondu? "c2_open" = CISD onayli + butun kapilar gecmis (radar
@@ -847,6 +997,40 @@ def _refreeze_at_c2_close(rec: dict, stage: str, now) -> None:
     rec.pop("_lv_c2_open", None)
     rec.pop("_lv_stage", None)
     rec["best_stage"], rec["best_stage_at"] = stage, now
+
+
+def _differs(rec: dict, entry, sl, tp) -> bool:
+    """Donmus seviye verilenden farkli mi (goreli 1e-7 -- yuvarlama gurultusu degil, gercek fark)."""
+    for k, v in (("entry", entry), ("sl", sl), ("tp", tp)):
+        old = rec.get(k)
+        if old is None or abs(float(old) - float(v)) > 1e-7 * max(1.0, abs(float(v))):
+            return True
+    return False
+
+
+def levels_final(row) -> bool:
+    """Rapor betikleri icin: satirin seviyeleri KESIN mi (sonuc ona gore izlendi mi)?
+
+    4H: `parts_at_levels.c2_closed == 1` (27.09'dan beri C2 kapanisinda yeniden donduruluyor). 1D/1W (03.10): `pre_c2`
+    dolu (sinyalde ya da C2 kapanisinda yeniden donduruldu) ya da seviyeler C2 kapandiktan sonra dondu
+    (levels_at >= purge_time + bar). Digerleri C2 acikken donmus -- SL kosan purge ucu, sonuc SL yonune yanli.
+    """
+    def get(k):
+        try:
+            return row[k]
+        except (KeyError, IndexError):
+            return None
+
+    st = get("strategy")
+    if st == "4h":
+        return ((_parts_load(get("parts_at_levels")) or {}).get("c2_closed")) == 1
+    if get("pre_c2"):
+        return True
+    la, pt = _ts(get("levels_at")), _ts(get("purge_time"))
+    if la is None or pt is None:
+        return False
+    bar = {"1d": timedelta(days=1), "1w": timedelta(days=7), "1h": timedelta(hours=1)}.get(st, timedelta(hours=4))
+    return la >= pt + bar
 
 
 def _reset_for_new_c1(rec: dict) -> None:
@@ -1030,6 +1214,19 @@ def note(
         ):
             _refreeze_at_c2_close(rec, stage, now)
             changed = True
+        elif key[0] in FINAL_REFREEZE_STRATEGIES and rec.get("levels_at") is not None:
+            # 03.10: 1D/1W seviyeleri kesinlestir (bkz. FINAL_REFREEZE_STRATEGIES).
+            sig_now = stage == SIGNAL_STAGE and rec.get("outcome") != "signal"
+            if sig_now and entry is not None and sl is not None and tp is not None and (
+                (rec.get("pre_c2") is None and _levels_c2_open(rec))
+                or _differs(rec, entry, sl, tp)
+            ):
+                _refreeze_at_c2_close(rec, stage, now, why="signal")
+                changed = True
+            elif (c2_closed is True and rec.get("pre_c2") is None and _levels_c2_open(rec)
+                  and stage != SIGNAL_STAGE and rec.get("outcome") != "signal"):
+                _refreeze_at_c2_close(rec, stage, now, why="c2_close")
+                changed = True
         if market:
             rec["market_type"] = market
         if crt_bar_time is not None:
@@ -1074,6 +1271,22 @@ def note(
             # sonradan degisen skor (C2 kapanisi, SMT) ile sonucu eslestirmek yaniltici olur.
             rec["parts_at_levels"] = dict(rec.get("score_parts") or {}) or None
             rec["features_at_levels"] = dict(rec.get("features") or {}) or None
+            changed = True
+        # 03.10: skorun SINYAL (oncelikli) ya da C2 KAPANISI anindaki kopyasi -- `parts_at_levels` ilk gorulmede
+        # donuyor; 1D/1W'de o an genelde C2 acik ve skor sonra yukseliyor (GBPJPY 1D #136: donmus 0, sinyal 7;
+        # 25.09+ 4 canli 1D sinyalin hicbiri donmus skorla >= 7 degildi). Motor karari degismez, yalniz olcum.
+        snap = None
+        if stage == SIGNAL_STAGE:
+            if (rec.get("parts_final") or {}).get("why") != "signal":
+                snap = "signal"
+        elif c2_closed is True and rec.get("parts_final") is None and rec.get("levels_at") is not None:
+            snap = "c2_close"
+        if snap and rec.get("score_parts"):
+            rec["parts_final"] = {
+                "why": snap, "at": _iso(now), "stage": stage,
+                "parts": dict(rec["score_parts"]), "features": dict(rec.get("features") or {}),
+                "rr": float(rr) if rr is not None else rec.get("rr"),
+            }
             changed = True
         detail = _detail(score, rr, bias, weekly_bias, c2_closed)
         # Skor/RR tasimayan bir degerlendirme (or. seviyesi bir kez hesaplanan elenen aday)
@@ -1214,7 +1427,8 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float, close
                 _apply_shadow(rec, bar_ts, float(high), float(low))
                 touched = True
             if _entries_active(rec, bar_ts):
-                _apply_entries(rec, bar_ts, float(high), float(low))
+                _apply_entries(rec, bar_ts, float(high), float(low),
+                               float(close) if close is not None else None)
                 touched = True
             if _retrace_active(rec, bar_ts):
                 _apply_retrace(rec, bar_ts, float(high), float(low),
@@ -1241,6 +1455,9 @@ def _merge_row(rec: dict, row: SetupJournal) -> None:
     # yeniden dondurulmus taraf dogrudur -- DB'deki C2-acik seviye/best_stage onu ezmesin.
     row_pre = _parts_load(getattr(row, "pre_c2", None))
     if rec.get("pre_c2") is not None and row_pre is None:
+        stale_row = True
+    elif (rec.get("pre_c2") or {}).get("signal_at") and not (row_pre or {}).get("signal_at"):
+        # 03.10: 1D/1W once C2 kapanisinda, sonra sinyalde yeniden donduruldu -- DB'deki C2-kapanis seviyesi ezmesin.
         stale_row = True
     else:
         stale_row = False
@@ -1272,6 +1489,8 @@ def _merge_row(rec: dict, row: SetupJournal) -> None:
             continue
         if rec.get(k) is None:
             rec[k] = _parts_load(raw)
+    if rec.get("parts_final") is None and getattr(row, "parts_final", None):
+        rec["parts_final"] = _parts_load(row.parts_final)
     if rec.get("outcome") != "signal" and row.outcome == "signal":
         rec["outcome"] = "signal"
     # Silinmis satirda izleme geri acilir (`_resume_tracking`). Yukaridaki iki dal da DB'deki
@@ -1306,6 +1525,7 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                 rec["parts_at_levels"] = _parts_load(row.parts_at_levels)
                 rec["features_at_levels"] = _parts_load(row.features_at_levels)
                 rec["pre_c2"] = _parts_load(getattr(row, "pre_c2", None))
+                rec["parts_final"] = _parts_load(getattr(row, "parts_final", None))
                 _CACHE[key] = rec
             else:
                 _merge_row(rec, row)
@@ -1337,7 +1557,7 @@ async def ensure_loaded(session, store=None, symbol_resolver=None) -> None:
                         _apply_shadow(rec, bar_ts, float(bar["high"]), float(bar["low"]))
                         hit = True
                     if _entries_active(rec, bar_ts):
-                        _apply_entries(rec, bar_ts, float(bar["high"]), float(bar["low"]))
+                        _apply_entries(rec, bar_ts, float(bar["high"]), float(bar["low"]), float(bar["close"]))
                         hit = True
                     if _retrace_active(rec, bar_ts):
                         _apply_retrace(rec, bar_ts, float(bar["high"]), float(bar["low"]), float(bar["close"]))
@@ -1389,6 +1609,7 @@ async def flush(session) -> None:
             row.parts_at_levels = _parts_dump(rec.get("parts_at_levels"))
             row.features_at_levels = _json_dump(rec.get("features_at_levels"))
             row.pre_c2 = _json_dump(rec.get("pre_c2"))
+            row.parts_final = _json_dump(rec.get("parts_final"))
             rec["_flushed_seen"] = rec.get("last_seen")
         await session.commit()
         for key in keys:

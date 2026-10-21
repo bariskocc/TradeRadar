@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 # IZLEME.md'deki onceden yazilmis esik: bu kadar "kismi kar almis" islem birikmeden karar verilmez.
-MIN_TRADES = 25
+MIN_TRADES = 100   # 03.10 (kullanici): 25 -> 100, fark islem basina cok oynak
 
 
 def head(title: str) -> None:

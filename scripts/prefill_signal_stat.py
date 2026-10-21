@@ -31,7 +31,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 RUN = 0.50
-MIN_HI, MIN_LO = 10, 20
+MIN_HI, MIN_LO = 100, 100   # 03.10 (kullanici): 10 / 20 cok az
 
 
 def _outcome(r) -> str:

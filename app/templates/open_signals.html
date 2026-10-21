@@ -36,7 +36,12 @@ const openState = { tab: "{{ tab }}", tf: "{{ tf }}" };
 async function loadOpenSignals() {
     try {
         const res = await fetch(`/open-signals/table?tab=${encodeURIComponent(openState.tab)}&tf=${encodeURIComponent(openState.tf)}`);
-        if (!res.ok || res.redirected) return;
+        // Oturum dustuyse fetch login'e yonlenir: sessizce durmak yerine sayfayi yenile (login'e gider)
+        if (res.redirected) { location.reload(); return; }
+        if (!res.ok) {
+            document.getElementById('refresh-info').textContent = 'Refresh failed';
+            return;
+        }
         document.getElementById('open-board').innerHTML = await res.text();
         document.getElementById('refresh-info').textContent =
             'Updated ' + new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -56,5 +61,8 @@ document.addEventListener('click', (e) => {
 });
 
 setInterval(loadOpenSignals, 30000);
+// Telefon arka plandan/kilitten donunce zamanlayici 30 sn beklemesin, hemen yenile
+document.addEventListener('visibilitychange', () => { if (!document.hidden) loadOpenSignals(); });
+window.addEventListener('pageshow', (e) => { if (e.persisted) loadOpenSignals(); });
 </script>
 {% endblock %}

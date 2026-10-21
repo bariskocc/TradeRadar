@@ -36,6 +36,7 @@ from app.crt_engine import (
     check_cisd_confirmation,
     check_signal_invalidation,
     check_smt_divergence,
+    smt_level_features,
     compute_daily_bias,
     compute_ict_bias,
     htf_bias_with_age,
@@ -71,6 +72,7 @@ from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_partial, send_signal_result
 from app.telegram import send_potential_cancel, send_signal_potential, send_signal_waiting
+from app.telegram import send_signal_void
 from app.crt_engine import build_rejected_setup
 
 log = logging.getLogger(__name__)
@@ -528,6 +530,11 @@ async def _count_direction_cluster(
 # Fiyat guncellemelerinde her sembol icin gereksiz DB sorgusu yapmamak icin,
 # waiting_entry/active sinyali olan display sembolleri bellekte tutariz.
 _OPEN_SYMBOLS: set[tuple[str, str]] = set()
+# Bekleyen sinyalin girisi yeni seviyeye tasindigi an (02.10). Tasima o an kapanan mumla olur (ornegin
+# IFVG'yi invert eden mum); o mum ve oncesi yeni girisi dolduramaz -- emir o mum kapandiktan sonra kondu.
+# Kayit zamani kuralinin (`_bar_closed_before(bar, created_at)`) seviye degisimi icin karsiligi. Bellekte;
+# restart'ta bos baslar (bekleyen sinyal yeniden tespit edilir).
+_ENTRY_MOVED_AT: dict[int, datetime] = {}
 _CREATE_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 
 
@@ -1578,11 +1585,27 @@ def _quality_score_asof(
     strategy: str,
     asof: datetime,
     htf_bias: str,
+    corr_ltf: pd.DataFrame | None = None,
+    smt_window_hours: float = 4.0,
+    max_score: int = MAX_QUALITY_SCORE,
 ) -> int | None:
-    """Retest anindaki (asof) CRT kalite skoru. Setup yoksa None."""
+    """Retest anindaki (asof) CRT kalite skoru. Setup yoksa None.
+
+    04.10 (kullanici karari): `corr_ltf` verilirse SMT de asof'a kadarki veriyle sayilir
+    (+SMT_QUALITY_BONUS, tavan `max_score`) -- tespit kapisiyla ayni olcut. Eskiden SMT'siz
+    hesaplaniyordu: skoru 7'ye yalniz SMT ile cikan sinyal dolup VOID FILL ile siliniyordu
+    (SUI 4H 04.10).
+    """
     htf = _cut_asof(df_htf, asof)
     ltf = _cut_asof(df_ltf, asof)
     d1 = _cut_asof(df_1d, asof)
+    # asof aninda henuz kapanmamis gun dusulur (02.10). Yoksa asof'un gunu, gun
+    # bitince "kapanmis" sayilip bias'a asof SONRASI veriyle giriyordu: ONDO 4H
+    # 01.10 21:15 UTC dolumu 00:00 UTC'de BULLISH -> NEUTRAL (skor 7 -> 5), BE +
+    # kismi kar almis aktif islem VOID FILL ile silindi.
+    if d1 is not None and not d1.empty:
+        t = _asof_index(d1, asof)
+        d1 = d1[d1.index + pd.Timedelta(days=1) <= t]
     if htf is None or htf.empty:
         return None
     bias = htf_bias
@@ -1596,7 +1619,30 @@ def _quality_score_asof(
     )
     if setup is None:
         return None
-    return int(setup.bias_score or 0)
+    score = int(setup.bias_score or 0)
+    if corr_ltf is not None and not corr_ltf.empty and ltf is not None and not ltf.empty:
+        try:
+            if check_smt_divergence(
+                ltf, _cut_asof(corr_ltf, asof), setup.direction, setup.purge_time,
+                window_hours=smt_window_hours,
+            ):
+                score = min(max_score, score + SMT_QUALITY_BONUS)
+        except Exception:
+            log.debug("as-of SMT hata %s", symbol, exc_info=True)
+    return score
+
+
+async def _corr_ltf_for(
+    bingx_symbol: str, store: object | None, client: object | None, ltf: str,
+) -> pd.DataFrame | None:
+    """As-of skor icin korele LTF (yoksa None -> SMT sayilmaz, eski davranis)."""
+    corr = correlated_symbol(bingx_symbol)
+    if corr is None:
+        return None
+    try:
+        return await _load_corr_ltf(corr, store, client, ltf=ltf)
+    except Exception:
+        return None
 
 
 def _entry_between_stops(direction: str, entry: float, sl: float, tp: float) -> bool:
@@ -1740,7 +1786,27 @@ def _maybe_ifvg_entry(
     _show(zone)
     cisd.entry_price = cand_entry
     cisd.entry_model = model
+    cisd.zone_ready_time = _zone_ready_time(df_ltf, zone, cand if model == "bpr" else None)
     return cisd, cand_rr
+
+
+def _zone_ready_time(df_ltf: pd.DataFrame | None, zone, bpr=None) -> datetime | None:
+    """Bolgenin bilindigi son LTF mumunun acilisi (02.10).
+
+    IFVG inversion mumunun KAPANISIYLA bilinir; BPR ayrica ayni yonlu FVG'nin 3. mumunun
+    kapanisini bekler (`bpr.inverted_time` FVG'nin orta mumu). Dolum bu mumdan SONRA olabilir.
+    Vaka: ONDO 4H 01.10 -- IFVG 01:00 TSI mumuyla invert oldu, backfill dolumu 00:15 mumuna
+    (bolgenin ust kenarini kendi dibiyle olusturan mum) yazdi; bolge yokken limit emri dolmus sayildi.
+    """
+    t = _as_utc(getattr(zone, "inverted_time", None)) if zone is not None else None
+    if (bpr is not None and getattr(bpr, "inverted_time", None) is not None and df_ltf is not None
+            and isinstance(df_ltf.index, pd.DatetimeIndex)):
+        mid = pd.Timestamp(_as_utc(bpr.inverted_time))
+        idx = df_ltf.sort_index().index
+        later = idx[idx > _asof_index(df_ltf, mid)]
+        third = _as_utc(later[0].to_pydatetime()) if len(later) else _as_utc(mid.to_pydatetime())
+        t = max(t, third) if t is not None else third
+    return t
 
 
 def _ifvg_allowed(setup: CRTSetup, cfg: dict | None) -> bool:
@@ -1795,6 +1861,31 @@ def _level_features(entry: float, stop_loss: float, df_ltf: pd.DataFrame | None)
         pct = _stop_distance_pct(entry, stop_loss)
         if pct is not None:
             out["stop_pct"] = round(pct, 4)
+    except Exception:
+        return out
+    return out
+
+
+def _cisd_features(cisd, df_ltf: pd.DataFrame | None, direction: str | None) -> dict:
+    """CISD onay mumunun gucu (21.10, yalniz OLCUM -- "Skor tablosu yeni adaylar"): onay mumunun islem yonundeki
+    govdesi / onay ONCESI son N LTF mumunun ort. araligi. Negatif = ters renkli onay mumu. Kapi karari kullanmaz."""
+    out: dict = {}
+    try:
+        t = getattr(cisd, "cisd_time", None)
+        if t is None or df_ltf is None or df_ltf.empty:
+            return out
+        df = df_ltf.sort_index()
+        ts = pd.Timestamp(t)
+        if df.index.tz is not None and ts.tzinfo is None:
+            ts = ts.tz_localize(df.index.tz)
+        if ts not in df.index:
+            return out
+        bar = df.loc[ts]
+        avg = _avg_ltf_range(df[df.index < ts])
+        if not avg:
+            return out
+        body = float(bar["close"]) - float(bar["open"])
+        out["cisd_disp"] = round((body if direction == "LONG" else -body) / avg, 4)
     except Exception:
         return out
     return out
@@ -1969,7 +2060,8 @@ def _preview_trade_levels(
             "ifvg": ifvg,
             "bpr": bpr,
             "model": getattr(cisd, "entry_model", None) or "cisd",
-            "features": _level_features(cisd.entry_price, cisd.stop_loss, df_ltf),
+            "features": {**_level_features(cisd.entry_price, cisd.stop_loss, df_ltf),
+                         **_cisd_features(cisd, df_ltf, setup.direction)},
             "entries": _entry_candidates(setup, cisd, df_ltf) or None,  # bolgeler cisd'de
             "cisd_confirmed": bool(getattr(cisd, "confirmed", False)),
             "cisd_time": getattr(cisd, "cisd_time", None),
@@ -2236,6 +2328,17 @@ async def _apply_smt_bonus(
     corr_ltf = await _load_corr_ltf(corr, store, client, ltf=ltf)
     if corr_ltf is None or corr_ltf.empty:
         return False
+    if isinstance(setup.score_features, dict):
+        # 03.10 (kullanici): SMT'nin C1 ucuna bagli tanimlari -- YALNIZ OLCUM, puan bugunku tanimdan gelir.
+        # Cift turu: alt->BTC ayri degerlendirilir; FX/metal/endeks ciftleri ve BTC<->ETH ayri.
+        setup.score_features["smt_kind"] = (
+            "alt_btc" if corr == "BTC-USDT" and bingx_symbol != "ETH-USDT"
+            else "major" if bingx_symbol in ("BTC-USDT", "ETH-USDT") else "fx")
+        try:
+            setup.score_features.update(smt_level_features(
+                df_ltf, corr_ltf, setup.direction, setup.crt_bar_time, setup.purge_time, window_hours))
+        except Exception:
+            log.debug("smt_level_features hata %s", setup.symbol, exc_info=True)
     if not await _cpu(
         check_smt_divergence,
         df_ltf, corr_ltf, setup.direction, setup.purge_time,
@@ -2476,11 +2579,16 @@ async def _detect_and_create_waiting_locked(
         and open_sig.status == "active"
         and open_sig.entry_filled_time is not None
         and existing_pending is None
+        # Kismi kar alinmis islem silinmez (02.10, kullanici karari): Telegram'a
+        # aktif + kismi kar gitmis, kasaya R girmis bir islemi sessizce yok ediyordu.
+        and open_sig.partial_time is None
     ):
         q_fill = await _cpu(
             _quality_score_asof,
             df_htf, df_ltf, df_1d, setup.symbol, market, strategy,
             _as_utc(open_sig.entry_filled_time), filter_bias,
+            await _corr_ltf_for(bingx_symbol, store, client, ltf_key),
+            cfg["smt_window_hours"], int(cfg.get("max_score", MAX_QUALITY_SCORE)),
         )
         if q_fill is not None and q_fill < min_score:
             await record_event(
@@ -2501,10 +2609,19 @@ async def _detect_and_create_waiting_locked(
                 setup.symbol, setup.direction, open_sig.entry_filled_time, q_fill,
             )
             _mark_sticky(open_sig, "missed_quality")
+            void_reply_to = open_sig.tg_message_id
             await session.delete(open_sig)
             await session.commit()
             _OPEN_SYMBOLS.discard((setup.symbol, strategy))
             open_sig = None
+            # 04.10: aktif mesaji gittiyse ona IPTAL reply'i (eskiden sessiz silinirdi).
+            if void_reply_to and tg_configured():
+                try:
+                    await send_signal_void(
+                        setup.symbol, setup.direction, strategy, int(void_reply_to), q_fill, min_score,
+                    )
+                except Exception:
+                    log.warning("telegram void notice failed for %s", setup.symbol)
 
     exclude_id = existing_pending.id if existing_pending is not None else None
     if await _has_open_signal_for_symbol(
@@ -2725,9 +2842,14 @@ async def _detect_and_create_waiting_locked(
     # oldurmez. Ters sirada (once ihlal, sonra donus) setup gercekten gecersizdir.
     fill_ts = None
     if cisd.confirmed:
+        # Bolge girisinde arama bolgenin olustugu mumdan sonra baslar (02.10, `_zone_ready_time`).
+        fill_from = cisd.cisd_time
+        zr = getattr(cisd, "zone_ready_time", None)
+        if zr is not None and fill_from is not None and _as_utc(zr) > _as_utc(fill_from):
+            fill_from = zr
         fill_ts = _first_post_cisd_fill_ts(
             df_ltf, setup.direction, cisd.entry_price,
-            cisd.stop_loss, cisd.take_profit, cisd.cisd_time,
+            cisd.stop_loss, cisd.take_profit, fill_from,
         )
     breach_ts = _first_past_crt_mid_ts(
         df_ltf, setup.direction, cisd.entry_price,
@@ -2771,6 +2893,8 @@ async def _detect_and_create_waiting_locked(
                 _quality_score_asof,
                 df_htf, df_ltf, df_1d, setup.symbol, market, strategy,
                 fill_ts, filter_bias,
+                await _corr_ltf_for(bingx_symbol, store, client, ltf_key),
+                cfg["smt_window_hours"], int(cfg.get("max_score", MAX_QUALITY_SCORE)),
             )
             if q_at_fill is None or q_at_fill < min_score:
                 if existing_pending is not None:
@@ -2842,11 +2966,14 @@ async def _detect_and_create_waiting_locked(
         status = WAITING_STATUS if can_wait else PENDING_STATUS
     if existing_pending is not None:
         prev_status = existing_pending.status
+        prev_entry = existing_pending.entry_price
         _apply_signal_levels(
             existing_pending, setup, cisd, planned_rr, htf_bias,
             weekly_bias=weekly_bias, status=status,
         )
         signal = existing_pending
+        if status != "active" and prev_entry is not None and cisd.entry_price is not None                 and float(prev_entry) != float(cisd.entry_price):
+            _ENTRY_MOVED_AT[existing_pending.id] = datetime.now(timezone.utc)
         if (
             prev_status == WAITING_STATUS
             and status == PENDING_STATUS
@@ -3031,8 +3158,9 @@ async def manage_symbol_on_price(
             # sinyali doldurup trail/TP ile kapatiyordu (BTC 1D #26, SUI 4H #8).
             # Gecmis retest'in tek gecerli yolu olusturma anindaki pencereli
             # backfill'dir; burada yalnizca kayittan sonraki mumlar sayilir.
-            if sig.status in (PENDING_STATUS, WAITING_STATUS) and _bar_closed_before(
-                bar_ts, sig.created_at, mgmt_ltf,
+            if sig.status in (PENDING_STATUS, WAITING_STATUS) and (
+                _bar_closed_before(bar_ts, sig.created_at, mgmt_ltf)
+                or _bar_closed_before(bar_ts, _ENTRY_MOVED_AT.get(sig.id), mgmt_ltf)
             ):
                 continue
             if sig.status == PENDING_STATUS:

@@ -47,6 +47,15 @@
                             {% endfor %}
                         </select>
                     </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1" title="DETAIL sutunundaki skor; ozet de bu filtreye uyar">MIN SCORE</label>
+                        <select name="min_score" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
+                            <option value="" {% if min_score is none %}selected{% endif %}>Any</option>
+                            {% for n in range(0, 12) %}
+                            <option value="{{ n }}" {% if min_score == n %}selected{% endif %}>&ge; {{ n }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
                     <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">Filter</button>
                     <a href="/setup-journal" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Reset</a>
                 </div>
@@ -75,7 +84,7 @@
                         {% for s in summary %}
                         <tr class="hover:bg-dark-700/50 transition-colors">
                             <td class="px-3 py-2 text-sm text-white whitespace-nowrap">
-                                <a href="/setup-journal?tf={{ tf }}&stage={{ s.code }}&symbol={{ symbol }}&days={{ days }}" class="hover:text-accent-blue">{{ s.label }}</a>
+                                <a href="/setup-journal?tf={{ tf }}&stage={{ s.code }}&symbol={{ symbol }}&days={{ days }}{% if min_score is not none %}&min_score={{ min_score }}{% endif %}" class="hover:text-accent-blue">{{ s.label }}</a>
                             </td>
                             <td class="px-3 py-2 text-right text-sm text-gray-300">{{ s.n }}</td>
                             <td class="px-3 py-2 text-right text-sm text-gray-400">{{ s.oc.get('tp_before_entry', 0) }}</td>
@@ -116,7 +125,7 @@
                         {% for s in pre_summary %}
                         <tr class="hover:bg-dark-700/50 transition-colors">
                             <td class="px-3 py-2 text-sm text-gray-300 whitespace-nowrap">
-                                <a href="/setup-journal?tf={{ tf }}&stage={{ s.code }}&symbol={{ symbol }}&days={{ days }}" class="hover:text-accent-blue">{{ s.label }}</a>
+                                <a href="/setup-journal?tf={{ tf }}&stage={{ s.code }}&symbol={{ symbol }}&days={{ days }}{% if min_score is not none %}&min_score={{ min_score }}{% endif %}" class="hover:text-accent-blue">{{ s.label }}</a>
                             </td>
                             <td class="px-3 py-2 text-right text-sm text-gray-400">{{ s.n }}</td>
                             <td class="px-3 py-2 text-right text-sm text-gray-500">{{ s.oc.get('tp_before_entry', 0) }}</td>

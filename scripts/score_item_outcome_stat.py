@@ -24,11 +24,11 @@ yaniltir -- 01.10'da 4H -4 cezasi hamda "fark yok", ayni bantta belirgin kotu ci
 ⚠️ Kural degisiklikleri: key level kalemleri (pd_*) 29.09'da yeniden tanimlandi -> `--since 2026-09-29`;
 1D c2_closed/base 25.09 oncesi hep 1 / yanlis renk 1 -> `--since 2026-09-25`; reclaim 19.09 oncesi -2 (ayri satirda).
 
+En altta SMT segment bazinda: altcoin / BTC-ETH / FX (02.10), yalniz SMT alabilecek setuplar.
 Kullanim: python scripts/score_item_outcome_stat.py [--strategy 4h|1d|1w] [--since 2026-09-16] [--db traderadar.db]
 Karar kurali: IZLEME.md "Skor kalemleri — 4H" / "— 1D" / "— 1W".
 """
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -42,6 +42,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--db", default=str(REPO / "traderadar.db"))
 ap.add_argument("--strategy", choices=("4h", "1d", "1w"))
 ap.add_argument("--since", default="2026-09-16", help="kalem kirilimi 16.09'dan beri var")
+ap.add_argument("--all-levels", action="store_true", help="1D/1W: C2 acikken donmus (yanli) eski satirlar da")
 A = ap.parse_args()
 
 PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
@@ -59,92 +60,23 @@ LABELS = {
     "reclaim": "Zayif C2 geri donusu (ceza)",
     "smt": "SMT +2",
 }
-MIN_RESOLVED = 20
-BAND = 0.15
-
-
-def outcome_of(r):
-    o, rr = r["outcome"], None
-    if o == "signal" and r["shadow"]:
-        sh = (json.loads(r["shadow"]) or {}).get("1") or {}
-        o, rr = sh.get("o"), sh.get("rr")
-    if rr is None and r["entries"]:
-        rr = ((json.loads(r["entries"]) or {}).get("chosen") or {}).get("rr")
-    return o, (rr if rr is not None else (r["rr"] or 0.0))
-
-
-def stats(sub):
-    w = [x for x in sub if x["o"] == "win"]
-    l_ = [x for x in sub if x["o"] == "loss"]
-    res = len(w) + len(l_)
-    return dict(n=len(sub), res=res, w=len(w), l=len(l_),
-                tpb=sum(x["o"] == "tp_before_entry" for x in sub),
-                op=sum(x["o"] in ("open", "pending", "filled", "no_touch", "ambiguous", None) for x in sub),
-                wr=(len(w) / res * 100) if res else None,
-                rps=((sum(x["rr"] for x in w) - len(l_)) / res) if res else None)
+# 04.10: hesap `app/score_outcome.py`'de -- /skor-tablosu ayni fonksiyonlari kullanir.
+from app.score_outcome import (  # noqa: E402
+    MIN_FLIP, THR, collect, controlled_diff, flip_diff, stats, verdict,
+)
 
 
 def fmt(v, f):
     return format(v, f) if v is not None else "-"
 
 
-BANDS = ((0, 4), (5, 6), (7, 99))
-THR = {"4h": 7, "1d": 7, "1w": 6}
-MIN_FLIP = 10          # karar bandinda taraf basina cozulmus
-
-
-def flip_diff(sub, k, v, thr):
-    """KARAR BANDI: kalemin sinyali degistirdigi setuplar -- bu kalem HARIC skor (raw - deger) oyle ki:
-    odul (v > 0): pre in [thr - v, thr - 1]  (puan alirsa esigi gecer, almazsa gecemez)
-    ceza (v < 0): pre in [thr, thr - v - 1]  (ceza almazsa gecer, alirsa duser)
-    Ayni bantta deger = v olanlar ile 0 olanlar kiyaslanir. (got, base, fark) doner."""
-    lo, hi = (thr - v, thr - 1) if v > 0 else (thr, thr - v - 1)
-    band = [x for x in sub if lo <= (x["pal"].get("raw", 0) - (x["pal"].get(k) or 0)) <= hi]
-    g = stats([x for x in band if x["pal"].get(k) == v])
-    b = stats([x for x in band if x["pal"].get(k) == 0])
-    d = (g["rps"] - b["rps"]) if g["res"] and b["res"] else None
-    return g, b, d, (lo, hi)
-
-
-def controlled_diff(sub, k, v):
-    """Bu kalem HARIC skor bandinda (puan alan - almayan) R/setup farki, puan alanin cozulmusuyle agirlikli."""
-    num = w = 0.0
-    for lo, hi in BANDS:
-        band = [x for x in sub if lo <= (x["pal"].get("raw", 0) - (x["pal"].get(k) or 0)) <= hi]
-        g = stats([x for x in band if x["pal"].get(k) == v])
-        b = stats([x for x in band if x["pal"].get(k) == 0])
-        if g["res"] and b["res"]:
-            num += g["res"] * (g["rps"] - b["rps"])
-            w += g["res"]
-    return (num / w) if w else None
-
-
-def verdict(fg, fb, fd, penalty):
-    """Hukum YALNIZ karar bandindan: kalemin sinyali degistirdigi setuplar (taraf basina >= MIN_FLIP cozulmus)."""
-    if fg["res"] < MIN_FLIP or fb["res"] < MIN_FLIP or fd is None:
-        return f"veri az (karar bandi {fg['res']}/{fb['res']}, taraf basina {MIN_FLIP})"
-    good = -fd if penalty else fd
-    if good >= BAND:
-        return f"DOGRU CALISIYOR (karar bandi fark {fd:+.2f})"
-    if good <= -BAND:
-        return f"TERS (karar bandi fark {fd:+.2f})"
-    return f"fark yok (karar bandi fark {fd:+.2f})"
-
+SEGMENTS = (("alt", "Kripto altcoin (korele: BTC)"), ("major", "BTC / ETH"), ("fx", "FX / metal / endeks / petrol"))
 
 con = sqlite3.connect(f"file:{A.db}?mode=ro", uri=True)
 con.row_factory = sqlite3.Row
-rows = []
-for r in con.execute("select * from setup_journal where parts_at_levels is not null and entry is not null "
-                     "and first_seen >= ?", (A.since,)):
-    if r["best_stage"] in PRE or r["strategy"] not in ("4h", "1d", "1w"):
-        continue
-    if A.strategy and r["strategy"] != A.strategy:
-        continue
-    pal = json.loads(r["parts_at_levels"])
-    if r["strategy"] == "4h" and pal.get("c2_closed") != 1:
-        continue
-    o, rr = outcome_of(r)
-    rows.append(dict(s=r["strategy"], pal=pal, o=o, rr=rr or 0.0))
+rows = collect(con.execute("select * from setup_journal where parts_at_levels is not null and entry is not null "
+                           "and first_seen >= ?", (A.since,)),
+               strategy=A.strategy, all_levels=A.all_levels)
 
 print(f"since {A.since} · sonuc = secilen giris, duz TP/SL · R/setup cozulmus (TP/SL) basina · "
       f"'TP once' = giristen once TP (islem olmazdi)")
@@ -184,3 +116,26 @@ for strat in ("4h", "1d", "1w"):
                   f"{fg['w']} TP / {fg['l']} SL, R/setup {fmt(fg['rps'], '+.2f')} · almayan {fb['res']} cozulmus "
                   f"{fb['w']} TP / {fb['l']} SL, R/setup {fmt(fb['rps'], '+.2f')}")
             print(f"      bilgi: ham fark {fmt(raw_d, '+.2f')} · tum bantlar kontrollu {fmt(d, '+.2f')}")
+
+
+# SMT -- segment bazinda (02.10, kullanici: "altcoinlerde hatali calisiyor olabilir, FX'te dogru"). Kontrol grubu
+# yalniz SMT ALABILECEK setuplar (`smt_possible`; korele paritesi olmayan sembol 0 alir, kiyasi bozar). Hukum ayni
+# karar bandi kuraliyla (taraf basina >= MIN_FLIP cozulmus), segment kucuk oldugu icin ham fark da basilir.
+print(f"\n{'=' * 78}\nSMT +2 -- SEGMENT BAZINDA (yalniz smt_possible=1 setuplar)\n{'=' * 78}")
+for strat in ("4h", "1d", "1w"):
+    for seg, label in SEGMENTS:
+        sub = [x for x in rows if x["s"] == strat and x["seg"] == seg and x["smt_ok"] != 0]
+        if not sub:
+            continue
+        g_all, b_all = stats([x for x in sub if x["pal"].get("smt") == 2]), stats([x for x in sub if x["pal"].get("smt") == 0])
+        fg, fb, fd, (lo, hi) = flip_diff(sub, "smt", 2, THR[strat])
+        raw_d = (g_all["rps"] - b_all["rps"]) if g_all["res"] and b_all["res"] else None
+        print(f"\n  {strat.upper()} · {label} -- {len(sub)} setup")
+        print(f"   SMT'li    {g_all['n']:>5} setup, {g_all['res']:>4} cozulmus {g_all['w']:>3} TP / {g_all['l']:>3} SL, "
+              f"WR {fmt(g_all['wr'], '.1f')}, R/setup {fmt(g_all['rps'], '+.3f')}")
+        print(f"   SMT'siz   {b_all['n']:>5} setup, {b_all['res']:>4} cozulmus {b_all['w']:>3} TP / {b_all['l']:>3} SL, "
+              f"WR {fmt(b_all['wr'], '.1f')}, R/setup {fmt(b_all['rps'], '+.3f')}")
+        print(f"   HUKUM: {verdict(fg, fb, fd, False)}")
+        print(f"      karar bandi (SMT haric skor {lo}-{hi}): SMT'li {fg['res']} cozulmus {fg['w']} TP / {fg['l']} SL, "
+              f"R/setup {fmt(fg['rps'], '+.2f')} · SMT'siz {fb['res']} cozulmus {fb['w']} TP / {fb['l']} SL, "
+              f"R/setup {fmt(fb['rps'], '+.2f')} · ham fark {fmt(raw_d, '+.2f')}")

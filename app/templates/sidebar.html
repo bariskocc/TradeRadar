@@ -15,6 +15,9 @@
         body.tr-nav-open #tr-sidebar { transform: none; }
         body.tr-nav-open #tr-nav-backdrop { display: block; }
         main { padding-top: 2.75rem; }           /* sabit buton icerigin ustune binmesin */
+        /* Telefonda sayfanin kendisi kaysin, main'in ic kutusu degil: tarayicinin "asagi cek yenile"
+           hareketi yalniz belge kaydirmasinda calisiyor (01.10, sayfa yenilenmiyor sikayeti). */
+        html, body, body > .h-full { height: auto; }
         main table th, main table td { padding: .4rem .5rem !important; }   /* tablolar telefonda sikisik */
         /* Ilk sutun (cogu tabloda sembol) yatay kaydirmada sabit kalsin */
         main table th:first-child, main table td:first-child { position: sticky; left: 0; z-index: 1;

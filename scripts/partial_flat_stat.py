@@ -33,7 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from app.setup_journal import PRE_SETUP_STAGES  # noqa: E402
+from app.setup_journal import PRE_SETUP_STAGES, analysis_parts, levels_final  # noqa: E402
 
 # IZLEME.md'deki esik -- 28.09'dan beri TEMIZ dilimde (kullanici onayi): 4H'te seviyeleri C2 kapaliyken donmus,
 # 1D'de hepsi (1D C2 acikken de islem aciyor, oradaki seviye sinyalin kendisi). Eskiden ANA dilimde 100'du;
@@ -58,8 +58,7 @@ def flat_r(rr: float, o: str) -> float:
 def load(db: str, strategy: str, market: str) -> list[dict]:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    sql = ("SELECT strategy, market_type, symbol, direction, purge_time, best_stage, shadow, "
-           "parts_at_levels FROM setup_journal WHERE shadow IS NOT NULL")
+    sql = "SELECT * FROM setup_journal WHERE shadow IS NOT NULL"
     params: list = []
     if strategy:
         sql += " AND strategy = ?"
@@ -75,12 +74,15 @@ def load(db: str, strategy: str, market: str) -> list[dict]:
         k1 = (json.loads(r["shadow"]) or {}).get("1") or {}
         if not k1.get("pt"):
             continue                                    # 24.09 oncesi / dolumdan sonra izlemeye alinmis
-        pal = json.loads(r["parts_at_levels"]) if r["parts_at_levels"] else {}
+        pal = analysis_parts(r)[0] or {}      # 03.10: 1D'de skor sinyal / C2 kapanisi anindan
         out.append({
             "strategy": r["strategy"], "symbol": r["symbol"], "direction": r["direction"],
             "purge_time": r["purge_time"], "pre": r["best_stage"] in PRE_SETUP_STAGES,
             "signal": r["best_stage"] == "waiting",
-            "score": pal.get("score"), "c2": bool(pal.get("c2_closed")),
+            # 03.10: "temiz" = seviyesi kesin (`levels_final`): 4H C2 kapali donmus; 1D sinyalde / C2 kapanisinda
+            # yeniden dondurulmus ya da C2 kapandiktan sonra donmus. Eskiden 1D'nin HEPSI temiz sayiliyordu, oysa
+            # 25.09+ 1D satirlarinin %88'i C2 acikken (kosan SL) donuyordu.
+            "score": pal.get("score"), "c2": levels_final(r),
             "rr": k1.get("rr"), "o": k1.get("o"), "pa": k1.get("pa"), "cur": k1.get("cur"),
         })
     con.close()
@@ -177,9 +179,9 @@ def main() -> None:
 
     head("Kismi kar + BE vs duz TP/SL  (Setup Journal, k=1 golgesi)")
     print("  fark = duz - bugunku; POZITIF fark = kismi kar + BE'yi kapatmak kazandirirdi")
-    clean = [r for r in setup if r["strategy"] == "1d" or r["c2"]]
+    clean = [r for r in setup if r["c2"]]                   # seviyesi kesin (4H C2 kapali, 1D levels_final)
     main_t = tally(clean)
-    show("KARAR: temiz (4H C2 kapali + 1D)", main_t)
+    show("KARAR: temiz (seviyesi kesin: 4H C2 kapali + 1D levels_final)", main_t)
     show("  (bilgi) tum motor setup'lari", tally(setup))
     show("  temiz + RR >= 2", tally([r for r in clean if (r["rr"] or 0) >= 2]))
     show("  temiz + skor >= 7", tally([r for r in clean if (r["score"] or 0) >= 7]))

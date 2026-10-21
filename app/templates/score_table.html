@@ -74,17 +74,18 @@
                 <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-300">
                     Tavan <b class="text-white">{{ limits.cap }}</b> · SMT ile <b class="text-white">{{ limits.max }}</b>
                 </span>
+                {% if ranking %}
+                <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-300">
+                    Kalemler:
+                    <b class="text-accent-green">{{ ranking.counts.ok }} iyi</b> ·
+                    <b class="text-accent-yellow">{{ ranking.counts.warn }} işe yaramıyor</b> ·
+                    <b class="text-accent-red">{{ ranking.counts.bad }} zararlı</b> ·
+                    <span class="text-gray-500">{{ ranking.counts.na }} belirsiz</span>
+                </span>
+                {% endif %}
                 {% if issues %}
                 <span class="px-3 py-1.5 rounded-lg bg-accent-red/10 text-accent-red border border-accent-red/20">
-                    {{ issues }} satır hatalı
-                </span>
-                {% elif warns %}
-                <span class="px-3 py-1.5 rounded-lg bg-accent-yellow/10 text-accent-yellow border border-accent-yellow/20">
-                    Hatalı satır yok · {{ warns }} kalemin etkisi yok
-                </span>
-                {% else %}
-                <span class="px-3 py-1.5 rounded-lg bg-accent-green/10 text-accent-green border border-accent-green/20">
-                    Tüm satırlar doğru çalışıyor
+                    {{ issues }} satırda hesap hatası
                 </span>
                 {% endif %}
                 <span class="px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-gray-500">
@@ -103,13 +104,40 @@
             </div>
             {% endif %}
 
+            <!-- Toplam skor kazanani siraliyor mu (04.10) -->
+            {% if ranking %}
+            <div class="bg-dark-800 rounded-xl border border-dark-600 mb-6 px-4 py-3">
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Toplam skor kazananı sıralıyor mu?</h3>
+                    {{ health_badge(ranking) }}
+                </div>
+                <div class="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                    <div class="px-3 py-2 rounded-lg bg-dark-700/50">
+                        <span class="text-gray-400">Skor ≥ {{ ranking.thr }} (sinyal olur):</span>
+                        <span class="text-white font-mono">{{ ranking.hi_txt }}</span>
+                    </div>
+                    <div class="px-3 py-2 rounded-lg bg-dark-700/50">
+                        <span class="text-gray-400">Skor &lt; {{ ranking.thr }} (elenir):</span>
+                        <span class="text-white font-mono">{{ ranking.lo_txt }}</span>
+                    </div>
+                </div>
+                <p class="text-[11px] text-gray-500 mt-2">
+                    Setup Journal, {{ outcome_since.strftime('%d.%m') }}'den beri {{ ranking.n }} setup (kapıda elenenler dahil), düz TP/SL (kısmi kâr + BE yok).
+                    Skor işini yapıyorsa üst grup alttan belirgin iyi olmalı (fark ≥ 0.15 R/setup).
+                </p>
+            </div>
+            {% endif %}
+
             <!-- Skor kalemleri -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto mb-6">
                 <div class="px-4 py-3 border-b border-dark-600">
                     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Skor kalemleri</h3>
                     <p class="text-[11px] text-gray-500 mt-1">
                         Kalemler toplanır, toplam {{ limits.cap }}'da kesilir; SMT tavandan sonra eklenir.
-                        Durum son 7 günün setup'larından: ✓ doğru çalışıyor · ⚠ etkisi yok (hep ya da hiç puan veriyor, iyiyi kötüden ayırmıyor) · ✕ hatalı · ○ yetersiz veri.
+                        <b>KALEM İYİ Mİ?</b> asıl soru — kalemin sinyali değiştirdiği setuplarda (bu kalem olmasa eşiğin öbür tarafında kalanlar) TP/SL'ye göre:
+                        ✓ <b>iyi</b> (kazananı seçiyor) · ⚠ <b>işe yaramıyor</b> (puan veriyor, sonucu değiştirmiyor) · ✕ <b>zararlı</b> (puan verdiğimiz setuplar daha kötü) · ○ belirsiz (veri az; eğilim yazılır).
+                        <b>SONUÇ</b>: her puan değerini alan setupların TP / SL sayısı ve R/setup.
+                        <b>HESAP</b> (son 7 gün): yalnız puanın kurala uygun verilip verilmediği — kalemin iyi olduğu anlamına gelmez.
                     </p>
                 </div>
                 <table class="w-full">
@@ -118,8 +146,9 @@
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">KALEM</th>
                             <th class="px-3 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PUAN</th>
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">NE ZAMAN</th>
-                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">DURUM</th>
-                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ÖZET</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">HESAP</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">SONUÇ (TP / SL)</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">KALEM İYİ Mİ?</th>
                             <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ÖLÇÜM</th>
                         </tr>
                     </thead>
@@ -132,8 +161,24 @@
                                 {{ r.points }}
                             </td>
                             <td class="px-3 py-2 text-xs text-gray-400">{{ r.rule }}</td>
-                            <td class="px-3 py-2">{{ health_badge(r.health) }}</td>
-                            <td class="px-3 py-2 text-xs text-gray-300">{{ r.health.detail }}</td>
+                            <td class="px-3 py-2" title="{{ r.health.detail }}">{{ health_badge(r.health) }}</td>
+                            <td class="px-3 py-2 text-xs font-mono whitespace-nowrap">
+                                {% if r.out %}
+                                    {% for c in r.out.cells %}
+                                    <div><span class="text-gray-400">{{ '%+d' % c.v }}:</span>
+                                        <span class="text-accent-green">{{ c.w }}</span>/<span class="text-accent-red">{{ c.l }}</span>
+                                        <span class="{% if c.rps is not none and c.rps >= 0 %}text-accent-green{% else %}text-gray-400{% endif %}">{% if c.rps is not none %}{{ '%+.2f' % c.rps }}R{% endif %}</span>
+                                    </div>
+                                    {% endfor %}
+                                    {% if r.out.since %}<div class="text-[10px] text-gray-600">{{ r.out.since.strftime('%d.%m') }}'den beri</div>{% endif %}
+                                {% else %}<span class="text-gray-600">—</span>{% endif %}
+                            </td>
+                            <td class="px-3 py-2">
+                                {% if r.out %}
+                                    {{ health_badge(r.out) }}
+                                    <div class="text-[11px] text-gray-400 mt-0.5 min-w-[16rem]">{{ r.out.detail }}</div>
+                                {% else %}<span class="text-gray-600">—</span>{% endif %}
+                            </td>
                             <td class="px-3 py-2 text-xs text-gray-500">{{ r.note or '—' }}</td>
                         </tr>
                         {% endfor %}
@@ -141,8 +186,8 @@
                             <td class="px-3 py-2 text-sm text-white font-semibold whitespace-nowrap">Toplam</td>
                             <td class="px-3 py-2 text-sm text-right font-mono text-white whitespace-nowrap">≤ {{ limits.max }}</td>
                             <td class="px-3 py-2 text-xs text-gray-400">min({{ limits.max }}, min({{ limits.cap }}, ham − SMT) + SMT)</td>
-                            <td class="px-3 py-2">{{ health_badge(total) }}</td>
-                            <td class="px-3 py-2 text-xs text-gray-300" colspan="2">{{ total.detail }}</td>
+                            <td class="px-3 py-2" title="{{ total.detail }}">{{ health_badge(total) }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-300" colspan="3">{{ total.detail }}</td>
                         </tr>
                     </tbody>
                 </table>

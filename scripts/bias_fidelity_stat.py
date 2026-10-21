@@ -32,7 +32,7 @@ import bisect
 import json
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -96,12 +96,14 @@ def main() -> None:
 
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     karne = _load_karne(con)
+    # 03.10: 1W haric -- 1W'nin bias kalemi AYLIK bias (`compute_monthly_bias`); gunluk karneyle kiyaslamak
+    # 1W satirlarinin ~yarisini sahte "hata" gosteriyordu.
     sql = ("SELECT id, strategy, symbol, market_type, direction, last_seen, htf_bias, "
-           "levels_at, parts_at_levels FROM setup_journal WHERE htf_bias IS NOT NULL")
+           "levels_at, parts_at_levels FROM setup_journal WHERE htf_bias IS NOT NULL AND strategy != '1w'")
     params: list = []
     if args.days:
         sql += " AND last_seen >= ?"
-        params.append((datetime.utcnow() - timedelta(days=args.days)).strftime("%Y-%m-%d %H:%M:%S"))
+        params.append((datetime.now(timezone.utc) - timedelta(days=args.days)).strftime("%Y-%m-%d %H:%M:%S"))
 
     # (dilim, strateji) -> [ayni, farkli]
     live: dict[tuple[str, str], list[int]] = {}
@@ -176,6 +178,10 @@ def main() -> None:
         print("  Gun kapanir kapanmaz gunluk seri henuz yenilenmemis, bayat kapanisla hesaplaniyor.")
     else:
         print(f"  {tot_bad - edge_bad} hata gun donumu DISINDA -- veri tazeligiyle aciklanamaz, incele.")
+        print("  ! Once olcumu sorgula (03.10): 30.09'dan beri seviyesi donmus satira BASKA C1'in notu yalniz last_seen'i")
+        print("    gunceller, htf_bias eski degerlendirmeden kalir -> 'last_seen anindaki bias' degildir. Kesin kontrol:")
+        print("    log'daki 'SKIPPED (BIAS) ... daily=' satirlari motorun o saniyedeki bias'idir (03.10: gun icinde")
+        print("    11.6k satirda karneyle 0 fark). Gun donumu hatasi ayri: 15m/4h akis yarisi, 03.10'da duzeltildi.")
     print("  Karar kurali: IZLEME.md -> '1D bias hesap dogrulugu'.")
 
 
