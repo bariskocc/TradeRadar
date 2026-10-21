@@ -13,6 +13,7 @@ veri gelmeyebilir. Hafta sonu yalnizca kripto aktiftir.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -400,6 +401,11 @@ def _klines_to_df(rows: list[dict]) -> pd.DataFrame:
     return df
 
 
+# 21.10: hiz siniri kodlari -- yalniz bunlar bekleyip tekrar denenir (hatali istek degil, "yavasla").
+_RATE_LIMIT_CODES = (100410,)
+_RATE_LIMIT_BACKOFF_SEC = (3.0, 8.0)
+
+
 async def fetch_ohlcv(
     symbol: str,
     timeframe: str = "4h",
@@ -424,19 +430,32 @@ async def fetch_ohlcv(
     if owns_client:
         client = httpx.AsyncClient(base_url=BINGX_REST_BASE, timeout=15.0)
     try:
-        resp = await client.get(_KLINES_PATH, params=params)
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as e:
-        log.warning("BingX kline fetch failed for %s %s: %s", symbol, timeframe, e)
-        return _error_frame("http")
+        for attempt in range(len(_RATE_LIMIT_BACKOFF_SEC) + 1):
+            try:
+                resp = await client.get(_KLINES_PATH, params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+            except Exception as e:
+                log.warning("BingX kline fetch failed for %s %s: %s", symbol, timeframe, e)
+                return _error_frame("http")
+            code = payload.get("code")
+            if code in _RATE_LIMIT_CODES and attempt < len(_RATE_LIMIT_BACKOFF_SEC):
+                # 21.10: 100410 = hiz siniri ("请稍后重试", sonra tekrar dene). Restart bootstrap'inda 26 istek
+                # bununla bos dondu ve tekrar denenmedigi icin 9 sembol "veri yok" kaldi (1D bos kalan bias'i
+                # sessizce bozar). Bekleyip tekrar: IP kilidi (109429) 109415 hatalarini sayiyor, bunu degil.
+                wait = _RATE_LIMIT_BACKOFF_SEC[attempt]
+                log.info("BingX hiz siniri %s for %s %s -- %.0f sn sonra tekrar (%d)",
+                         code, symbol, timeframe, wait, attempt + 1)
+                await asyncio.sleep(wait)
+                continue
+            break
     finally:
         if owns_client:
             await client.aclose()
 
     if payload.get("code") not in (0, None):
-        log.warning("BingX kline error %s for %s: %s",
-                    payload.get("code"), symbol, payload.get("msg"))
+        log.warning("BingX kline error %s for %s %s: %s",
+                    payload.get("code"), symbol, timeframe, payload.get("msg"))
         return _error_frame(payload.get("code"))
 
     rows = payload.get("data") or []
