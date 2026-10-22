@@ -1588,8 +1588,12 @@ def _quality_score_asof(
     corr_ltf: pd.DataFrame | None = None,
     smt_window_hours: float = 4.0,
     max_score: int = MAX_QUALITY_SCORE,
+    prefer: tuple | None = None,
 ) -> int | None:
     """Retest anindaki (asof) CRT kalite skoru. Setup yoksa None.
+
+    `prefer` = (yon, purge_time): skoru olculen sinyalin CRT'si (22.10) -- asof aninda daha guncel bir
+    purge varsa aday secimi onu dondururdu ve baska setup'in skoru okunurdu.
 
     04.10 (kullanici karari): `corr_ltf` verilirse SMT de asof'a kadarki veriyle sayilir
     (+SMT_QUALITY_BONUS, tavan `max_score`) -- tespit kapisiyla ayni olcut. Eskiden SMT'siz
@@ -1615,7 +1619,7 @@ def _quality_score_asof(
         except Exception:
             pass
     setup = detect_crt_setup(
-        htf, symbol, market, bias, df_1d=d1, timeframe=strategy, df_ltf=ltf,
+        htf, symbol, market, bias, df_1d=d1, timeframe=strategy, df_ltf=ltf, prefer=prefer,
     )
     if setup is None:
         return None
@@ -2439,11 +2443,23 @@ async def _detect_and_create_waiting_locked(
 
     existing_pending = await _get_unfilled_setup_signal(session, display_sym, strategy)
 
+    # 22.10 (kullanici karari): aday seciminde en guncel kapanmis purge kazanir; ama kayitli bekleyen
+    # (waiting_entry) ya da aktif sinyalin CRT'si hala adaysa slotu korur -- yeni purge onu `crt_replaced`
+    # ile silmesin, VOID FILL de baska CRT'nin skoruna bakmasin.
+    keep_sig = existing_pending if (existing_pending is not None
+                                    and existing_pending.status == WAITING_STATUS) else None
+    if keep_sig is None:
+        _open = await _get_open_signal(session, display_sym, strategy)
+        if _open is not None and _open.status == "active":
+            keep_sig = _open
+    prefer = ((keep_sig.direction, keep_sig.purge_time)
+              if keep_sig is not None and keep_sig.purge_time is not None else None)
+
     rejected: list[dict] = []
     setup = await _cpu(
         detect_crt_setup,
         df_htf, display_sym, market, htf_bias,
-        df_1d=df_1d, timeframe=strategy, df_ltf=df_ltf, rejected=rejected,
+        df_1d=df_1d, timeframe=strategy, df_ltf=df_ltf, rejected=rejected, prefer=prefer,
     )
     rejected_notes = await _journal_rejected(
         rejected, setup, df_htf, df_1d, df_ltf, display_sym, market, htf_bias, weekly_bias, strategy, cfg,
@@ -2589,6 +2605,7 @@ async def _detect_and_create_waiting_locked(
             _as_utc(open_sig.entry_filled_time), filter_bias,
             await _corr_ltf_for(bingx_symbol, store, client, ltf_key),
             cfg["smt_window_hours"], int(cfg.get("max_score", MAX_QUALITY_SCORE)),
+            (open_sig.direction, open_sig.purge_time) if open_sig.purge_time is not None else None,
         )
         if q_fill is not None and q_fill < min_score:
             await record_event(
@@ -2895,6 +2912,7 @@ async def _detect_and_create_waiting_locked(
                 fill_ts, filter_bias,
                 await _corr_ltf_for(bingx_symbol, store, client, ltf_key),
                 cfg["smt_window_hours"], int(cfg.get("max_score", MAX_QUALITY_SCORE)),
+                (setup.direction, setup.purge_time),
             )
             if q_at_fill is None or q_at_fill < min_score:
                 if existing_pending is not None:

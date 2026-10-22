@@ -1,4 +1,15 @@
-"""Dar stop kapisi: eledigi setuplar stop olmadan TP'ye gidiyor mu?
+"""Dar stop kapisi: hangi stratejide dogru calisiyor? (22.10'dan beri varsayilan rapor)
+
+VARSAYILAN (22.10, kullanici istegi): strateji basina tek satir -- kapiya kadar butun kapilari gecmis
+setuplarda stop orani < 1.0 ("dar") ile >= 1.0 ("normal") ayni kurallarla, duz TP/SL. Altinda stop orani
+kovalari (strateji bazinda dinamik esik sorusu). Hesap `app/tight_stop_outcome` (/izleme sayaci ayni).
+Karar kurali IZLEME.md "Dar stop kapisi — strateji bazinda (4H / 1D / 1W)".
+
+  python scripts/tight_stop_stat.py            # 3 satirlik tablo + kovalar
+  python scripts/tight_stop_stat.py --eski     # 29.09'da kapanan eski rapor (yalniz elenenler)
+
+--- Eski rapor (29.09'da kapandi) ---
+Dar stop kapisi: eledigi setuplar stop olmadan TP'ye gidiyor mu?
 
 Kapi (`scanner`, `min_stop_range_mult` = 1.0): entry ile C2 ucu arasindaki mesafe son 20 LTF
 mumunun ortalama range'inin altindaysa setup acilmaz -- gerekce "stop o kadar dar ki gurultu
@@ -70,15 +81,61 @@ def r_of(row: sqlite3.Row) -> float:
     return -1.0 if row["outcome"] == LOSS else 0.0
 
 
+def _fmt(st: dict) -> str:
+    if not st["res"]:
+        return f"n {st['n']:4d}  cozulmus   0"
+    return (f"n {st['n']:4d}  TP {st['w']:3d} / SL {st['l']:3d}  WR %{100 * st['w'] / st['res']:4.1f}"
+            f"  R/setup {st['rps']:+.2f}")
+
+
+def tf_report(con: sqlite3.Connection) -> None:
+    from app import tight_stop_outcome as tso
+
+    rows = con.execute("SELECT * FROM setup_journal").fetchall()
+    print("=" * 100)
+    print(f"  DAR STOP KAPISI -- strateji bazinda (kapiya kadar gecmis setuplar, stop orani < {tso.GATE_MULT} = dar,"
+          " duz TP/SL)")
+    print("=" * 100)
+    print(f"  {'TF':3}  {'dar (kapi eler)':44}  {'normal (kapidan gecer)':44}  fark")
+    subs = {}
+    for strat in ("4h", "1d", "1w"):
+        sub = tso.collect(rows, strat)
+        subs[strat] = sub
+        sm = tso.summary(sub, strat)
+        diff = f"{sm['diff']:+.2f}" if sm["diff"] is not None else "  -"
+        print(f"  {strat.upper():3}  {_fmt(sm['dar']):44}  {_fmt(sm['normal']):44}  {diff}")
+    print()
+    for strat, sub in subs.items():
+        sm = tso.summary(sub, strat)
+        hv = " / ".join(f"{h:+.2f}" if h is not None else "-" for h in sm["halves"])
+        p = f"{sm['p']:.3f}" if sm["p"] is not None else "-"
+        print(f"  {strat.upper()}  ({tso.SINCE[strat]}+)  yarilar {hv} | p {p} | KARAR: {sm['verdict']}")
+    print("\n  Genis kume (bilgi, karar degil): skor/bias kapisi aranmaz, yalniz RR >= 2")
+    for strat in ("4h", "1d", "1w"):
+        bsub = tso.collect(rows, strat, broad=True)
+        bd, bn = tso.stats([x for x in bsub if x["dar"]]), tso.stats([x for x in bsub if not x["dar"]])
+        print(f"  {strat.upper():3}  {_fmt(bd):44}  {_fmt(bn):44}")
+    print("\n  Stop orani kovalari (dinamik esik sorusu; bilgi -- karar ust satirdan):")
+    for strat, sub in subs.items():
+        print(f"   {strat.upper()}")
+        for lab, st in tso.buckets(sub):
+            print(f"     {lab:11} {_fmt(st)}")
+    print("\nKarar kurali: IZLEME.md -> \"Dar stop kapisi - strateji bazinda (4H / 1D / 1W)\"")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=str(REPO / "traderadar.db"))
-    ap.add_argument("--strategy", default="", help="4h | 1d | 1h")
-    ap.add_argument("--market", default="", help="crypto | fx | metal | index | oil")
+    ap.add_argument("--strategy", default="", help="4h | 1d | 1h (yalniz --eski)")
+    ap.add_argument("--market", default="", help="crypto | fx | metal | index | oil (yalniz --eski)")
+    ap.add_argument("--eski", action="store_true", help="29.09'da kapanan eski rapor (yalniz elenenler)")
     args = ap.parse_args()
 
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
+    if not args.eski:
+        tf_report(con)
+        return
     rows, base = fetch(con, args.strategy, args.market)
 
     print("=" * 78)

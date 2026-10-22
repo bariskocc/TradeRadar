@@ -123,7 +123,7 @@
                 </div>
                 {% else %}
                 <div class="py-8 text-center">
-                    <p class="text-sm text-gray-400">No trades filled and closed in this period.</p>
+                    <p class="text-sm text-gray-400">No trades closed in this period.</p>
                     {% if s.prev_total_r is not none %}
                     <p class="text-xs text-gray-500 mt-1">Previous period: {{ m.rv(s.prev_total_r) }}</p>
                     {% endif %}

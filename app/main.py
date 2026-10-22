@@ -442,16 +442,17 @@ def _period_range(kind: str, offset: int, now: datetime | None = None) -> tuple[
 
 
 def _signal_period_at(s) -> datetime | None:
-    """Donem anahtari: islemin DOLDUGU an (29.09, kullanici karari; eskiden kapanis ani).
+    """Donem anahtari: islemin KAPANDIGI an (22.10, kullanici karari; 29.09-22.10 arasi dolum ani).
 
-    Pazar dolup Pazartesi kapanan islem gecen haftaya yazilir. Bedeli: donem bittikten sonra
-    kapanan islem o donemin rakamini sonradan degistirir. Dolum yoksa (eski kayit) kapanis.
+    Kar kapanista gerceklesir: gunlerce suren 1D/1W islemi dolum haftasina yazilinca o hafta
+    bittikten sonra degisiyor, gercekten kapandigi hafta ise eksik gorunuyordu (BTC 1D #164:
+    16.10 dolum, 19.10 kismi kar, 21.10 TP). Kismi kar da kapanis haftasina sayilir.
     """
-    return _utc(s.entry_filled_time) or _signal_closed_at(s)
+    return _signal_closed_at(s)
 
 
 def _period_summary(closed: list[tuple[datetime, Signal]], start: datetime, end: datetime) -> dict:
-    """Donemde DOLAN ve kapanmis islemlerin ozeti (acik islemler dahil degil)."""
+    """Donemde KAPANAN islemlerin ozeti (acik islemler dahil degil)."""
     rows = sorted((c for c in closed if start <= c[0] < end), key=lambda c: c[0])
     sigs = [s for _, s in rows]
     rs = [float(s.rr_value or 0.0) for s in sigs]
@@ -735,7 +736,7 @@ async def dashboard(
         select(Signal).where(Signal.status.notin_(["waiting_entry", "pending_cisd"]))
     )
     all_signals = result.scalars().all()
-    # (dolum ani, sinyal): donem ozeti ve kartlardaki "son 7 gun" isleme dolduguna gore bakar.
+    # (kapanis ani, sinyal): donem ozeti ve kartlardaki "son 7 gun" isleme kapandigina gore bakar.
     closed = [
         (pa, s) for s in all_signals
         if s.rr_value is not None and _signal_closed_at(s) is not None
@@ -1432,7 +1433,7 @@ async def analytics_page(
     for s in closed:
         market_count[s.market_type] = market_count.get(s.market_type, 0) + 1
 
-    # Haftalik R dolum haftasina gore (Dashboard donem ozetiyle ayni kural, 29.09); equity kapanisa gore.
+    # Haftalik R kapanis haftasina gore (Dashboard donem ozetiyle ayni kural, 22.10); equity de kapanisa gore.
     weekly_rr: dict[str, float] = {}
     for s in sorted(closed, key=lambda s: _signal_period_at(s) or _utc(s.created_at) or _epoch):
         ca = _signal_period_at(s) or _utc(s.created_at)

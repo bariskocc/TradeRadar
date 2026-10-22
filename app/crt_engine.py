@@ -2164,8 +2164,9 @@ def detect_crt_setup(
     timeframe: str = "4h",
     df_ltf: Optional[pd.DataFrame] = None,
     rejected: Optional[list] = None,
+    prefer: Optional[tuple] = None,
 ) -> Optional[CRTSetup]:
-    """4H verisinde CRT pattern tespit et; en buyuk gecerli C1'i sec.
+    """4H verisinde CRT pattern tespit et; en guncel purge'un (esitse en buyuk) C1'ini sec.
 
     Aday C1 mumlari: 4H/1D icin len-2 .. len-5, 1H icin len-2 .. len-8.
     Her aday icin purge/C2, C1'den SONRAKI CRT_PURGE_SEARCH (1-3) mum icinde
@@ -2200,8 +2201,14 @@ def detect_crt_setup(
     (`target_consumed`) ya da purge/SL tarafi sonradan alinmis (`stop_breached`) aday, canli
     bir aday varken secilmez (18.09; oncesinde yalniz `target_consumed` boyle davraniyordu ve
     stopu yenmis eski bir C1 genis range'i sayesinde slotu saatlerce tutabiliyordu). Yasayanlar
-    arasinda high-low mesafesi (range) EN BUYUK olan secilir (esitlikte hacimce buyuk, sonra
-    en guncel). Hicbiri canli degilse yine en iyi olu aday donulur: kapiyi scanner kapatir,
+    arasinda (22.10, kullanici karari) EN GUNCEL KAPANMIS purge'un adayi secilir; ayni C2'nin
+    adaylari arasinda high-low mesafesi (range) en buyuk olan (esitlikte hacim, sonra en guncel C1).
+    Kapanmamis C2'nin purge'u kapanmis bir adayin onune gecmez (mum kapaninca breakout olabilir).
+    Eskiden range guncellikten once geliyordu: XAUUSD 1W 12.10 SHORT purge'u, C1 araligi daha
+    genis olan 05.10 LONG adayi (skor 4) yuzunden C2 haftasi boyunca hic degerlendirilmedi.
+    `prefer` = (yon, purge_time): bekleyen/aktif sinyalin CRT'si; aday hala listede ve canliysa
+    her zaman secilir -- yeni purge kayitli sinyali `crt_replaced` ile silmesin (22.10).
+    Hicbiri canli degilse yine en iyi olu aday donulur: kapiyi scanner kapatir,
     radar/Journal nedeni gosterir.
     `rejected` (liste verilirse): setup'a cevrilmeden elenen adaylar -- yalniz KAPANMIS C2 ve
     C1 ucu gercekten delinmisse -- {reason, direction, crt_bar_time, purge_time, setup} olarak
@@ -2339,17 +2346,31 @@ def detect_crt_setup(
         candidates.append((live_range, crt_vol, live_i, _build_crt_setup(
             df_4h, live_i, purge_j, direction, symbol, market_type, htf_bias,
             df_1d=df_1d, timeframe=timeframe, df_ltf=df_ltf, range_atr=live_ratio,
-        )))
+        ), purge_j))
 
     if not candidates:
         return None
 
-    # Once hedefi duran aday (eski kural, degismedi); esitse stopu yenmemis olan; sonra en buyuk
-    # range, hacim, en guncel. Iki elemeyi AYRI kademede tutmak sart: tek kademeye katlamak,
-    # hedefi tuketilmis genis adayin stopu yenmis dar adayin onune gecmesine yol aciyordu.
+    # Once hedefi duran aday (eski kural, degismedi); esitse stopu yenmemis olan; sonra kayitli
+    # sinyalin CRT'si (`prefer`), en guncel KAPANMIS purge (22.10), en buyuk range, hacim, en guncel C1.
+    # Iki elemeyi AYRI kademede tutmak sart: tek kademeye katlamak, hedefi tuketilmis genis adayin
+    # stopu yenmis dar adayin onune gecmesine yol aciyordu.
+    pref_dir, pref_ts = (prefer or (None, None))
+    if pref_ts is not None:
+        pref_ts = pd.Timestamp(pref_ts)
+        pref_ts = pref_ts.tz_localize("UTC") if pref_ts.tzinfo is None else pref_ts.tz_convert("UTC")
+
+    def _is_pref(c) -> bool:
+        if pref_ts is None or c[3].direction != pref_dir or c[3].purge_time is None:
+            return False
+        pt = pd.Timestamp(c[3].purge_time)
+        pt = pt.tz_localize("UTC") if pt.tzinfo is None else pt.tz_convert("UTC")
+        return pt == pref_ts
+
     best = max(
         candidates,
         key=lambda c: (0 if c[3].target_consumed else 1, 0 if c[3].stop_breached else 1,
+                       1 if _is_pref(c) else 0, c[4] if c[3].c2_closed else -1,
                        c[0], c[1], c[2]),
     )
     if rejected is not None:
