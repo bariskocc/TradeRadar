@@ -29,6 +29,22 @@
             </span>
         </div>
         {% endif %}
+        {% if p.table %}
+        <div class="mt-2 overflow-x-auto">
+            <table class="w-full text-[11px]">
+                <thead><tr class="text-gray-500 border-b border-dark-700">
+                    {% for h in p.table[0] %}<th class="py-1 pr-3 text-left font-medium whitespace-nowrap">{{ h }}</th>{% endfor %}
+                </tr></thead>
+                <tbody>
+                    {% for r in p.table[1:] %}
+                    <tr class="border-b border-dark-700/50 {% if loop.last %}font-semibold text-white{% else %}text-gray-300{% endif %}">
+                        {% for c in r %}<td class="py-1 pr-3 whitespace-nowrap">{{ c }}</td>{% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
         {% if p.note %}<p class="mt-1.5 text-[11px] text-gray-500">{{ p.note }}</p>{% endif %}
     {% endif %}
 {% endmacro %}
@@ -89,7 +105,7 @@
                         <h3 class="text-sm font-semibold text-white">{{ row.item.title }}</h3>
                         <span class="shrink-0 text-[10px] text-gray-500">
                             <span class="{{ row.onem_class }}">{{ row.onem_label }}</span> ·
-                            {% if row.progress and row.progress.ready %}<span class="text-accent-yellow">tetik doldu</span>{% else %}%{{ (row.closeness * 100) | round | int }}{% endif %} ·
+                            {% if row.item.continuous %}<span class="text-accent-blue">sürekli</span>{% elif row.progress and row.progress.ready %}<span class="text-accent-yellow">tetik doldu</span>{% else %}%{{ (row.closeness * 100) | round | int }}{% endif %} ·
                             {{ row.item.started }} başladı
                         </span>
                     </div>

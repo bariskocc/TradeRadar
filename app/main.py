@@ -1246,6 +1246,35 @@ async def watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
     })
 
 
+@app.get("/eliminated", response_class=HTMLResponse)
+async def eliminated_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tf: str = Query(default="all"),
+    market: str = Query(default="all"),
+    days: int = Query(default=30),
+    gate: str = Query(default="all"),
+    result: str = Query(default="all"),
+    symbol: str = Query(default=""),
+    page: int = Query(default=1),
+):
+    """Sinyale donusmeyen setuplar (22.10): hangi filtre eledi, sonra TP mi SL mi. Veri app/eliminated.py."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from app.eliminated import build_eliminated
+    data = await build_eliminated(db, tf=tf, market=market, days=days, gate=gate, result=result,
+                                  symbol=symbol, page=page)
+    # Filtre linkleri: gate/result/page disindaki filtreleri tasir (tekrarlanan parametre Starlette'te ilkini alir).
+    base_qs = urlencode({"tf": data["tf"], "market": data["market"], "days": data["days"], "symbol": data["symbol"]})
+    return templates.TemplateResponse(request=request, name="eliminated.html", context={
+        "user": user,
+        "active_page": "eliminated",
+        "base_qs": base_qs,
+        **data,
+    })
+
+
 @app.get("/skor-tablosu", response_class=HTMLResponse)
 async def score_table_page(request: Request, db: AsyncSession = Depends(get_db)):
     """Uc stratejinin skor tablosu + hard filtreleri, satir satir canli saglik kontrolu

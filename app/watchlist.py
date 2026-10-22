@@ -84,6 +84,8 @@ class Progress:
     # Tetik "TARIH YA DA ORNEKLEM" (trigger metninde "ya da"): hangisi once dolarsa. 28.09'a kadar
     # yoktu; 7 madde "ya da" yazdigi halde VE ile degerlendiriliyor, ornegi dolan madde 03.10'u bekliyordu.
     either: bool = False
+    # 22.10: surekli izleme maddesinin tablosu (ör. strateji x TP/SL). Ilk satir baslik; cubuk/tetik degildir.
+    table: list[list[str]] = field(default_factory=list)
 
     @property
     def days_left(self) -> Optional[int]:
@@ -121,6 +123,7 @@ class WatchItem:
     onem: int = 2               # 0 cok yuksek / 1 yuksek / 2 orta / 3 dusuk -- ONEM_META, siralamanin BIRINCIL anahtari
     pinned: bool = False        # kullanici "en uste" dedi (29.09): kumesinin basinda, onemden bile once
     pin_order: int = 9          # 03.10: sabitlenenler arasi sira (kucuk once); bias en onemli konu -> 0
+    continuous: bool = False    # 22.10: tetigi yok, kapanmaz (sistem takibi) -- kartta "%" yerine "sürekli"
     progress_fn: Optional[Callable[[AsyncSession], Awaitable[Progress]]] = None
 
 
@@ -802,6 +805,53 @@ async def _p_bias_journal(db: AsyncSession) -> Progress:
                     note=f"{n} satır karnede")
 
 
+_NONSIGNAL_TFS = (("4h", "4H"), ("1d", "1D"), ("1w", "1W"), ("1h", "1H (kapalı)"))
+
+
+async def _p_nonsignal_outcomes(db: AsyncSession) -> Progress:
+    """22.10 (kullanici): aktif sinyale DONUSMEMIS butun Journal setuplari kac TP / kac SL. Surekli izleme, tetik yok.
+
+    "Donusmemis" = `outcome != 'signal'` (sinyale donusen satirin izlemesi durur; waiting'e ulasip dolmadan silinen
+    setup izlemeye geri doner ve burada sayilir). TP = `win` (giris doldu -> TP), SL = `loss` (giris doldu -> SL);
+    `tp_before_entry`, `ambiguous` (ayni mumda giris+TP), dolmadi/izleniyor ayri. Strateji x {CRT sayilan, motorun CRT
+    saymadigi aday (PRE_SETUP_STAGES)}. Seviyeler ilk goruldugu haliyle donmus Journal seviyeleri -- duz TP/SL,
+    kismi kar/BE yok; 03.10 oncesi 1D/1W satirlarinin cogu C2 acikken donmus (SL yonune yanli)."""
+    t = SetupJournal.__table__
+    pre = t.c.best_stage.in_(tuple(PRE_SETUP_STAGES))
+    week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+
+    def _n(cond):
+        return func.sum(case((cond, 1), else_=0))
+
+    rows = (await db.execute(select(
+        t.c.strategy, pre.label("pre"), func.count(),
+        _n(t.c.outcome == "win"), _n(t.c.outcome == "loss"),
+        _n(t.c.outcome == "tp_before_entry"), _n(t.c.outcome == "ambiguous"),
+        _n(and_(t.c.outcome == "win", t.c.first_seen >= week_ago)),
+        _n(and_(t.c.outcome == "loss", t.c.first_seen >= week_ago)),
+    ).where(or_(t.c.outcome.is_(None), t.c.outcome != "signal")).group_by(t.c.strategy, pre))).all()
+    agg = {(r[0], bool(r[1])): [int(x or 0) for x in r[2:]] for r in rows}
+
+    def _wr(tp: int, sl: int) -> str:
+        return f"%{tp / (tp + sl) * 100:.1f}" if tp + sl else "—"
+
+    table = [["Strateji", "Küme", "Setup", "TP", "SL", "Win %", "Girişsiz TP", "Aynı mum", "Son 7 gün TP / SL"]]
+    tot = [0] * 7
+    for code, label in _NONSIGNAL_TFS:
+        for is_pre, kume in ((False, "CRT sayılan"), (True, "CRT sayılmayan aday")):
+            v = agg.get((code, is_pre))
+            if not v or (code == "1h" and not v[0]):
+                continue
+            n, tp, sl, tbe, amb, tp7, sl7 = v
+            tot = [a + b for a, b in zip(tot, v)]
+            table.append([label, kume, str(n), str(tp), str(sl), _wr(tp, sl), str(tbe), str(amb), f"{tp7} / {sl7}"])
+    n, tp, sl, tbe, amb, tp7, sl7 = tot
+    table.append(["Toplam", "", str(n), str(tp), str(sl), _wr(tp, sl), str(tbe), str(amb), f"{tp7} / {sl7}"])
+    return Progress(table=table,
+                    note="TP / SL = giriş doldu, sonra TP / SL (düz, kısmi kâr yok) · Girişsiz TP = fiyat girişe "
+                         "dönmeden TP'ye gitti · Aynı mum = giriş ve TP aynı mumda · son 7 gün = ilk görülme")
+
+
 async def _p_bias_fidelity(db: AsyncSession) -> Progress:
     """03.10: surekli izleme (kullanici: "bias cok onemli, hata varsa duzeltilmeli"). Calisan surecin baslangicindan
     (03.10 15m/4h yaris duzeltmesi bu surecte canli) beri gun donumundeki (00:00-00:35 UTC) 4H kripto satirlari: motorun
@@ -911,6 +961,29 @@ async def _p_tight_stop_gate(db: AsyncSession) -> Progress:
         w = sum(1 for o, _ in got if o == "win")
         note += f" · {w} TP · R/işlem {total / len(got):+.2f}"
     return Progress(bars=[Bar("çözülmüş elenen setup", len(got), 20)], note=note)
+
+
+def _p_tight_stop_tf(strategy: str):
+    """22.10 (kullanici): dar stop kapisi strateji bazinda. Kume ve karar `app/tight_stop_outcome` (rapor
+    `scripts/tight_stop_stat.py` ile ayni fonksiyonlar): kapiya kadar gecmis setuplarda stop orani < 1.0 = dar.
+    Cubuk: dar grupta cozulmus setup (tetik 4H 30 / 1D 20 / 1W 10)."""
+    async def _fn(db: AsyncSession) -> Progress:
+        from app import tight_stop_outcome as tso
+        t = SetupJournal.__table__
+        res = await db.execute(select(t).where(t.c.strategy == strategy, t.c.entry.is_not(None),
+                                               t.c.first_seen >= datetime.fromisoformat(tso.SINCE[strategy])))
+        sub = tso.collect(res.mappings().all(), strategy)
+        sm = tso.summary(sub, strategy)
+        d, n = sm["dar"], sm["normal"]
+
+        def _r(st):
+            return f"{st['w']} TP / {st['l']} SL, {st['rps']:+.2f} R/setup" if st["res"] else "çözülmüş yok"
+        note = f"dar: {_r(d)} · normal: {_r(n)}"
+        if sm["diff"] is not None:
+            note += f" · fark {sm['diff']:+.2f}"
+        return Progress(bars=[Bar("dar stoplu çözülmüş setup", d["res"], sm["need"])],
+                        note=note + f" — rapor: python scripts/tight_stop_stat.py")
+    return _fn
 
 
 async def _p_missed_quality(db: AsyncSession) -> Progress:
@@ -1776,6 +1849,14 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_stale_days,
     ),
     WatchItem(
+        key="nonsignal_outcomes", status="open", started="22.10", onem=3, pinned=True, pin_order=-1, continuous=True,
+        title="Sinyale dönüşmeyen setuplar — kaçı TP, kaçı SL?",
+        trigger="SÜREKLİ İZLEME (22.10, kullanıcı): tetik yok, madde kapanmaz — sistemin elediği setupların sonrasını takip",
+        measure="/eliminated (filtre bazında TP/SL + bütün setuplar)",
+        md="Sinyale dönüşmeyen setuplar — kaçı TP, kaçı SL? (başladı 22.10.2026, sürekli izleme)",
+        progress_fn=_p_nonsignal_outcomes,
+    ),
+    WatchItem(
         key="bias_fidelity", status="open", started="24.09", onem=0, pinned=True, pin_order=0,  # 03.10: bias en onemli konu (kullanici)
         title="1D bias hesap doğruluğu — motor doğru günün bias'ını mı kullanıyor?",
         trigger="SÜREKLİ İZLEME (03.10, kullanıcı): restart sonrası gün dönümünde 50 4H değerlendirmesi → yanlış bias 0 "
@@ -1851,8 +1932,33 @@ ITEMS: list[WatchItem] = [
         md="Dar stop kapısı — elenen setup TP'ye gidiyor mu? (18.09.2026 — kapandı 29.09)",
         result="(29.09) Kapı KALIYOR: elenen 10 çözülmüş setupun 10'u kayıp (−10R), taban WR %22.4. Eşik (20) "
                "dolmadan kapandı — dar stoplu bölge artık atlandığı için elenen akışı azalıyor. Denetim 01.10: 12/12 SL, "
-               "aç-kapa sızıntısı kalıcı silmeyle kapandı.",
+               "aç-kapa sızıntısı kalıcı silmeyle kapandı. "
+               "22.10: strateji bazında yeniden açıldı → \"Dar stop kapısı — 4H / 1D / 1W\".",
         progress_fn=_p_tight_stop_gate,
+    ),
+    WatchItem(
+        key="tight_stop_4h", status="open", started="22.10", onem=1,
+        title="Dar stop kapısı — 4H",
+        trigger="dar grupta çözülmüş 30 (kapıya kadar bütün kapıları geçmiş setuplar, stop oranı < 1.0 = dar, düz TP/SL): dar − normal ≤ −0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → KAPI DOĞRU, kalır; dar normalden 0.15'ten az kötü VE dar R/setup > 0 → kapı kazanç kesiyor → tek replay → kullanıcıya (kaldır / eşiği düşür); arada 60'ye uzat. Dinamik eşik: stop oranı kovaları (bilgi)",
+        measure="python scripts/tight_stop_stat.py",
+        md="Dar stop kapısı — strateji bazında (4H / 1D / 1W)",
+        progress_fn=_p_tight_stop_tf("4h"),
+    ),
+    WatchItem(
+        key="tight_stop_1d", status="open", started="22.10", onem=1,
+        title="Dar stop kapısı — 1D",
+        trigger="dar grupta çözülmüş 20 (kapıya kadar bütün kapıları geçmiş setuplar, stop oranı < 1.0 = dar, düz TP/SL): dar − normal ≤ −0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → KAPI DOĞRU, kalır; dar normalden 0.15'ten az kötü VE dar R/setup > 0 → kapı kazanç kesiyor → tek replay → kullanıcıya (kaldır / eşiği düşür); arada 40'ye uzat. Dinamik eşik: stop oranı kovaları (bilgi)",
+        measure="python scripts/tight_stop_stat.py",
+        md="Dar stop kapısı — strateji bazında (4H / 1D / 1W)",
+        progress_fn=_p_tight_stop_tf("1d"),
+    ),
+    WatchItem(
+        key="tight_stop_1w", status="open", started="22.10", onem=1,
+        title="Dar stop kapısı — 1W",
+        trigger="dar grupta çözülmüş 10 (kapıya kadar bütün kapıları geçmiş setuplar, stop oranı < 1.0 = dar, düz TP/SL): dar − normal ≤ −0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → KAPI DOĞRU, kalır; dar normalden 0.15'ten az kötü VE dar R/setup > 0 → kapı kazanç kesiyor → tek replay → kullanıcıya (kaldır / eşiği düşür); arada 20'ye uzat. Dinamik eşik: stop oranı kovaları (bilgi) (1W'de kapıyı geçen setup ayda birkaç tane — rapordaki geniş küme erken işaret verir)",
+        measure="python scripts/tight_stop_stat.py",
+        md="Dar stop kapısı — strateji bazında (4H / 1D / 1W)",
+        progress_fn=_p_tight_stop_tf("1w"),
     ),
     WatchItem(
         key="missed_quality", status="open", started="21.09", onem=0,
