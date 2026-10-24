@@ -62,6 +62,16 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("pre_c2", "ALTER TABLE setup_journal ADD COLUMN pre_c2 VARCHAR"),
         ("parts_final", "ALTER TABLE setup_journal ADD COLUMN parts_final VARCHAR"),
     ],
+    # 24.10: /potential-signals -- bildirim anindaki seviyeler + iptal nedeni.
+    "potential_notices": [
+        ("score", "ALTER TABLE potential_notices ADD COLUMN score INTEGER"),
+        ("entry", "ALTER TABLE potential_notices ADD COLUMN entry FLOAT"),
+        ("sl", "ALTER TABLE potential_notices ADD COLUMN sl FLOAT"),
+        ("tp", "ALTER TABLE potential_notices ADD COLUMN tp FLOAT"),
+        ("rr", "ALTER TABLE potential_notices ADD COLUMN rr FLOAT"),
+        ("model", "ALTER TABLE potential_notices ADD COLUMN model VARCHAR"),
+        ("cancel_reason", "ALTER TABLE potential_notices ADD COLUMN cancel_reason VARCHAR"),
+    ],
 }
 
 

@@ -38,7 +38,7 @@ ap.add_argument("--since", default="2026-09-19")
 ap.add_argument("--all-levels", action="store_true", help="1D/1W: C2 acikken donmus (yanli) eski satirlar da")
 A = ap.parse_args()
 
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected"}
 PEN = -abs(CE.C2_RECLAIM_PENALTY)
 CAP = {"4h": 9, "1d": 9, "1w": 8}
 MIN_SCORE = {"4h": 7, "1d": 7, "1w": 6}

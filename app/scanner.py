@@ -82,7 +82,20 @@ CRYPTO_MIN_RR_RATIO = 2.0   # Kripto: 1:2 alti acilmaz
 FX_MIN_RR_RATIO = 2.0       # FX: 1:2
 MIN_QUALITY_SCORE = 7  # 7 alti sinyal acilmaz (SMT bonusu sonrasi skor)
 SMT_QUALITY_BONUS = 2  # Korele parite ile 15M SMT divergence varsa +2
+# 24.10 (kullanici karari): 4H ALTCOIN SMT bonusu +2 -> +1. Journal (29.09+, zamaninda gorulen, RR >= 2, TP once mi
+# SL once mi): SMT'li setup ayni skor bandinda -0.63 R/setup kotu, iki yarida da (-0.97 / -0.17), altcoin -0.60.
+# FX / BTC-ETH ve 1D/1W'de +2 kalir. Replay yapilmadi (kullanici karari). IZLEME "SMT +2 — segment bazinda".
+SMT_ALT_4H_BONUS = 1
+_SMT_MAJORS = frozenset({"BTCUSDT", "ETHUSDT"})
 MAX_QUALITY_SCORE = 11  # baz tavan 9 + SMT 2
+
+
+def smt_bonus_for(strategy: str | None, symbol: str | None, market: str | None) -> int:
+    """SMT bulunursa eklenecek puan: 4H altcoin +1, digerleri +2 (24.10). Sembol ham ya da gorunum adi."""
+    sym = (symbol or "").upper().replace("-", "").replace(".P", "")
+    if (strategy or "4h") == "4h" and (market or "").lower() == "crypto" and sym not in _SMT_MAJORS:
+        return SMT_ALT_4H_BONUS
+    return SMT_QUALITY_BONUS
 # 1W-4H (28.09): 1D bias (+2) ve 1W uyumu (+1) yerine aylik bias (+2); tavan 8, esik 6.
 MIN_QUALITY_SCORE_1W = 6
 MAX_QUALITY_SCORE_1W = 10  # baz tavan 8 + SMT 2
@@ -747,6 +760,14 @@ _POTENTIAL_OUTBOX: list[dict] = []
 # ACTIVE / IPTAL ona reply olur. True yapmak eski davranisi geri getirir (kod duruyor).
 POTENTIAL_NOTICES_ENABLED = False
 
+# 24.10 (kullanici istegi): kapida elenen setup bildirimi ("POTANSIYEL ... ELENDI") 1D + 1W icin yeniden
+# acik -- kullanici dolmadan TP'ye giden 1D/1W setuplardan habersiz kaliyordu. Skor tabani 4 (kullanici
+# karari; Journal 25.09-24.10, TP once mi SL once mi: skor >= 4 1D %50 / 1W %50, 0-2 %18-26). 1D POTANSIYEL
+# zinciri (tum kapilardan gecen setup) kapali kalir, WAITING onu karsiliyor. Motor karari degismez.
+GATED_NOTICES_ENABLED = True
+GATED_NOTICE_STRATEGIES = frozenset({STRATEGY_1D, STRATEGY_1W})
+GATED_MIN_SCORE = 4
+
 
 def _note_deleted(s: Signal, reason: str) -> None:
     """Setup Journal silme kaydi + potansiyel bildirimi gittiyse iptal reply'i kuyruga.
@@ -780,6 +801,7 @@ async def _flush_potential_outbox(session: AsyncSession | None = None) -> None:
         try:
             await send_potential_cancel(
                 it["symbol"], it["direction"], it["reason"], it["reply_to"], it.get("strategy"),
+                gated=bool(it.get("gated")),
             )
             sent.append(int(it["reply_to"]))
         except Exception:
@@ -929,14 +951,16 @@ async def _send_potential(
         return
     if notice is not None and (notice.state == state or notice.cancelled):
         return
-    if not tg_configured():
-        return
-    purge = _as_utc(sig.purge_time)
-    c2_close_at = purge + timedelta(hours=float(cfg["c2_hours"])) if purge else None
-    reply_to = notice.tg_message_id if notice is not None else getattr(sig, "tg_potential_id", None)
-    mid = await send_signal_potential(sig, c2_close_at=c2_close_at, reply_to=reply_to, gate=gate)
-    if not mid:
-        return
+    # 24.10: Telegram kapaliyken de satir yazilir (/potential-signals sayfasi bildirim kaydini gosterir).
+    # Telegram acik ama gonderim basarisizsa eskisi gibi yazilmaz -- sonraki degerlendirmede tekrar denenir.
+    mid = None
+    if tg_configured():
+        purge = _as_utc(sig.purge_time)
+        c2_close_at = purge + timedelta(hours=float(cfg["c2_hours"])) if purge else None
+        reply_to = notice.tg_message_id if notice is not None else getattr(sig, "tg_potential_id", None)
+        mid = await send_signal_potential(sig, c2_close_at=c2_close_at, reply_to=reply_to, gate=gate)
+        if not mid:
+            return
     if notice is None:
         notice = PotentialNotice(
             strategy=strategy, symbol=sig.symbol, direction=sig.direction,
@@ -946,18 +970,24 @@ async def _send_potential(
         session.add(notice)
     # Zincirin SON mesaji saklanir: sonraki reply (C2 KAPALI / IPTAL / ACTIVE) ona gider
     # (15.09: ACTIVE eski C2 ACIK mesajina gidiyordu).
-    notice.tg_message_id = mid
+    if mid:
+        notice.tg_message_id = mid
     notice.state = state
     notice.gate = gate
+    # Sayfa icin bildirim anindaki seviyeler (her durum degisiminde -- C2 kapaninca seviyeler kesinlesir).
+    notice.score = int(sig.bias_score or 0)
+    notice.entry, notice.sl, notice.tp = sig.entry_price, sig.stop_loss, sig.take_profit
+    notice.rr = sig.planned_rr
+    notice.model = getattr(sig, "entry_model", None)
     notice.updated_at = datetime.now(timezone.utc)
-    if persist_on_signal:
+    if persist_on_signal and mid:
         # IPTAL ve ACTIVE mesajlari Signal.tg_potential_id'yi okuyor; aynada tut.
         sig.tg_potential_id = mid
         sig.tg_potential_state = state
     await session.commit()
     log.info(
-        "POTENTIAL 1D%s: %s %s C2 %s Entry:%s SL:%s TP:%s (mid=%s)",
-        f" GATED ({gate})" if gate else "",
+        "POTENTIAL %s%s: %s %s C2 %s Entry:%s SL:%s TP:%s (mid=%s)",
+        strategy.upper(), f" GATED ({gate})" if gate else "",
         sig.symbol, sig.direction, "KAPALI" if sig.c2_closed else "ACIK",
         sig.entry_price, sig.stop_loss, sig.take_profit, mid,
     )
@@ -1005,17 +1035,19 @@ async def _notify_gated_potential(
     htf_bias: str | None,
     weekly_bias: str | None,
 ) -> None:
-    """Kapida elenen 1D setup icin bilgi bildirimi (18.09 kullanici istegi).
+    """Kapida elenen 1D / 1W setup icin bilgi bildirimi (18.09 kullanici istegi; 24.10 1W + skor tabani).
 
     Motor bu setup'i ALMAZ; mesaj yalnizca manuel karar icin gider. Sartlar: CRT yapisi tam
     ve CISD/MSS onayli olsun (motorun CRT saymadigi adaylar — c2_breakout, c2_wrong_color,
     sweep_small, not_selected — buraya hic gelmez, onlar `setup is None` dalinda kaliyor),
-    kapi `_GATED_NOTIFY_GATES` icinde olsun ve RR tabani gecsin.
+    kapi `_GATED_NOTIFY_GATES` icinde olsun, skor `GATED_MIN_SCORE`'u ve RR tabani gecsin.
     """
-    if strategy != STRATEGY_1D or not POTENTIAL_NOTICES_ENABLED:
+    if not GATED_NOTICES_ENABLED or strategy not in GATED_NOTICE_STRATEGIES:
         return
     try:
         if not preview.get("cisd_confirmed"):
+            return
+        if int(setup.bias_score or 0) < GATED_MIN_SCORE:
             return
         if preview.get("entry") is None or preview.get("sl") is None or preview.get("tp") is None:
             return
@@ -1060,7 +1092,7 @@ async def _cancel_gated_notices(
     uretiyordu (18.09 anchor degisiminde XAU/XAG/US100/US500'de birebir goruldu).
     Yon degistiyse ya da yeni anahtarda zaten zincir varsa eski davranis: IPTAL.
     """
-    if strategy != STRATEGY_1D or not POTENTIAL_NOTICES_ENABLED:
+    if not GATED_NOTICES_ENABLED or strategy not in GATED_NOTICE_STRATEGIES:
         return
     try:
         keep = _as_naive(keep_purge_time)
@@ -1091,12 +1123,14 @@ async def _cancel_gated_notices(
                     changed = True
                     continue
             n.cancelled = True
+            n.cancel_reason = reason
             n.updated_at = datetime.now(timezone.utc)
             changed = True
             if n.tg_message_id:
                 _POTENTIAL_OUTBOX.append({
                     "symbol": n.symbol, "direction": n.direction,
                     "reason": reason, "reply_to": int(n.tg_message_id),
+                    "strategy": strategy, "gated": True,
                 })
         if changed:
             await session.commit()
@@ -1404,6 +1438,46 @@ def _price_hit_tp_after(
     return False
 
 
+def _first_hit_ts(work: pd.DataFrame, direction: str, level: float, *, favorable: bool):
+    """`work` icinde seviyeye degen ilk mumun zamani (yoksa None). Vektorel -- her LTF kapanisinda calisir."""
+    if work is None or work.empty:
+        return None
+    if favorable == (direction == "LONG"):
+        mask = work["high"].to_numpy(dtype=float) >= level
+    else:
+        mask = work["low"].to_numpy(dtype=float) <= level
+    hits = mask.nonzero()[0]
+    return work.index[hits[0]] if len(hits) else None
+
+
+def _sl_hit_before_tp(
+    df_ltf: pd.DataFrame | None,
+    direction: str,
+    stop_loss: float | None,
+    take_profit: float | None,
+    *,
+    sl_from: datetime | None,
+    tp_from: datetime | None,
+) -> bool:
+    """Hedef tarafi tuketilmis setup'ta fiyat TP'den ONCE SL'ye mi degdi? (24.10, yalniz radar etiketi)
+
+    TP aramasi C2 acilisindan (`tp_from`), SL aramasi CISD onayindan (`sl_from`) baslar: purge ucu C2 icinde
+    olusurken SL'yi tanim geregi gecebilir (1W'de SL girisle purge ucu arasinda). Ayni mumda ikisi -> SL
+    (mum ici sira bilinmez; Journal'in kotumser kurali). Giris dolsun dolmasin bakilir (kullanici olcusu).
+    """
+    if df_ltf is None or stop_loss is None or take_profit is None or sl_from is None:
+        return False
+    try:
+        t_sl = _first_hit_ts(_slice_ltf_after(df_ltf, sl_from), direction, float(stop_loss), favorable=False)
+        if t_sl is None:
+            return False
+        t_tp = _first_hit_ts(_slice_ltf_after(df_ltf, tp_from), direction, float(take_profit), favorable=True)
+        return t_tp is None or t_sl <= t_tp
+    except Exception:
+        log.exception("sl-before-tp check failed")
+        return False
+
+
 def _asof_index(df: pd.DataFrame, asof: datetime) -> pd.Timestamp:
     t = pd.Timestamp(_as_utc(asof) or asof)
     if df.index.tz is None:
@@ -1630,7 +1704,7 @@ def _quality_score_asof(
                 ltf, _cut_asof(corr_ltf, asof), setup.direction, setup.purge_time,
                 window_hours=smt_window_hours,
             ):
-                score = min(max_score, score + SMT_QUALITY_BONUS)
+                score = min(max_score, score + smt_bonus_for(strategy, symbol, market))
         except Exception:
             log.debug("as-of SMT hata %s", symbol, exc_info=True)
     return score
@@ -2318,8 +2392,10 @@ async def _apply_smt_bonus(
     ltf: str = "15m",
     window_hours: float = 4.0,
     max_score: int = MAX_QUALITY_SCORE,
+    strategy: str | None = None,
 ) -> bool:
-    """Korele parite ile LTF SMT divergence varsa setup skorunu +SMT_QUALITY_BONUS (max 11; 1W 10) yap.
+    """Korele parite ile LTF SMT divergence varsa setup skorunu +SMT bonusu (max 11; 1W 10) yap.
+    Bonus `smt_bonus_for` (24.10: 4H altcoin +1, digerleri +2).
 
     SMT bulunursa setup.smt_pair'e korele paritenin gosterim adi yazilir.
     """
@@ -2351,19 +2427,20 @@ async def _apply_smt_bonus(
         return False
 
     setup.smt_pair = to_display_symbol(corr)
-    new_score = min(max_score, int(setup.bias_score or 0) + SMT_QUALITY_BONUS)
+    bonus = smt_bonus_for(strategy, bingx_symbol, setup.market_type)
+    new_score = min(max_score, int(setup.bias_score or 0) + bonus)
     setup.bias_score = new_score
     if isinstance(setup.score_parts, dict):
         # Olcum kirilimi: SMT motorda skora sonradan ekleniyor, kirilim da izlesin.
-        setup.score_parts["smt"] = SMT_QUALITY_BONUS
-        setup.score_parts["raw"] = int(setup.score_parts.get("raw") or 0) + SMT_QUALITY_BONUS
+        setup.score_parts["smt"] = bonus
+        setup.score_parts["raw"] = int(setup.score_parts.get("raw") or 0) + bonus
         setup.score_parts["score"] = new_score
     if new_score >= 7:
         setup.bias = "BULLISH" if setup.direction == "LONG" else "BEARISH"
     elif new_score <= 3:
         setup.bias = "BEARISH" if setup.direction == "LONG" else "BULLISH"
     log.info("SMT+%d: %s %s (korele %s) -> skor %d",
-             SMT_QUALITY_BONUS, setup.symbol, setup.direction, setup.smt_pair, new_score)
+             bonus, setup.symbol, setup.direction, setup.smt_pair, new_score)
     return True
 
 
@@ -2548,14 +2625,20 @@ async def _detect_and_create_waiting_locked(
     await _apply_smt_bonus(
         setup, df_ltf, bingx_symbol, store, client,
         ltf=ltf_key, window_hours=cfg["smt_window_hours"],
-        max_score=int(cfg.get("max_score", MAX_QUALITY_SCORE)),
+        max_score=int(cfg.get("max_score", MAX_QUALITY_SCORE)), strategy=strategy,
     )
 
     if getattr(setup, "target_consumed", False):
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "past_tp")
+        # 24.10 (kullanici): fiyat TP'den once SL'ye gittiyse radar "Missed (TP before fill)" degil "Stopped"
+        # yazar. Journal asamasi ayni (`reason`), motor karari degismez.
+        stopped = bool(preview.get("cisd_confirmed")) and _sl_hit_before_tp(
+            df_ltf, setup.direction, preview.get("sl"), preview.get("tp"),
+            sl_from=preview.get("cisd_time"), tp_from=setup.purge_time,
+        )
         _radar(
-            "missed",
+            "stopped" if stopped else "missed",
             reason="target_taken",
             direction=setup.direction,
             score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
@@ -3110,13 +3193,35 @@ async def _notify_waiting(session: AsyncSession, sig: Signal) -> None:
     try:
         if sig.tg_potential_id or getattr(sig, "tg_potential_state", None) == "waiting":
             return
+        # Setup daha once kapida elendigi icin POTANSIYEL bildirildiyse (24.10, 1D/1W) WAITING ona
+        # reply olur ve zincir sinyale gecer: sonraki ELENDI / IPTAL bu mesajdan devam eder.
+        notice = None
+        if sig.timeframe in GATED_NOTICE_STRATEGIES and sig.purge_time is not None:
+            try:   # zincir aramasi bozulsa da WAITING mesaji gitsin
+                notice = await _get_potential_notice(
+                    session, sig.timeframe, sig.symbol, sig.direction, sig.purge_time,
+                )
+            except Exception:
+                log.warning("potential notice lookup failed for %s", sig.symbol)
+            if notice is not None and notice.cancelled:
+                notice = None
         if not tg_configured():
+            # /potential-signals durumu Telegram'a bagli olmasin.
+            if notice is not None and notice.state != "signal":
+                notice.state = "signal"
+                notice.updated_at = datetime.now(timezone.utc)
+                await session.commit()
             return
-        mid = await send_signal_waiting(sig)
+        reply_to = int(notice.tg_message_id) if (notice is not None and notice.tg_message_id) else None
+        mid = await send_signal_waiting(sig, reply_to=reply_to)
         if not mid:
             return
         sig.tg_potential_id = mid
         sig.tg_potential_state = "waiting"
+        if notice is not None:
+            notice.tg_message_id = mid
+            notice.state = "signal"
+            notice.updated_at = datetime.now(timezone.utc)
         await session.commit()
         log.info("WAITING NOTICE: %s %s %s (mid=%s)", sig.timeframe, sig.symbol, sig.direction, mid)
     except Exception:

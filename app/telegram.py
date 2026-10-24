@@ -339,16 +339,24 @@ def _format_signal_potential(sig: Signal, c2_close_at=None, gate: str | None = N
             f"ℹ️ Motor limit emri entry'de bekliyor; dolarsa ACTIVE mesajı buna yanıt olarak gelir."
         )
     if gate:
+        gate_label = _POTENTIAL_GATE_LABELS.get(gate, gate)
+        if gate == "low_quality":
+            # 24.10: esik stratejiye gore (1W 6, digerleri 7) -- etiket sabit 7 yaziyordu.
+            gate_label = f"Kalite skoru eşiğin ({6 if getattr(sig, 'timeframe', None) == '1w' else 7}) altında"
+        c2_line = f"⏳ <b>C2 kapanışı:</b> {_fmt_tsi(c2_close_at)}\n" if c2_open and c2_close_at else ""
         tail = (
+            f"{c2_line}"
             f"\n"
-            f"⛔️ <b>Motor almıyor:</b> {_POTENTIAL_GATE_LABELS.get(gate, gate)}\n"
+            f"⛔️ <b>Motor almıyor:</b> {gate_label}\n"
             f"Seviyeler bilgi amaçlı; bu setup için emir girilmeyecek. Kapı sonradan "
             f"açılırsa bu mesaja yanıt olarak haber verilir."
         )
     icon = "\U0001f6ab" if gate else "\U0001f440"
     tag = " – ELENDİ" if gate else ""
+    # 24.10: 1W de bildiriliyor -- baslik stratejiyi yazar (1D eski metniyle ayni kalir).
+    tf_label = "1W-4H" if getattr(sig, "timeframe", None) == "1w" else "1D"
     return (
-        f"{icon} <b>POTANSİYEL 1D CRT{tag} ({'C2 AÇIK' if c2_open else 'C2 KAPALI'}) – {sig.symbol}</b>\n"
+        f"{icon} <b>POTANSİYEL {tf_label} CRT{tag} ({'C2 AÇIK' if c2_open else 'C2 KAPALI'}) – {sig.symbol}</b>\n"
         f"\n"
         f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
         f" | <b>R:R:</b> {rr}\n"
@@ -410,22 +418,29 @@ def _format_signal_waiting(sig: Signal) -> str:
     )
 
 
-async def send_signal_waiting(sig: Signal) -> Optional[int]:
-    """waiting_entry bildirimi; message_id doner (ACTIVE / IPTAL buna reply olur)."""
+async def send_signal_waiting(sig: Signal, reply_to: Optional[int] = None) -> Optional[int]:
+    """waiting_entry bildirimi; message_id doner (ACTIVE / IPTAL buna reply olur).
+
+    `reply_to`: setup once kapida elenip POTANSIYEL bildirildiyse o mesaj (24.10, 1D/1W).
+    """
     if not is_configured():
         return None
-    mid = await _send_message(_format_signal_waiting(sig))
+    mid = await _send_message(_format_signal_waiting(sig), reply_to_message_id=reply_to)
     if mid:
         log.info("Telegram: waiting sent for %s %s %s (mid=%s)",
                  _strategy_label(sig), sig.symbol, sig.direction, mid)
     return mid
 
 
-def _format_potential_cancel(symbol: str, direction: str, reason: str, strategy: str | None = None) -> str:
-    # Strateji biliniyorsa zincir WAITING'dir (1D dahil, 29.09); stratejisiz = eski kapida elenen zincir.
+def _format_potential_cancel(
+    symbol: str, direction: str, reason: str, strategy: str | None = None, gated: bool = False,
+) -> str:
+    # Strateji biliniyorsa zincir WAITING'dir (1D dahil, 29.09); `gated` = kapida elenen setup zinciri
+    # (24.10, 1D/1W); stratejisiz = eski kapida elenen zincir.
     if strategy:
         label = {"1h": "1H-5M", "1w": "1W-4H", "1d": "1D-1H"}.get(strategy, "4H-15M")
-        title = f"❌ <b>WAITING İPTAL – {symbol} ({label})</b>"
+        kind = "POTANSİYEL" if gated else "WAITING"
+        title = f"❌ <b>{kind} İPTAL – {symbol} ({label})</b>"
     else:
         title = f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>"
     return (
@@ -437,12 +452,13 @@ def _format_potential_cancel(symbol: str, direction: str, reason: str, strategy:
 
 async def send_potential_cancel(
     symbol: str, direction: str, reason: str, reply_to: int, strategy: str | None = None,
+    *, gated: bool = False,
 ) -> bool:
-    """Potansiyel (1D) ya da waiting (4H/1H) setup sinyale donusmeden silindi: zincire reply."""
+    """Potansiyel (kapida elenen 1D/1W) ya da waiting setup sinyale donusmeden silindi: zincire reply."""
     if not is_configured():
         return False
     mid = await _send_message(
-        _format_potential_cancel(symbol, direction, reason, strategy), reply_to_message_id=reply_to,
+        _format_potential_cancel(symbol, direction, reason, strategy, gated), reply_to_message_id=reply_to,
     )
     if mid:
         log.info("Telegram: potential cancel sent for %s %s (%s, reply_to=%s)", symbol, direction, reason, reply_to)

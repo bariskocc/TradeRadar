@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - Calendar{% endblock %}
+
+{# 24.10 (kullanici istegi): Paper Trades takviminin motor sinyali karsiligi -- dolar yerine R. Isaretleme ve siniflar
+   paper_trades.html CALENDAR bolumuyle ayni (Tailwind onlari zaten derliyor). Hesap app/signal_calendar.py. #}
+{% macro rfmt(v) %}{% if v is none %}—{% else %}{{ '%+.2f'|format(v) }}R{% endif %}{% endmacro %}
+{% block body %}
+<div class="flex h-full">
+
+    {% include 'sidebar.html' %}
+
+    <main class="flex-1 overflow-auto">
+        <div class="p-3 md:p-6">
+            <div class="mb-5">
+                <h1 class="text-xl font-bold text-white">Calendar</h1>
+                <p class="text-sm text-gray-500 mt-0.5">Engine signals by the day they closed — R per day, W / BE / L</p>
+            </div>
+
+            <!-- Filtreler -->
+            <form method="GET" action="/calendar" class="mb-5 p-4 bg-dark-800 rounded-xl border border-dark-600">
+                <div class="flex flex-wrap items-end gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
+                        <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, lab in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
+                            <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ lab }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">MARKET</label>
+                        <select name="market" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, lab in [('all', 'All'), ('crypto', 'Crypto'), ('fx', 'FX')] %}
+                            <option value="{{ key }}" {% if market == key %}selected{% endif %}>{{ lab }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <input type="hidden" name="offset" value="{{ offset }}">
+                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-accent-blue/80 text-white text-sm font-medium rounded-lg transition">Filter</button>
+                </div>
+            </form>
+
+            {% set c = cal %}
+            <section class="bg-dark-800 rounded-xl border border-dark-600 p-5 mb-5">
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div>
+                        <h2 class="text-lg font-bold text-white">{{ label }}</h2>
+                        <p class="text-xs text-gray-500 mt-0.5">
+                            {{ c.trading_days }} trading days · {{ c.n }} trades
+                            {% if c.n %}· <span class="text-green-400">{{ c.wins }}W</span> / <span class="text-gray-300">{{ c.be }}BE</span> / <span class="text-red-400">{{ c.losses }}L</span>
+                            {% if c.win_rate is not none %}· win rate {{ '%.0f'|format(c.win_rate) }}%{% endif %}{% endif %}
+                            {% if c.trading_days %}· <span class="text-green-400">{{ c.win_days }} up</span> / <span class="text-red-400">{{ c.loss_days }} down</span> days{% endif %}
+                            {% if c.open_n %}· <span class="text-amber-400">{{ c.open_n }} open</span>{% endif %}
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <a href="/calendar?{{ qs }}&offset={{ offset - 1 }}"
+                           class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700 text-gray-300 hover:bg-dark-600 hover:text-white transition">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                        </a>
+                        {% if offset != 0 %}
+                        <a href="/calendar?{{ qs }}&offset=0" class="px-3 py-1.5 rounded-lg bg-dark-700 text-xs text-accent-blue hover:bg-dark-600">this month</a>
+                        {% endif %}
+                        {% if offset < 0 %}
+                        <a href="/calendar?{{ qs }}&offset={{ offset + 1 }}"
+                           class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700 text-gray-300 hover:bg-dark-600 hover:text-white transition">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                        </a>
+                        {% else %}
+                        <span class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700/50 text-gray-700">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                        </span>
+                        {% endif %}
+                    </div>
+                    <div class="text-right">
+                        {% if c.total_r is not none %}
+                        <p class="text-2xl font-bold {% if c.total_r > 0 %}text-green-400{% elif c.total_r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ rfmt(c.total_r) }}</p>
+                        <p class="text-[11px] text-gray-500">{% if c.avg_day_r is not none %}{{ rfmt(c.avg_day_r) }} per day{% endif %}</p>
+                        {% else %}
+                        <p class="text-2xl font-bold text-gray-600">—</p>
+                        <p class="text-[11px] text-gray-500">no trades</p>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div>
+                    <div class="grid grid-cols-7 md:grid-cols-8 gap-1 md:gap-1.5 mb-1 md:mb-1.5">
+                        {% for wd in c.weekdays %}
+                        <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider px-0.5 text-center md:text-left">{{ wd }}</div>
+                        {% endfor %}
+                        <div class="hidden md:block text-[10px] font-semibold text-gray-600 uppercase tracking-wider px-1 text-right">Week</div>
+                    </div>
+
+                    {% for week in c.weeks %}
+                    <div class="grid grid-cols-7 md:grid-cols-8 gap-1 md:gap-1.5 mb-1 md:mb-1.5">
+                        {% for cell in week.cells %}
+                        {% if cell.n %}
+                        <a href="/calendar?{{ qs }}&offset={{ offset }}&day={{ cell.iso }}#day"
+                           class="block rounded-lg border p-1 md:p-2 min-h-[62px] md:min-h-[86px] overflow-hidden transition hover:border-accent-blue
+                           {% if cell.iso == day %}border-accent-blue{% elif cell.tone == 'win' %}border-green-500/40{% elif cell.tone == 'loss' %}border-red-500/40{% else %}border-dark-600{% endif %}
+                           {% if not cell.in_month %}opacity-40{% endif %}"
+                           style="background-color: rgb({{ '34 197 94' if cell.tone == 'win' else ('239 68 68' if cell.tone == 'loss' else 'var(--tr-cal-neutral)') }} / {{ cell.alpha }})"
+                           title="{{ cell.n }} trades · {{ cell.wins }}W / {{ cell.be }}BE / {{ cell.losses }}L{% if cell.open_n %} · {{ cell.open_n }} open{% endif %}">
+                            <div class="flex items-baseline justify-between gap-1 leading-none">
+                                <span class="text-[11px] md:text-xs font-semibold {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ cell.day }}</span>
+                            </div>
+                            <span class="block text-[10px] md:text-sm font-bold mt-1 truncate {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ rfmt(cell.r) }}</span>
+                            <span class="inline-flex items-center gap-0.5 mt-1 px-1 rounded bg-dark-800/70 text-[9px] whitespace-nowrap">
+                                {% if cell.wins or cell.losses or cell.be %}
+                                <span class="hidden md:inline text-gray-400">{{ cell.n }}&nbsp;·</span>
+                                {% if cell.wins %}<span class="text-green-400">{{ cell.wins }}W</span>{% endif %}
+                                {% if cell.be %}<span class="text-gray-300">{{ cell.be }}BE</span>{% endif %}
+                                {% if cell.losses %}<span class="text-red-400">{{ cell.losses }}L</span>{% endif %}
+                                {% else %}
+                                <span class="text-gray-300">{{ cell.n }}</span>
+                                {% endif %}
+                                {% if cell.open_n %}<span class="text-amber-400">+{{ cell.open_n }}</span>{% endif %}
+                            </span>
+                        </a>
+                        {% elif cell.open_n %}
+                        <a href="/open-signals"
+                           class="block rounded-lg border border-amber-500/40 bg-amber-500/5 p-1 md:p-2 min-h-[62px] md:min-h-[86px] overflow-hidden transition hover:border-accent-blue
+                           {% if not cell.in_month %}opacity-40{% endif %}"
+                           title="{{ cell.open_n }} signal(s) filled this day and still open — R is written when they close">
+                            <span class="block text-[11px] md:text-xs font-semibold leading-none text-amber-400">{{ cell.day }}</span>
+                            <span class="block text-[10px] md:text-xs text-amber-400/80 mt-1 truncate">{{ cell.open_n }} open</span>
+                        </a>
+                        {% else %}
+                        <div class="rounded-lg border border-dark-600 bg-dark-700/30 p-1 md:p-2 min-h-[62px] md:min-h-[86px] {% if not cell.in_month %}opacity-40{% endif %}">
+                            <span class="block text-[11px] md:text-xs leading-none {% if cell.in_month %}text-gray-500{% else %}text-gray-700{% endif %}">{{ cell.day }}</span>
+                        </div>
+                        {% endif %}
+                        {% endfor %}
+                        <div class="hidden md:flex rounded-lg border border-dark-600 bg-dark-700/50 p-2 min-h-[86px] flex-col justify-center items-end">
+                            {% if week.n %}
+                            <span class="text-xs font-bold {% if week.r > 0 %}text-green-400{% elif week.r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ rfmt(week.r) }}</span>
+                            <span class="text-[10px] text-gray-500 mt-1">{{ week.n }} trades</span>
+                            <span class="text-[9px] mt-0.5"><span class="text-green-400">{{ week.wins }}W</span> <span class="text-gray-300">{{ week.be }}BE</span> <span class="text-red-400">{{ week.losses }}L</span></span>
+                            {% else %}
+                            <span class="text-xs text-gray-700">—</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="flex flex-wrap items-center gap-4 mt-4 text-xs">
+                    {% if c.best %}<span class="text-gray-500">Best day: <span class="text-gray-300">{{ c.best.day }}</span> {{ rfmt(c.best.r) }}</span>
+                    {% if c.worst and c.worst.day != c.best.day %}
+                    <span class="text-gray-500">Worst day: <span class="text-gray-300">{{ c.worst.day }}</span> {{ rfmt(c.worst.r) }}</span>
+                    {% endif %}{% else %}<span class="text-gray-500">No closed trades this month.</span>{% endif %}
+                    <span class="text-gray-600">R is written to the day the trade <b>closed</b> (TSİ), partial profit included. Open trades are
+                        <span class="text-amber-400">yellow</span> on their fill day and not counted. Click a day to list its trades.</span>
+                </div>
+            </section>
+
+            {% if day %}
+            <section id="day" class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden mb-5">
+                <div class="px-4 py-3 border-b border-dark-600 flex items-center justify-between">
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Trades closed on {{ day }}</h3>
+                    <a href="/calendar?{{ qs }}&offset={{ offset }}" class="text-xs text-accent-blue hover:underline">close</a>
+                </div>
+                <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-dark-600 text-xs text-gray-500">
+                            <th class="px-3 py-2 text-left font-semibold">SYMBOL</th>
+                            <th class="px-3 py-2 text-left font-semibold">TF</th>
+                            <th class="px-3 py-2 text-left font-semibold">SIDE</th>
+                            <th class="px-3 py-2 text-left font-semibold">RESULT</th>
+                            <th class="px-3 py-2 text-right font-semibold">R</th>
+                            <th class="px-3 py-2 text-left font-semibold">EXIT</th>
+                            <th class="px-3 py-2 text-left font-semibold">CLOSED</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for r in day_rows %}
+                        <tr class="hover:bg-dark-700/50">
+                            <td class="px-3 py-2 text-sm font-medium text-white whitespace-nowrap">{{ r.symbol }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-300 whitespace-nowrap">{{ r.tf }}</td>
+                            <td class="px-3 py-2 whitespace-nowrap">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ r.direction }}</span>
+                            </td>
+                            <td class="px-3 py-2 text-xs whitespace-nowrap {% if r.outcome == 'Win' %}text-green-400{% elif r.outcome == 'Loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ r.outcome }}</td>
+                            <td class="px-3 py-2 text-right text-xs font-semibold whitespace-nowrap {% if r.r is not none and r.r > 0 %}text-green-400{% elif r.r is not none and r.r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ rfmt(r.r) }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.exit }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.closed }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="7" class="px-3 py-6 text-center text-sm text-gray-600">No trades closed on this day</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                </div>
+            </section>
+            {% endif %}
+        </div>
+    </main>
+</div>
+{% endblock %}

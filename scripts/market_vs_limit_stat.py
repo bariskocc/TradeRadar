@@ -39,7 +39,7 @@ ap.add_argument("--fee-limit", type=float, default=0.07, help="limit gidis-donus
 ap.add_argument("--strategy", choices=("4h", "1d", "1w"), help="tek strateji (01.10: izleme strateji basina uc madde)")
 A = ap.parse_args()
 
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected"}
 QUAL = {"bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr", "score7", "tight_stop"}
 MIN_RR = 2.0
 

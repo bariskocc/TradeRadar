@@ -26,7 +26,7 @@ from app.setup_journal import PRE_SETUP_STAGES
 from app.session import NY as FX_NY, SESSION_HOUR as FX_SESSION_HOUR, trading_session
 from app.telegram import is_configured as tg_is_configured
 from app.auth import verify_credentials, create_access_token, get_current_user
-from app.scanner import run_scan, SMT_QUALITY_BONUS, MAX_QUALITY_SCORE
+from app.scanner import run_scan, SMT_QUALITY_BONUS, MAX_QUALITY_SCORE, smt_bonus_for
 from app.market_data import market_data
 
 # Uvicorn app'i import eder etmez logu kur; boyle her giris noktasinda (run.py,
@@ -135,6 +135,8 @@ RADAR_STATE_META = {
     "low_rr":         {"label": "Low RR",                     "color": "yellow", "rank": 2},
     "tight_stop":     {"label": "Stop too tight (LTF range)", "color": "yellow", "rank": 3},
     "missed":         {"label": "Missed (TP before fill)",    "color": "yellow", "rank": 4},
+    # 24.10: hedef tarafi alinmis ama fiyat once SL'ye gitmis (kullanici: "direkt stop oldugunu belirt").
+    "stopped":        {"label": "Stopped",                    "color": "red",    "rank": 4},
     "missed_quality": {"label": "Missed (score<7 at entry)",  "color": "yellow", "rank": 4},
     "invalidated":    {"label": "CRT 60% crossed",            "color": "yellow", "rank": 4},
     "past_sl":        {"label": "SL before fill",             "color": "yellow", "rank": 4},
@@ -153,6 +155,7 @@ RADAR_STATE_META = {
     # detect_crt_setup'in setup'a cevirmeden eledigi CRT (setup yoksa en guncel adayin nedeni).
     "c2_wrong_color": {"label": "CRT rejected: C2 wrong color",    "color": "dim", "rank": 11},
     "c1_weak":        {"label": "CRT rejected: C1 body too small", "color": "dim", "rank": 11},
+    "c2_second_sweep": {"label": "CRT rejected: C2 swept other side first", "color": "dim", "rank": 11},
     "c2_breakout":    {"label": "CRT rejected: C2 closed outside", "color": "dim", "rank": 11},
     "c1_stale":       {"label": "CRT rejected: C1 extreme taken",  "color": "dim", "rank": 11},
     "range_atr":      {"label": "CRT rejected: C1 range vs ATR",   "color": "dim", "rank": 11},
@@ -265,7 +268,9 @@ def _build_dashboard_stats(signals: list[Signal]) -> dict:
     win_count = len(wins)
     loss_count = len(losses)
     be_count = len(breakevens)
-    win_rate = round((win_count / total_closed * 100), 1) if total_closed > 0 else 0
+    # Win rate = W / (W + L), BE paydaya girmez (22.10, Paper Trades ile ayni kural).
+    decided = win_count + loss_count
+    win_rate = round((win_count / decided * 100), 1) if decided > 0 else None
 
     rr_values = [s.rr_value for s in closed if s.rr_value is not None]
     total_rr = round(sum(rr_values), 2) if rr_values else 0
@@ -282,9 +287,11 @@ def _build_dashboard_stats(signals: list[Signal]) -> dict:
         pair_trades[s.symbol] += 1
         if s.symbol not in pair_wins:
             pair_wins[s.symbol] = [0, 0]
-        if _trade_outcome(s) == "win":
+        o = _trade_outcome(s)
+        if o == "win":
             pair_wins[s.symbol][0] += 1
-        pair_wins[s.symbol][1] += 1
+        if o in ("win", "loss"):
+            pair_wins[s.symbol][1] += 1
 
     profitable_pairs = {sym: total for sym, total in pair_rr.items() if total > 0}
     if profitable_pairs:
@@ -479,7 +486,8 @@ def _period_summary(closed: list[tuple[datetime, Signal]], start: datetime, end:
         "wins": wins,
         "losses": losses,
         "be": n - wins - losses,
-        "win_rate": round(wins / n * 100) if n else None,
+        # BE paydaya girmez (22.10): win rate = W / (W + L).
+        "win_rate": round(wins / (wins + losses) * 100) if wins + losses else None,
         "avg_r": round(total / n, 2) if n else None,
         "best": _pick(max(sigs, key=by_r)) if n else None,
         "worst": _pick(min(sigs, key=by_r)) if n > 1 else None,
@@ -726,11 +734,15 @@ async def dashboard(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    kind = "month" if period == "month" else "week"
-    offset = max(-520, min(0, offset))
+    kind = period if period in ("month", "all") else "week"
+    offset = max(-520, min(0, offset)) if kind != "all" else 0
     now = datetime.now(timezone.utc)
-    start, end, label = _period_range(kind, offset, now)
-    prev_start, prev_end, _ = _period_range(kind, offset - 1, now)
+    if kind == "all":
+        # Tum zamanlar (22.10): onceki donem yok, ok/geri sayim yok; aralik basligi stats_since'ten.
+        start, end, label = datetime(2000, 1, 1, tzinfo=timezone.utc), now + timedelta(days=1), "All time"
+    else:
+        start, end, label = _period_range(kind, offset, now)
+        prev_start, prev_end, _ = _period_range(kind, offset - 1, now)
 
     result = await db.execute(
         select(Signal).where(Signal.status.notin_(["waiting_entry", "pending_cisd"]))
@@ -744,9 +756,12 @@ async def dashboard(
     ]
 
     summary = _period_summary(closed, start, end)
-    prev = _period_summary(closed, prev_start, prev_end)
-    summary["prev_total_r"] = prev["total_r"] if prev["n"] else None
-    summary["delta_r"] = round(summary["total_r"] - prev["total_r"], 2) if prev["n"] else None
+    if kind == "all":
+        summary["prev_total_r"] = summary["delta_r"] = None
+    else:
+        prev = _period_summary(closed, prev_start, prev_end)
+        summary["prev_total_r"] = prev["total_r"] if prev["n"] else None
+        summary["delta_r"] = round(summary["total_r"] - prev["total_r"], 2) if prev["n"] else None
 
     # "Tum zamanlar" = DB'deki ilk sinyal kaydindan beri; baslikta yazsin ki aralik belirsiz kalmasin.
     first_created = _utc((await db.execute(select(func.min(Signal.created_at)))).scalar())
@@ -1275,6 +1290,87 @@ async def eliminated_page(
     })
 
 
+@app.get("/calendar", response_class=HTMLResponse)
+async def calendar_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tf: str = Query(default="all"),
+    market: str = Query(default="all"),
+    offset: int = Query(default=0),
+    day: str = Query(default=""),
+):
+    """Motor sinyallerinin aylik R takvimi (24.10). Paper Trades takviminin R karsiligi; hesap app/signal_calendar.py.
+    Islem KAPANDIGI gune (TSI) sayilir, W/L/BE `_trade_outcome`. `day=YYYY-MM-DD` o gunun islemlerini listeler."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from app.signal_calendar import build_month, _day
+    tf = tf if tf in ("all", "4h", "1d", "1w") else "all"
+    market = market if market in ("all", "crypto", "fx") else "all"
+    offset = max(-520, min(0, offset))
+    start, end, label = _period_range("month", offset)
+    naive = lambda dt: dt.replace(tzinfo=None)  # noqa: E731
+    conds = []
+    if tf != "all":
+        conds.append(_tf_filter(tf))
+    if market == "crypto":
+        conds.append(Signal.market_type == "crypto")
+    elif market == "fx":
+        conds.append(Signal.market_type != "crypto")
+    closed = list((await db.execute(select(Signal).where(
+        Signal.result.is_not(None), Signal.closed_at >= naive(start), Signal.closed_at < naive(end), *conds,
+    ).order_by(Signal.closed_at))).scalars().all())
+    active = list((await db.execute(select(Signal).where(
+        Signal.status == "active", Signal.entry_filled_time >= naive(start), Signal.entry_filled_time < naive(end), *conds,
+    ))).scalars().all())
+    cal = build_month(closed, active, start.astimezone(_TSI).date(), (end - timedelta(days=1)).astimezone(_TSI).date(),
+                      _trade_outcome)
+    day_rows = []
+    if day:
+        for s in closed:
+            if str(_day(s.closed_at)) == day:
+                o = _trade_outcome(s)
+                day_rows.append({
+                    "id": s.id, "symbol": _fmt_ui_symbol(s.symbol, s.market_type),
+                    "tf": _OPEN_TF_LABELS.get(s.timeframe or "4h", "4H-15M"), "direction": s.direction,
+                    "r": s.rr_value, "outcome": {"win": "Win", "loss": "Loss", "breakeven": "BE"}.get(o, "—"),
+                    "exit": s.exit_reason or "—", "closed": _fmt_date_tsi(s.closed_at),
+                })
+    qs = urlencode({"tf": tf, "market": market})
+    return templates.TemplateResponse(request=request, name="calendar.html", context={
+        "user": user, "active_page": "calendar", "cal": cal, "label": label, "offset": offset,
+        "tf": tf, "market": market, "qs": qs, "day": day, "day_rows": day_rows,
+    })
+
+
+@app.get("/potential-signals", response_class=HTMLResponse)
+async def potential_signals_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tf: str = Query(default="all"),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    status: str = Query(default="all"),
+    page: int = Query(default=1),
+):
+    """Kapida elenip POTANSIYEL bildirilen 1D/1W setuplar (24.10). Veri app/potential_signals.py.
+    Varsayilan bu hafta (Pazartesi TSI); `date_from=` bos gelirse tarih filtresi yok (Signals sayfasiyla ayni)."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from app.potential_signals import build_potential_signals, week_start_tsi
+    if "date_from" not in request.query_params:
+        date_from = week_start_tsi()
+    data = await build_potential_signals(db, tf=tf, date_from=date_from, date_to=date_to, status=status, page=page)
+    base_qs = urlencode({"tf": data["tf"], "date_from": data["date_from"], "date_to": data["date_to"]})
+    return templates.TemplateResponse(request=request, name="potential_signals.html", context={
+        "user": user,
+        "active_page": "potential_signals",
+        "base_qs": base_qs,
+        **data,
+    })
+
+
 @app.get("/skor-tablosu", response_class=HTMLResponse)
 async def score_table_page(request: Request, db: AsyncSession = Depends(get_db)):
     """Uc stratejinin skor tablosu + hard filtreleri, satir satir canli saglik kontrolu
@@ -1541,6 +1637,88 @@ async def logs_page(
     })
 
 
+# ──────────────────── Charts (coklu grafik) ────────────────────
+
+@app.get("/charts", response_class=HTMLResponse)
+async def charts_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from app.exchange import SYMBOLS_BY_MARKET, to_display_symbol
+
+    groups = [
+        ("Crypto", [to_display_symbol(s) for s in SYMBOLS_BY_MARKET.get("crypto", [])]),
+        ("FX", [to_display_symbol(s) for m, syms in SYMBOLS_BY_MARKET.items() if m != "crypto" for s in syms]),
+    ]
+    return templates.TemplateResponse(request=request, name="charts.html", context={
+        "user": user,
+        "active_page": "charts",
+        "symbol_groups": [(g, [(sym, _fmt_ui_symbol(sym)) for sym in syms]) for g, syms in groups],
+    })
+
+
+@app.get("/api/charts/candles")
+async def api_chart_candles(request: Request):
+    """Gecmis (disk/tek REST) + canli store; ayrinti app/charts.py."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from app import charts
+
+    symbol = (request.query_params.get("symbol") or "BTCUSDT.P").strip()
+    tf = request.query_params.get("tf") or "4h"
+    if tf not in charts.CHART_TFS:
+        return JSONResponse(status_code=400, content={"error": f"tf: {', '.join(charts.CHART_TFS)}"})
+    since = request.query_params.get("since")
+    try:
+        since_i = int(since) if since else None
+    except ValueError:
+        since_i = None
+    done = market_data.status().get("bootstrap_done_at") is not None
+    return await charts.get_candles(market_data.store, symbol, tf, done, since=since_i)
+
+
+@app.get("/api/charts/signals")
+async def api_chart_signals(request: Request, db: AsyncSession = Depends(get_db)):
+    """Sembolun acik sinyalleri + son 180 gunde kapananlar (grafik katmani)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from app.charts import ts_tsi
+
+    symbol = (request.query_params.get("symbol") or "").strip()
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=180)
+    rows = (await db.execute(
+        select(Signal).where(
+            Signal.symbol == symbol,
+            or_(Signal.status.in_(_OPEN_STATUSES), Signal.closed_at >= since),
+        ).order_by(desc(Signal.id)).limit(200)
+    )).scalars().all()
+    out = []
+    for s in rows:
+        if s.entry_price is None:
+            continue
+        is_open = s.status in _OPEN_STATUSES
+        out.append({
+            "id": s.id,
+            "tf": s.timeframe,
+            "tf_label": (_OPEN_TF_LABELS.get(s.timeframe) or s.timeframe or "").split("-")[0],
+            "direction": s.direction,
+            "status": s.status,
+            "open": is_open,
+            "entry": s.entry_price,
+            "sl": s.initial_stop_loss if s.initial_stop_loss is not None else s.stop_loss,
+            "sl_now": s.stop_loss,
+            "tp": s.take_profit,
+            "start": ts_tsi(s.entry_filled_time or s.cisd_time or s.created_at),
+            "filled": ts_tsi(s.entry_filled_time),
+            "closed": ts_tsi(s.closed_at),
+            "rr": s.rr_value,
+            "outcome": _trade_outcome(s) if not is_open else None,
+        })
+    return {"symbol": symbol, "signals": out}
+
+
 # ──────────────────── Radar (Canli Izleme) ────────────────────
 
 @app.get("/radar", response_class=HTMLResponse)
@@ -1621,7 +1799,7 @@ async def api_radar(request: Request):
             + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0)
         ),
         "setups": sum(cnt.get(k, 0) for k in (
-            "waiting", "c2_open", "no_cisd", "low_rr", "missed", "invalidated",
+            "waiting", "c2_open", "no_cisd", "low_rr", "missed", "stopped", "invalidated",
             # "same_color",  # eski hard filter
             "tight_stop", "bias_mismatch", "cluster_limit", "low_quality",
             "has_open", "duplicate", "deleted_before", "corr_open", "stale", "same_bar_sl", "week_gap",
@@ -1815,7 +1993,8 @@ async def recalc_scores(request: Request, db: AsyncSession = Depends(get_db)):
                         df_15m, corr_15m, sig.direction, sig.purge_time, window_hours=smt_hours,
                     ):
                         smt_pair = to_display_symbol(corr)
-                        score = min(MAX_QUALITY_SCORE, int(score) + SMT_QUALITY_BONUS)
+                        score = min(MAX_QUALITY_SCORE, int(score) + smt_bonus_for(
+                            sig.timeframe or "4h", sig.symbol, sig.market_type))
                         if score >= 7:
                             bias = "BULLISH" if sig.direction == "LONG" else "BEARISH"
                         elif score <= 3:
@@ -1871,12 +2050,19 @@ _PAPER_MARKET_KEYS = {key for key, _ in paper.MARKET_OPTIONS}
 def _paper_filters(request: Request) -> dict:
     q = request.query_params
     f = {key: (q.get(key) or "").strip()
-         for key in ("symbol", "direction", "result",
+         for key in ("symbol", "direction",
                      "date_from", "date_to", "date_basis")}
-    markets: list[str] = []
-    for value in q.getlist("market_type"):
-        markets.extend([v for v in value.split(",") if v])
-    f["markets"] = [mk for mk in markets if mk in _PAPER_MARKET_KEYS]
+
+    def _multi(name: str, allowed) -> list[str]:
+        # Coklu secim: parametre tekrarlanabilir ya da virgullu gelebilir; sira korunur, tekrar atilir.
+        vals: list[str] = []
+        for value in q.getlist(name):
+            vals.extend(v for v in value.split(",") if v in allowed and v not in vals)
+        return vals
+
+    f["markets"] = _multi("market_type", _PAPER_MARKET_KEYS)
+    f["results"] = _multi("result", paper.RESULT_KEYS)
+    f["sessions"] = _multi("session", paper.SESSION_KEYS)
     # Varsayilan giris tarihi: bu haftanin Pazartesi'si (TSI) -- Signals sayfasiyla ayni sozlesme.
     # Parametre HIC yoksa uygulanir; kullanici alani bosaltip gonderirse tarih filtresi kalkar.
     if "date_from" not in q:
@@ -1889,9 +2075,11 @@ def _paper_qs(f: dict, view: str, tab: str, kind: str, offset: int) -> tuple[str
     filter_qs = YALNIZ filtreler -- sekme ve donem linkleri view/tab/period'i kendileri yazar
     (tekrarlanan parametrede Starlette ilkini aldigi icin ikisini birlestirmek kirilgan)."""
     items: list[tuple[str, str]] = [
-        (key, f[key]) for key in ("symbol", "direction", "result") if f.get(key)
+        (key, f[key]) for key in ("symbol", "direction") if f.get(key)
     ]
     items.extend(("market_type", mk) for mk in f["markets"])
+    items.extend(("result", r) for r in f["results"])
+    items.extend(("session", s) for s in f["sessions"])
     items.extend((("date_from", f.get("date_from") or ""), ("date_to", f.get("date_to") or "")))
     if f.get("date_basis") == "closed":
         items.append(("date_basis", "closed"))
@@ -1909,10 +2097,13 @@ async def _paper_context(
     view = view if view in _PAPER_VIEWS else "overview"
     tab = (q.get("tab") or "all").lower()
     tab = tab if tab in _PAPER_TABS else "all"
-    # Takvim her zaman aylik; donem secicisi o sekmede gizlenir.
-    kind = "month" if (q.get("period") == "month" or view == "calendar") else "week"
+    # Takvim her zaman aylik; donem secicisi o sekmede gizlenir. "all" = tum zamanlar (22.10, overview).
+    if view == "calendar":
+        kind = "month"
+    else:
+        kind = q.get("period") if q.get("period") in ("month", "all") else "week"
     try:
-        offset = max(-520, min(0, int(q.get("offset") or 0)))
+        offset = max(-520, min(0, int(q.get("offset") or 0))) if kind != "all" else 0
     except ValueError:
         offset = 0
     try:
@@ -1924,8 +2115,16 @@ async def _paper_context(
     qs, filter_qs = _paper_qs(f, view, tab, kind, offset)
 
     now = datetime.now(timezone.utc)
-    start, end, label = _period_range(kind, offset, now)
-    prev_start, prev_end, _ = _period_range(kind, offset - 1, now)
+    since = None
+    if kind == "all":
+        # Tum zamanlar: onceki donem yok, ok yok; alt satir ilk kapanan islemin tarihi.
+        start, end, label = datetime(2000, 1, 1, tzinfo=timezone.utc), now + timedelta(days=1), "Tüm zamanlar"
+        first = _utc((await db.execute(
+            select(func.min(PaperTrade.closed_at)).where(PaperTrade.status == "closed"))).scalar())
+        since = first.astimezone(_TSI).strftime("%d.%m.%Y") if first else None
+    else:
+        start, end, label = _period_range(kind, offset, now)
+        prev_start, prev_end, _ = _period_range(kind, offset - 1, now)
     naive = lambda dt: dt.replace(tzinfo=None)  # noqa: E731  (DB'nin her yeri naive UTC)
 
     listing = await paper.list_page(db, f, tab, page)
@@ -1939,17 +2138,20 @@ async def _paper_context(
             await paper.open_trades_between(db, naive(start), naive(end)))
     elif full and view == "overview":
         summary = paper.period_summary(await paper.closed_trades(db, naive(start), naive(end)))
-        prev = paper.period_summary(await paper.closed_trades(db, naive(prev_start), naive(prev_end)))
-        summary["delta_pnl"] = (round((summary["total_pnl"] or 0.0) - (prev["total_pnl"] or 0.0), 2)
-                                if prev["n"] else None)
+        if kind == "all":
+            summary["delta_pnl"] = None
+        else:
+            prev = paper.period_summary(await paper.closed_trades(db, naive(prev_start), naive(prev_end)))
+            summary["delta_pnl"] = (round((summary["total_pnl"] or 0.0) - (prev["total_pnl"] or 0.0), 2)
+                                    if prev["n"] else None)
         panels["summary"] = summary
 
     # "Tabloyu bu doneme getir": ozet donem seciciye, tablo kendi tarih filtresine bagli.
     table_link = "/paper-trades?" + urlencode([
         ("view", "trades"), ("tab", tab), ("period", kind), ("offset", str(offset)),
         ("date_basis", "closed"),
-        ("date_from", start.astimezone(_TSI).strftime("%Y-%m-%d")),
-        ("date_to", (end - timedelta(days=1)).astimezone(_TSI).strftime("%Y-%m-%d")),
+        ("date_from", "" if kind == "all" else start.astimezone(_TSI).strftime("%Y-%m-%d")),
+        ("date_to", "" if kind == "all" else (end - timedelta(days=1)).astimezone(_TSI).strftime("%Y-%m-%d")),
     ])
 
     return {
@@ -1959,7 +2161,9 @@ async def _paper_context(
         "errors": errors or [],
         "markets": paper.MARKET_OPTIONS,
         "status_options": paper.STATUS_OPTIONS,
-        "period": {"kind": kind, "offset": offset, "label": label, "table_link": table_link},
+        "session_options": paper.SESSION_OPTIONS,
+        "result_options": paper.RESULT_OPTIONS,
+        "period": {"kind": kind, "offset": offset, "label": label, "table_link": table_link, "since": since},
         **panels,
         "listing": listing,
         "rows": listing["rows"],

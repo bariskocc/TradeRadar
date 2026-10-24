@@ -1087,7 +1087,7 @@ async def _p_bias_1h(db: AsyncSession) -> Progress:
     # H2 kovalari (htf +2 / 0) -- kalem karari icin kova basina 25 gerekiyor.
     # Kume raporunkiyle AYNI olmali (scripts/bias_1h_stat.py): seviyesi olan ve motorun CRT
     # saydigi setuplar. On-eleme adaylari sayilirsa sayac esigi rapordan once doldurur.
-    pre = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected")
+    pre = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected")
     htf = func.json_extract(t.c.score_parts, "$.htf")
     buckets = await db.execute(
         select(htf, func.count()).where(t.c.strategy == "1h",
@@ -1224,7 +1224,7 @@ def _p_score_candidates(strategy: str):
             t.c.first_seen >= datetime(2026, 9, 29),
         ))
         sub = so.collect(res.mappings().all(), strategy=strategy)
-        prog = so.cand_progress(sub, so.THR[strategy])
+        prog = so.cand_progress(sub, so.THR[strategy], strategy)
         labels = {k: lab for k, lab, *_ in so.CANDIDATES}
         best_k, best_n = prog[0]
         note = " · ".join(f"{labels[k].split(' (')[0]} {n}" for k, n in prog[:4])
@@ -1307,9 +1307,11 @@ async def _p_smt_segment(db: AsyncSession) -> Progress:
             t.c.first_seen >= datetime(2026, 10, 2)))
         sub = [x for x in so.collect(res.mappings().all(), strategy=st) if x["smt_ok"] != 0]
         for seg in ("alt", "major", "fx"):
+            # 24.10: 4H altcoin SMT bonusu +1 -> karar bandi (SMT haric raw) 6-6; digerleri +2 -> 5-6.
+            v = 1 if (st == "4h" and seg == "alt") else 2
             band = [x for x in sub if x["seg"] == seg
-                    and 5 <= ((x["pal"].get("raw") or 0) - (x["pal"].get("smt") or 0)) <= 6]
-            g = so.stats([x for x in band if x["pal"].get("smt") == 2])
+                    and 7 - v <= ((x["pal"].get("raw") or 0) - (x["pal"].get("smt") or 0)) <= 6]
+            g = so.stats([x for x in band if (x["pal"].get("smt") or 0) > 0])
             b = so.stats([x for x in band if x["pal"].get("smt") == 0])
             out[(st, seg)] = min(g["res"], b["res"])
     names = {"alt": "altcoin", "major": "BTC/ETH", "fx": "FX"}
@@ -1319,7 +1321,7 @@ async def _p_smt_segment(db: AsyncSession) -> Progress:
                     note=(note or "taze veride karar bandı boş") + " — 02.10+ yalnız")
 
 
-_RFVG_QUAL_FAIL = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak",
+_RFVG_QUAL_FAIL = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep",
                    "not_selected", "bias_mismatch", "target_taken", "low_quality", "no_cisd", "score7", "tight_stop")
 
 
@@ -2092,13 +2094,16 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_candidates("1d"),
     ),
     WatchItem(
-        key="score_candidates_1w", status="open", started="21.10", onem=3,
+        # 24.10 (kullanici, 1W skor kalemleri incelemesi): 5 yalniz-1W aday eklendi, madde pasiften cikti (onem 3 -> 1).
+        key="score_candidates_1w", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 1W",
-        trigger="bir adayda karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde "
-                "(1W pasif: kapıyı geçen setup neredeyse yok, rapor istenince okunur)",
-        measure="python scripts/score_candidates_stat.py --strategy 1w · adaylar app/score_outcome.CANDIDATES (seans, CISD "
-                "gücü, likidite, EQ/SSL, MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi)",
+        trigger="bir adayda karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde. "
+                "Sonuç = TP önce mi SL önce mi (24.10, giriş dolmadan TP de TP). 1W'de birikme yavaş (haftada ~10 setup)",
+        measure="python scripts/score_candidates_stat.py --strategy 1w · ortak adaylar (seans, CISD gücü, likidite, EQ/SSL, "
+                "MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi) + 24.10 yalnız 1W: haftalık "
+                "bias yönde +1 / ters −2, purge fitili ≥ %40 +1, likidite ≥ 1 ATR ötede +1, C2 doji 0 (−1) · /skor-tablosu 1W sekmesi",
         md="Skor tablosu yeni adaylar — 1W",
+        progress_fn=_p_score_candidates("1w"),
     ),
     WatchItem(
         key="retest_ifvg", status="open", started="03.10", onem=1,
@@ -2113,9 +2118,10 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="smt_segment", status="open", started="02.10", onem=1,
         title="SMT +2 — segment bazında (altcoin / BTC-ETH / FX)",
-        trigger="21.10'dan beri YALNIZ 02.10+ veri: segment × strateji karar bandında (SMT hariç skor 5–6) taraf başına 60 (30'da okundu 21.10) "
+        trigger="24.10 KARAR (kullanıcı, 60 beklenmeden): 4H altcoin SMT +2 → +1. Sürüyor: FX / BTC-ETH ve altcoinde +1 tuttu mu. "
+                "YALNIZ 02.10+ veri: segment × strateji karar bandında (SMT hariç skor 5–6; 4H altcoin 6–6) taraf başına 60 "
                 "çözülmüş + iki zaman yarısı aynı yön + tek yönlü p < 0.10: SMT'li ≥ 0.15 R/setup kötüyse o segmentte "
-                "puanı kaldırma önerisi (önce 'SMT doğru tanımla' sonucuna bakılır); |fark| < 0.15 etkisiz",
+                "puanı kaldırma/düşürme önerisi (önce 'SMT doğru tanımla' sonucuna bakılır); |fark| < 0.15 etkisiz",
         measure="python scripts/score_item_outcome_stat.py  (en alttaki SMT segment bölümü)",
         md="SMT +2 — segment bazında (altcoin / BTC-ETH / FX)",
         progress_fn=_p_smt_segment,

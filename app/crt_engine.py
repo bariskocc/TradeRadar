@@ -52,7 +52,10 @@ C1_BODY_FILTER_TFS = frozenset({"4h"})
 #   - PD: PDH/PDL/PWH/PWL sayilmaz (haftalik C2 onceki haftanin ucunu tanim geregi supurur,
 #     kalem bedava +1 olurdu); `pd_major` = PMH/PML, `pd_monthly` = 0, FVG/OB haftalik mumlarda.
 #   - Tavan 8 (4H/1D'de 9), acilma esigi 6 (`MIN_QUALITY_SCORE_1W`, scanner).
+#   - 24.10 (kullanici karari): hep 0 olan iki yuva +1 kalem oldu -- `weekly` = 1D bias uyumu,
+#     `pd_monthly` = guclu C2 donusu (geri kapanis >= W1_STRONG_RECLAIM_PCT). Anahtarlar ayni (Journal semasi).
 W1_TIMEFRAME = "1w"
+W1_STRONG_RECLAIM_PCT = 50.0
 W1_C2_HOURS = 168.0
 W1_SCORE_CAP = 8
 _W1_TAUTOLOGICAL_PD = frozenset({"PDH", "PDL", "PWH", "PWL"})
@@ -713,8 +716,9 @@ def _calc_live_setup_bias(
 
     Ham toplam 13'e cikabilir; SMT'siz tavan 9. SMT +2 ile max 11 (premium).
 
-    1W (`W1_TIMEFRAME`): 1D hiza yerine AYLIK bias (+2/-2), weekly kalemi 0, PD'de yalniz
-    PMH/PML (`pd_major`) + haftalik FVG/OB; tavan 8, SMT ile 10.
+    1W (`W1_TIMEFRAME`): 1D hiza yerine AYLIK bias (+2/-2), `weekly` = 1D bias uyumu (+1),
+    `pd_monthly` = guclu C2 donusu (+1, 24.10), PD'de yalniz PMH/PML (`pd_major`) + haftalik
+    FVG/OB; tavan 8, SMT ile 10.
 
     `with_parts=True` ise kalem kalem kirilim (SCORE_PART_KEYS) VE kalemlerin arkasindaki
     SUREKLI olcumler (SCORE_FEATURE_KEYS: wick orani, C2 gövde orani, geri donus %, IFVG bosluk
@@ -804,6 +808,18 @@ def _calc_live_setup_bias(
         or (direction == "SHORT" and weekly_bias == "BEARISH")
     )
     weekly_score = 1 if weekly_aligned else 0
+    if is_w1:
+        # 1W (24.10, kullanici karari): `weekly` yuvasi 1D BIAS UYUMU (+1) -- HTF haftalik oldugu icin
+        # 1W uyumu hep 0'di. Journal (zamaninda gorulen 105 setup, TP once mi SL once mi): hizali %53,
+        # degil %14; cezasizlarda %75 / %44. Hard filtre degil, ters bias ceza almaz.
+        try:
+            d1_bias = compute_daily_bias(df_1d) if df_1d is not None and not df_1d.empty else "NEUTRAL"
+        except Exception:
+            d1_bias = "NEUTRAL"
+        weekly_score = 1 if (
+            (direction == "LONG" and d1_bias == "BULLISH")
+            or (direction == "SHORT" and d1_bias == "BEARISH")
+        ) else 0
 
     # Yalniz kapali C2 +1 (tum TF). 25.09'a kadar 1D'de forming C2 de +1 aliyordu;
     # 1D C2 kapanisini beklemeyi biraktigi icin bedel skorda odenir (1H gibi).
@@ -819,6 +835,12 @@ def _calc_live_setup_bias(
         if reclaim is not None and reclaim < C2_RECLAIM_WEAK_PCT
         else 0
     )
+    if is_w1:
+        # 1W (24.10, kullanici karari): `pd_monthly` yuvasi GUCLU C2 DONUSU (+1) -- aylik seviye zaten
+        # pd_major'da sayildigi icin hep 0'di. Zayif donus cezasinin aynasi: C2, C1 araliginin en az
+        # W1_STRONG_RECLAIM_PCT'sine geri kapandi. Journal: %60 / %13; cezasizlarda %60 / %44.
+        pd_monthly_score = 1 if (reclaim is not None and reclaim >= W1_STRONG_RECLAIM_PCT) else 0
+        pd_score = pd_major_score + pd_monthly_score + pd_struct_score
 
     ifvg_score = 0
     ifvg_zone = None
@@ -2155,6 +2177,44 @@ def build_rejected_setup(
     )
 
 
+def _first_swept_side(
+    df_ltf: Optional[pd.DataFrame],
+    df_htf: pd.DataFrame,
+    j: int,
+    high_lvl: float,
+    low_lvl: float,
+) -> Optional[str]:
+    """C2 (df_htf'in j. mumu) C1'in iki ucunu da deldiyse hangisini ONCE deldi: "high" | "low" | None.
+
+    LTF'de C2 penceresindeki [C2 acilisi, sonraki HTF mumun acilisi) mumlar sirayla taranir.
+    Iki ucu ayni LTF mumunda delen mumda sira mum renginden tahmin edilir (yesil: once dip,
+    kirmizi: once tepe). LTF yoksa ya da C2 acilisini kapsamiyorsa None -- cagiran eski
+    davranisa duser (24.10, US500 4H).
+    """
+    if df_ltf is None or df_ltf.empty:
+        return None
+    try:
+        start = df_htf.index[j]
+        end = df_htf.index[j + 1] if j + 1 < len(df_htf) else None
+        ltf = df_ltf if df_ltf.index.is_monotonic_increasing else df_ltf.sort_index()
+        if ltf.index[0] > start:
+            return None
+        win = ltf[ltf.index >= start]
+        if end is not None:
+            win = win[win.index < end]
+        for h, lo, o, c in zip(win["high"].to_numpy(float) > high_lvl, win["low"].to_numpy(float) < low_lvl,
+                               win["open"].to_numpy(float), win["close"].to_numpy(float)):
+            if h and lo:
+                return "low" if c >= o else "high"
+            if h:
+                return "high"
+            if lo:
+                return "low"
+    except Exception:
+        return None
+    return None
+
+
 def detect_crt_setup(
     df_4h: pd.DataFrame,
     symbol: str,
@@ -2177,6 +2237,11 @@ def detect_crt_setup(
     Purge/C2: C1'in bir tarafini (SHORT'ta high, LONG'ta low) esik kadar asip ayni
     mumda C1 araligina GERI kapatan ilk mum. Bir mum tarafi asip geri kapatmadan
     (breakout) kaparsa o C1 gecersiz sayilir.
+
+    IKI UC DA SUPURULDUYSE (24.10, kullanici karari): ayni C2 hem C1 high'ini hem low'unu
+    delerse yon LTF'de ILK delinen uca gore secilir (`_first_swept_side`); sonra delinen uc o
+    setup'in hedefidir, oteki yon CRT sayilmaz (`c2_second_sweep`). LTF sirayi veremiyorsa eski
+    davranis: once HIGH (SHORT) denenir.
 
     C1 govdesi (30.09): C1_BODY_FILTER_TFS'te (4H) govdesi araligin C1_MIN_BODY_FRAC'indan (0.30)
     kucuk C1 elenir (`c1_weak`).
@@ -2213,7 +2278,7 @@ def detect_crt_setup(
     `rejected` (liste verilirse): setup'a cevrilmeden elenen adaylar -- yalniz KAPANMIS C2 ve
     C1 ucu gercekten delinmisse -- {reason, direction, crt_bar_time, purge_time, setup} olarak
     eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small / c1_weak /
-    not_selected (gecerliydi, baska aday secildi; `setup` dolu). Motor karari DEGISMEZ; Setup
+    c2_second_sweep (C2 once oteki ucu supurdu) / not_selected (gecerliydi, baska aday secildi; `setup` dolu). Motor karari DEGISMEZ; Setup
     Journal bu adaylarin sonrasini izler (14.09).
     """
     df_4h = df_4h.sort_index()
@@ -2249,8 +2314,9 @@ def detect_crt_setup(
     def _scan_purge(c1_i: int, crt_high: float, crt_low: float):
         """Purge/C2'yi C1'den sonraki 1-3 mum icinde ara (ilk gecerli purge/breakout durdurur).
 
-        Donus (direction, purge_j, red): gecerli purge'de direction ve purge_j dolu. C1 elendiyse
-        red = (reason, direction, j): c2_breakout / c2_wrong_color / c1_stale / sweep_small.
+        Donus (direction, purge_j, red, second): gecerli purge'de direction ve purge_j dolu. C1
+        elendiyse red = (reason, direction, j): c2_breakout / c2_wrong_color / c1_stale / sweep_small.
+        second = (direction, j): C2 iki ucu da supurdu ve bu yon SONRA supuruldu -- CRT degil (24.10).
         """
         # C1 ekstreminin purge'den ONCE (araya giren bir mumla) HAM olarak delinip
         # delinmedigini izle. Delinmisse o taraftaki likidite zaten alinmis demektir
@@ -2263,7 +2329,14 @@ def detect_crt_setup(
             c2_high = float(c2["high"])
             c2_low = float(c2["low"])
             c2_close = float(c2["close"])
-            if c2_high > crt_high * (1 + purge_threshold):  # HIGH supuruldu
+            hi_lvl = crt_high * (1 + purge_threshold)
+            lo_lvl = crt_low * (1 - purge_threshold)
+            hi = c2_high > hi_lvl
+            lo = c2_low < lo_lvl
+            # Iki uc da delindi: yon ilk delinen uctan (24.10). Sira bilinmiyorsa eski davranis (HIGH once).
+            first = _first_swept_side(df_ltf, df_4h, j, hi_lvl, lo_lvl) if (hi and lo) else None
+            second = ("LONG", j) if first == "high" else (("SHORT", j) if first == "low" else None)
+            if hi and first != "low":  # HIGH supuruldu
                 # geri kapatti + (kirmizi veya doji) + high onceden delinmemis -> SHORT
                 c2_state = _candle_state(c2)
                 color_ok = c2_state in ("bearish", "doji") or not color_hard
@@ -2272,7 +2345,7 @@ def detect_crt_setup(
                     and color_ok
                     and not pre_high_breach
                 ):
-                    return "SHORT", j, None
+                    return "SHORT", j, None, second
                 # asti / guclu yanlis renk / bayat -> C1 gecersiz
                 if c2_close > crt_high:
                     reason = "c2_breakout"
@@ -2280,8 +2353,8 @@ def detect_crt_setup(
                     reason = "c2_wrong_color"
                 else:
                     reason = "c1_stale"
-                return None, None, (reason, "SHORT", j)
-            if c2_low < crt_low * (1 - purge_threshold):    # LOW supuruldu
+                return None, None, (reason, "SHORT", j), second
+            if lo:    # LOW supuruldu
                 # geri kapatti + (yesil veya doji) + low onceden delinmemis -> LONG
                 c2_state = _candle_state(c2)
                 color_ok = c2_state in ("bullish", "doji") or not color_hard
@@ -2290,14 +2363,14 @@ def detect_crt_setup(
                     and color_ok
                     and not pre_low_breach
                 ):
-                    return "LONG", j, None
+                    return "LONG", j, None, second
                 if c2_close < crt_low:
                     reason = "c2_breakout"
                 elif not color_ok:
                     reason = "c2_wrong_color"
                 else:
                     reason = "c1_stale"
-                return None, None, (reason, "LONG", j)
+                return None, None, (reason, "LONG", j), second
             # Bu mum esikli purge yapmadi; ama C1 ekstremini HAM olarak delmisse
             # ilgili taraf bayat sayilir (likidite onceden tuketilmis).
             if c2_low < crt_low:
@@ -2307,8 +2380,8 @@ def detect_crt_setup(
                 pre_high_breach = True
                 raw_breach = raw_breach or ("SHORT", j)
         if raw_breach is not None:
-            return None, None, ("sweep_small", raw_breach[0], raw_breach[1])
-        return None, None, None
+            return None, None, ("sweep_small", raw_breach[0], raw_breach[1]), None
+        return None, None, None, None
 
     for live_i in range(n - 2, n - c1_back - 1, -1):
         if live_i < 1 or live_i + 1 >= n:
@@ -2324,7 +2397,7 @@ def detect_crt_setup(
         crt_low = float(live_crt["low"])
         crt_vol = float(live_crt["volume"])
 
-        direction, purge_j, red = _scan_purge(live_i, crt_high, crt_low)
+        direction, purge_j, red, second = _scan_purge(live_i, crt_high, crt_low)
 
         live_ratio = live_range / live_atr
         if live_ratio < MIN_RANGE_ATR_RATIO or live_ratio > MAX_RANGE_ATR_RATIO:
@@ -2333,13 +2406,19 @@ def detect_crt_setup(
                 _reject("range_atr", direction, live_i, purge_j)
             continue
 
+        # Karasiz C1 (govde < C1_MIN_BODY_FRAC x aralik) CRT sayilmaz (30.09).
+        c1_weak = c1_body_hard and abs(float(live_crt["close"]) - float(live_crt["open"])) < C1_MIN_BODY_FRAC * live_range
+
+        # C2 iki ucu da supurdu: SONRA supurulen yon CRT degil (24.10); Journal kontrol grubu olarak izler.
+        if second is not None and not c1_weak:
+            _reject("c2_second_sweep", second[0], live_i, second[1])
+
         if direction is None or purge_j is None:
             if red is not None:
                 _reject(red[0], red[1], live_i, red[2])
             continue
 
-        # Karasiz C1 (govde < C1_MIN_BODY_FRAC x aralik) CRT sayilmaz (30.09).
-        if c1_body_hard and abs(float(live_crt["close"]) - float(live_crt["open"])) < C1_MIN_BODY_FRAC * live_range:
+        if c1_weak:
             _reject("c1_weak", direction, live_i, purge_j)
             continue
 

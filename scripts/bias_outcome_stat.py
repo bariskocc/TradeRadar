@@ -41,7 +41,7 @@ MIN_GROUP = 100                 # 4H: hizali ve ters gruplarin her biri, cozulmu
 # seyrek, taze veriyle 50 aylar surer -> butun veri; esikler 4H'ten kopyalandi, 1D verisine bakilarak secilmedi.
 DECISION = {"4h": (DECISION_SINCE, MIN_GROUP), "1d": (None, 50)}
 EDGE_R = 0.15                   # R/setup farki
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected"}
 ORDER = ("hizali", "NEUTRAL", "ters")
 
 

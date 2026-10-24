@@ -7,6 +7,12 @@
     {# ?v=mtime: CSS yeniden derlenince tarayici eski kopyayi kullanmasin (bkz. main._static_version).
        `is defined` korumasi: eski backend calisirken sayfa yine acilsin. #}
     <link rel="stylesheet" href="/static/css/app.css{% if static_v is defined %}?v={{ static_v() }}{% endif %}">
+    {# Tema tercihi (24.10): sidebar dugmesi localStorage'a yazar; ilk boyamadan once uygulanir ki
+       sayfa acik gorunup koyuya atlamasin. JS ile cizilen grafikler renkleri trDark()'tan secer. #}
+    <script>
+        try { if (localStorage.getItem("tr-theme") === "dark") document.documentElement.classList.add("theme-dark"); } catch (e) {}
+        window.trDark = function () { return document.documentElement.classList.contains("theme-dark"); };
+    </script>
     {% block head %}{% endblock %}
 </head>
 <body class="h-full bg-dark-900 text-gray-200">

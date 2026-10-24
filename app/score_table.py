@@ -64,6 +64,8 @@ OUTCOME_SINCE = {
 ITEM_SINCE = {
     "pd_major": datetime(2026, 9, 29), "pd_monthly": datetime(2026, 9, 29), "pd_struct": datetime(2026, 9, 29),
     "reclaim": datetime(2026, 9, 19),  # 19.09: ceza -2 -> -4
+    # 24.10: 1W'de iki yuvanin anlami degisti (1D bias uyumu / guclu C2 donusu); eski 1W satirlarinda hep 0.
+    ("1w", "weekly"): datetime(2026, 10, 24), ("1w", "pd_monthly"): datetime(2026, 10, 24),
 }
 MIN_N = 10            # bunun altinda "veri az" -- oran yorumlanmaz
 ALWAYS_FRAC = 0.95    # kalem setuplarin >= %95'inde puan veriyorsa ayirt etmiyor
@@ -78,7 +80,15 @@ _NOTES: dict[tuple[str, str], str] = {
     ("1d", "htf"): "Filtre koruyor; +2 ödülü karar 03.10",
     ("1d", "c2_closed"): "25.09'dan beri açık C2 +1 almıyor, karar 03.10",
     ("1d", "base"): "25.09'dan beri yanlış renk de setup olur (0 puan)",
+    ("4h", "weekly"): "24.10: altcoinde kazananı seçmiyor (karar bandı uyumlu +0.90R vs uyumsuz +2.67R), FX/BTC-ETH'de "
+                      "çalışıyor — kullanıcı: dokunma, izle (sinyal sayısı düşmesin)",
+    ("4h", "smt"):"24.10: altcoinde +2 → +1 (SMT'li setup aynı skor bandında −0.63 R/setup kötü, iki yarıda da). "
+                   "+2 satırları eski altcoin + FX/BTC-ETH; +1 satırları 24.10 sonrası altcoin",
     ("1w", "htf"): "Yeni (28.09), henüz ölçüm yok",
+    ("1w", "weekly"): "24.10 eklendi (eski yuva hep 0'dı); Journal: hizalı %53 TP, değil %14 · 7 gün dolana kadar "
+                      "eski satırlar 0 taşır",
+    ("1w", "pd_monthly"): "24.10 eklendi (eski yuva hep 0'dı); Journal: %60 TP, değil %13 · 7 gün dolana kadar "
+                          "eski satırlar 0 taşır",
 }
 _RECLAIM_NOTE = "19.09 kanıtlandı: zayıf dönüş belirgin kötü"
 
@@ -108,11 +118,12 @@ def _score_rows(strategy: str) -> list[dict]:
             "allowed": {-2, 0, 2},
         },
         {
-            "key": "weekly", "label": "1W bias uyumu",
-            "points": "—" if w1 else "+1",
-            "rule": ("Bu stratejide yok (HTF zaten haftalık)" if w1
+            # 24.10: 1W'de bu yuva 1D bias uyumu (HTF haftalik oldugu icin 1W uyumu hep 0'di).
+            "key": "weekly", "label": "1D bias uyumu" if w1 else "1W bias uyumu",
+            "points": "+1",
+            "rule": ("1D bias işlem yönündeyse +1 (ters bias ceza almaz; 24.10'da eklendi)" if w1
                      else "Haftalık bias işlem yönündeyse +1"),
-            "allowed": {0} if w1 else {0, 1}, "absent": w1,
+            "allowed": {0, 1},
         },
         {
             "key": "c2_closed", "label": "C2 kapalı",
@@ -132,11 +143,13 @@ def _score_rows(strategy: str) -> list[dict]:
             "allowed": {0, 1},
         },
         {
-            "key": "pd_monthly", "label": "PD aylık",
-            "points": "—" if w1 else "+1",
-            "rule": ("Bu stratejide yok (aylık seviye PD major sayılıyor)" if w1
+            # 24.10: 1W'de bu yuva guclu C2 donusu (aylik seviye zaten pd_major'da).
+            "key": "pd_monthly", "label": "Güçlü C2 dönüşü" if w1 else "PD aylık",
+            "points": "+1",
+            "rule": (f"C2, C1 aralığının en az %{int(ce.W1_STRONG_RECLAIM_PCT)}'sine geri kapandı "
+                     f"(zayıf dönüş cezasının aynası; 24.10'da eklendi)" if w1
                      else "C2 PMH/PML'ye dokundu (major ile toplanır)"),
-            "allowed": {0} if w1 else {0, 1}, "absent": w1,
+            "allowed": {0, 1},
         },
         {
             "key": "pd_struct", "label": "HTF FVG / OB",
@@ -166,10 +179,15 @@ def _score_rows(strategy: str) -> list[dict]:
             "allowed": {0, -pen},
         },
         {
+            # 24.10 (kullanici karari): 4H altcoinde SMT +1 (sc.smt_bonus_for).
             "key": "smt", "label": "SMT divergence",
-            "points": f"+{sc.SMT_QUALITY_BONUS}",
-            "rule": f"Korele paritede SMT +{sc.SMT_QUALITY_BONUS} — tavandan SONRA eklenir",
-            "allowed": {0, sc.SMT_QUALITY_BONUS},
+            "points": (f"+{sc.SMT_QUALITY_BONUS} / +{sc.SMT_ALT_4H_BONUS}" if strategy == "4h"
+                       else f"+{sc.SMT_QUALITY_BONUS}"),
+            "rule": (f"Korele paritede SMT +{sc.SMT_QUALITY_BONUS}; altcoinde +{sc.SMT_ALT_4H_BONUS} (24.10'dan beri — "
+                     f"SMT'li altcoin setupları daha kötü gidiyordu) — tavandan SONRA eklenir" if strategy == "4h"
+                     else f"Korele paritede SMT +{sc.SMT_QUALITY_BONUS} — tavandan SONRA eklenir"),
+            "allowed": ({0, sc.SMT_ALT_4H_BONUS, sc.SMT_QUALITY_BONUS} if strategy == "4h"
+                        else {0, sc.SMT_QUALITY_BONUS}),
         },
     ]
     for r in rows:
@@ -231,6 +249,8 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "CRT yapısı",
          "label": f"C1 gövdesi ≥ aralığın %{ce.C1_MIN_BODY_FRAC * 100:g}'u (doji / kararsız C1 CRT sayılmaz)",
          "stage": "c1_weak", "on": strategy in ce.C1_BODY_FILTER_TFS, "off_note": "Yok — C1 şekline bakılmaz"},
+        {"group": "CRT yapısı", "label": "C2 iki ucu da süpürdüyse yön ilk süpürülen uçtan (öbür yön CRT değil)",
+         "stage": "c2_second_sweep", "on": True},
         # --- Kapilar (scanner.detect_and_create_waiting sirasi) ---
         {"group": "Kapı", "label": "1D bias ters olmamalı (NEUTRAL geçer)", "stage": "bias_mismatch",
          "on": bias_on, "off_note": "Yok — aylık bias yalnız skorda"},
@@ -354,7 +374,9 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
         error = str(exc)
 
     total = _score_health(rows, parts_list, lim)
-    ranking = _attach_outcomes(rows, await _outcome_rows(db, strategy), strategy)
+    sub_out = await _outcome_rows(db, strategy)
+    ranking = _attach_outcomes(rows, sub_out, strategy)
+    candidates = _candidate_rows(sub_out, strategy)
     for f in filters:
         cnt = stage_counts.get(f["stage"], 0) if f["stage"] else None
         f["count"] = cnt
@@ -390,7 +412,54 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
         "error": error,
         "ranking": ranking,
         "outcome_since": OUTCOME_SINCE.get(strategy),
+        "candidates": candidates,
+        "cand_since": CAND_SINCE,
+        "cand_min_side": so.CAND_MIN_SIDE,
+        "cand_min_rr": so.CAND_MIN_RR,
     }
+
+
+# 24.10 (kullanici: "/skor-tablosu sayfasini da guncelle"): bugun skorda OLMAYAN aday kalemler sayfada da gorunsun.
+# Hesap `score_outcome.cand_flip` (rapor `scripts/score_candidates_stat.py` ve /izleme "Skor tablosu yeni adaylar" ile
+# ayni). Sayfadaki hukum yalniz ilk kosul (karar bandi farki); tam kural (iki yari + p < 0.10) rapordadir.
+CAND_SINCE = datetime(2026, 9, 29)   # /izleme sayaciyla ayni kume (29.09 key level tanimi)
+
+
+def _candidate_rows(sub: list[dict], strategy: str) -> list[dict]:
+    thr = so.THR.get(strategy, 7)
+    part = [x for x in sub if _fs(x) and _fs(x) >= CAND_SINCE]
+    out = []
+    for key, label, v, src, filt in so.candidates_for(strategy):
+        g, b, d, (lo, hi), _band = so.cand_flip(part, key, thr)
+        side_n = min(g["res"], b["res"])
+        if side_n < so.CAND_MIN_SIDE or d is None:
+            lean = ""
+            if d is not None:
+                good = d if v > 0 else -d
+                lean = " · eğilim " + ("olumlu" if good >= so.BAND else "olumsuz" if good <= -so.BAND else "nötr") \
+                       + f" ({d:+.2f})"
+            h = _h("na", "Veri birikiyor", f"Karar bandında az taraf {side_n}/{so.CAND_MIN_SIDE} çözülmüş{lean}.")
+        else:
+            good = d if v > 0 else -d
+            if good >= so.BAND:
+                h = _h("ok", "Puana aday", f"Fark {d:+.2f} R/setup lehte. Tam kural (iki yarı + p < 0.10) rapordan, "
+                                            "sonra tek replay.")
+            elif good <= -so.BAND:
+                h = _h("bad", "Ters", f"Fark {d:+.2f} R/setup aleyhte; bu puan kazananı seçmiyor.")
+            else:
+                h = _h("warn", "Fark yok", f"Fark {d:+.2f} R/setup (bant ±{so.BAND}).")
+
+        def txt(st):
+            return (f"{st['w']} TP / {st['l']} SL · {st['rps']:+.2f}R" if st["res"] else "çözülmüş yok")
+
+        out.append(dict(
+            key=key, label=label, points=f"{v:+d}".replace("-", "−"), src=src, filt=filt,
+            only=sorted(so.CAND_ONLY.get(key, ())), band=f"{lo}–{hi}",
+            measured=sum(1 for x in part if x["cand"].get(key) is not None),
+            have=sum(1 for x in part if x["cand"].get(key) == 1),
+            got=txt(g), base=txt(b), side_n=side_n, health=h,
+        ))
+    return out
 
 
 async def _outcome_rows(db: AsyncSession, strategy: str) -> list[dict]:
@@ -455,7 +524,7 @@ def _attach_outcomes(rows: list[dict], sub: list[dict], strategy: str) -> dict:
         if r.get("absent"):
             r["out"] = None
             continue
-        since = ITEM_SINCE.get(r["key"])
+        since = ITEM_SINCE.get((strategy, r["key"]), ITEM_SINCE.get(r["key"]))
         part = [x for x in sub if since is None or (_fs(x) and _fs(x) >= since)]
         io = so.item_outcomes(part, r["key"], thr)
         cells = [dict(v=v, w=io["by"][v]["w"], l=io["by"][v]["l"], rps=io["by"][v]["rps"]) for v in io["vals"]]

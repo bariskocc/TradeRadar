@@ -316,6 +316,15 @@ class PotentialNotice(Base):
     state = Column(String, nullable=True)               # open:gated / closed:gated / open:pass / ...
     gate = Column(String, nullable=True)                # son bildirilen kapi (bias_mismatch, low_rr, ...)
     cancelled = Column(Boolean, default=False)          # IPTAL reply'i gitti
+    # 24.10 (/potential-signals sayfasi): bildirim anindaki seviyeler + iptal nedeni. Telegram kapaliyken de
+    # satir yazilir (sayfa bildirim kaydini gosterir); sonuc Setup Journal'dan ayni anahtarla okunur.
+    score = Column(Integer, nullable=True)
+    entry = Column(Float, nullable=True)
+    sl = Column(Float, nullable=True)
+    tp = Column(Float, nullable=True)
+    rr = Column(Float, nullable=True)
+    model = Column(String, nullable=True)
+    cancel_reason = Column(String, nullable=True)       # crt_gone / crt_replaced / ...
 
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

@@ -65,6 +65,9 @@ def collect(rows, strategy: str | None = None, all_levels: bool = False) -> list
         pal, fe = analysis_parts(r)
         if not pal:
             continue
+        if st == "1w":   # 1W adayi: setup anindaki haftalik bias (bias karnesinden)
+            fe = dict(fe or {})
+            fe.setdefault("w_bias", weekly_bias_at(_get(r, "symbol"), _get(r, "levels_at")))
         o, rr = outcome_of(r)
         sym, mk = _get(r, "symbol") or "", (_get(r, "market_type") or "").lower()
         seg = "fx" if mk != "crypto" else ("major" if sym in ("BTCUSDT.P", "ETHUSDT.P") else "alt")
@@ -74,7 +77,9 @@ def collect(rows, strategy: str | None = None, all_levels: bool = False) -> list
 
 
 def stats(sub) -> dict:
-    w = [x for x in sub if x["o"] == "win"]
+    # 24.10 (kullanici kurali): sonuc = TP once mi SL once mi -- giris dolmadan TP'ye giden setup da TP sayilir
+    # (`tpb` onun alt kumesi olarak ayrica sayilir). Oncesinde yalniz dolumlu kazanc sayiliyordu.
+    w = [x for x in sub if x["o"] in ("win", "tp_before_entry")]
     l_ = [x for x in sub if x["o"] == "loss"]
     res = len(w) + len(l_)
     return dict(n=len(sub), res=res, w=len(w), l=len(l_),
@@ -184,8 +189,22 @@ CANDIDATES = (
     # 21.10 (kullanici, "Limit giris seviyesi — 4H" kapanisi): kapilari gecmis 4H BPR girisli setup 18 dolumda 1 TP / 17 SL,
     # hicbir giris varyanti kurtarmiyor -> setup'in kendisi mi kotu? Donmus secilen giris = BPR'nin yakin kenari.
     ("bpr_entry", "Giriş BPR'den (IFVG + FVG kesişimi)", -2, "entries.chosen.e = entries.bpr_near.e", None),
+    # 24.10 (kullanici, 1W skor kalemleri incelemesi): YALNIZ 1W adaylari (CAND_ONLY). Puan ve esikler okumadan once
+    # yazildi. Haftalik bias 4H/1D'de zaten puanli kalem (`weekly`), bu yuzden orada aday degil.
+    ("w_bias_with", "Haftalık bias işlem yönünde", +1, "bias_journal.weekly (seviye anından önce kapanmış son gün)", None),
+    ("w_bias_against", "Haftalık bias ters", -2, "bias_journal.weekly (seviye anından önce kapanmış son gün)", None),
+    ("wick_big", "Purge fitili büyük (≥ C1 aralığının %40'ı)", +1, "features.wick_frac (bugünkü fitil kalemi %10'da)", None),
+    ("liq_far", "Purge ötesinde en yakın likidite ≥ 1 ATR uzakta", +1, "features.liq_beyond_atr", None),
+    ("c2_doji", "C2 doji +1 yerine 0 alsa", -1, "score_parts.base = 1", None),
 )
 CAND_POINTS = {k: v for k, _l, v, _s, _f in CANDIDATES}
+# Yalniz belirli stratejilerde aday olanlar; listede olmayan aday her stratejide.
+CAND_ONLY = {k: frozenset({"1w"}) for k in ("w_bias_with", "w_bias_against", "wick_big", "liq_far", "c2_doji")}
+
+
+def candidates_for(strategy: str | None) -> tuple:
+    """Stratejide gecerli adaylar (CANDIDATES sirasiyla)."""
+    return tuple(c for c in CANDIDATES if strategy is None or strategy in CAND_ONLY.get(c[0], (strategy,)))
 CAND_MIN_RR = 2.0      # karar kumesi: islem acilabilir dilim (C1 sekli dersi, 21.10)
 CAND_MIN_SIDE = 30     # tetik: karar bandinda taraf basina cozulmus
 CISD_DISP_MIN = 1.0
@@ -225,7 +244,9 @@ def candidate_values(row, pal: dict, fe: dict) -> dict:
     if kln is not None:
         la = fe.get("liq_beyond_atr")
         out["liq_near"] = 1 if (isinstance(la, (int, float)) and la <= 0.5) else 0
-        scored = sum((pal.get(k) or 0) for k in ("pd_major", "pd_monthly", "pd_struct")) > 0
+        # 1W'de pd_monthly yuvasi 24.10'dan beri guclu C2 donusu, key level degil.
+        kl_keys = ("pd_major", "pd_struct") if _get(row, "strategy") == "1w" else ("pd_major", "pd_monthly", "pd_struct")
+        scored = sum((pal.get(k) or 0) for k in kl_keys) > 0
         out["eq_ssl"] = 1 if (kln > 0 and not scored) else 0
         out["no_key_level"] = 1 if kln == 0 else 0
     ra = fe.get("range_atr")
@@ -243,7 +264,69 @@ def candidate_values(row, pal: dict, fe: dict) -> dict:
     ce, be = ch.get("e"), (ents.get("bpr_near") or {}).get("e")
     if isinstance(ce, (int, float)):
         out["bpr_entry"] = 1 if (isinstance(be, (int, float)) and abs(ce - be) <= 1e-9 * max(1.0, abs(ce))) else 0
+    # 24.10 1W adaylari (CAND_ONLY).
+    wb, dr = fe.get("w_bias"), _get(row, "direction")
+    if wb in ("BULLISH", "BEARISH", "NEUTRAL") and dr in ("LONG", "SHORT"):
+        with_ = wb != "NEUTRAL" and (wb == "BULLISH") == (dr == "LONG")
+        out["w_bias_with"] = 1 if with_ else 0
+        out["w_bias_against"] = 1 if (wb != "NEUTRAL" and not with_) else 0
+    wf = fe.get("wick_frac")
+    if isinstance(wf, (int, float)):
+        out["wick_big"] = 1 if wf >= 0.40 else 0
+    la = fe.get("liq_beyond_atr")
+    if isinstance(la, (int, float)):
+        out["liq_far"] = 1 if la >= 1.0 else 0
+    if pal.get("base") is not None:
+        out["c2_doji"] = 1 if pal.get("base") == 1 else 0
     return out
+
+
+# Haftalik bias (setup ani) -- Journal'in `weekly_bias` kolonu son degerlendirmeye ait (sonucu da gorur), bu yuzden
+# bias karnesinden (`bias_journal.weekly`) seviye anindan once kapanmis son gunun degeri okunur. Salt okuma, 10 dk
+# bellekte; DB okunamazsa aday olculmez (None), hesap bozulmaz.
+_WK_CACHE: dict = {"t": 0.0, "m": None}
+
+
+def _weekly_bias_map() -> dict:
+    import time
+    now = time.monotonic()
+    if _WK_CACHE["m"] is not None and now - _WK_CACHE["t"] < 600:
+        return _WK_CACHE["m"]
+    m: dict = {}
+    try:
+        import sqlite3
+        from datetime import datetime
+        from app.config import DATABASE_URL
+        if "sqlite" in (DATABASE_URL or "") and "///" in DATABASE_URL:
+            con = sqlite3.connect(DATABASE_URL.split("///", 1)[1])
+            try:
+                for sym, day, wk in con.execute("select symbol, day, weekly from bias_journal where weekly is not null"):
+                    m.setdefault(sym, []).append((datetime.fromisoformat(str(day)[:19]), wk))
+            finally:
+                con.close()
+            for v in m.values():
+                v.sort()
+    except Exception:
+        m = {}
+    _WK_CACHE.update(t=now, m=m)
+    return m
+
+
+def weekly_bias_at(symbol, levels_at) -> str | None:
+    """Seviye anindan once KAPANMIS son gunun haftalik bias'i (gun acilisi + 24s <= levels_at)."""
+    from datetime import datetime, timedelta
+    try:
+        la = levels_at if isinstance(levels_at, datetime) else datetime.fromisoformat(str(levels_at)[:19])
+    except (TypeError, ValueError):
+        return None
+    la = la.replace(tzinfo=None)
+    best = None
+    for day, wk in _weekly_bias_map().get(symbol, ()):
+        if day + timedelta(hours=24) <= la:
+            best = wk
+        else:
+            break
+    return best
 
 
 def cand_flip(sub, key: str, thr: int):
@@ -259,10 +342,10 @@ def cand_flip(sub, key: str, thr: int):
     return g, b, d, (lo, hi), band
 
 
-def cand_progress(sub, thr: int) -> list[tuple[str, int]]:
+def cand_progress(sub, thr: int, strategy: str | None = None) -> list[tuple[str, int]]:
     """Aday basina karar bandinda AZ olan tarafin cozulmus sayisi (tetik CAND_MIN_SIDE), en ileri once."""
     out = []
-    for key, *_ in CANDIDATES:
+    for key, *_ in candidates_for(strategy):
         g, b, _d, _band, _x = cand_flip(sub, key, thr)
         out.append((key, min(g["res"], b["res"])))
     return sorted(out, key=lambda kv: -kv[1])

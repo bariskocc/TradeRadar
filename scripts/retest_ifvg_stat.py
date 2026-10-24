@@ -37,7 +37,7 @@ ap.add_argument("--db", default=str(REPO / "traderadar.db"))
 ap.add_argument("--strategy", choices=("4h", "1d", "1w"))
 A = ap.parse_args()
 
-QUAL_FAIL = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected",
+QUAL_FAIL = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected",
              "bias_mismatch", "target_taken", "low_quality", "no_cisd", "score7", "tight_stop"}
 MIN_RR = 2.0
 BAND = 0.15

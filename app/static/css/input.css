@@ -2,6 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Tema degiskenleri (24.10) -- tailwind.config.js renkleri buradan okur. "R G B" bicimi,
+   opaklik ekleri (bg-dark-700/50) calissin diye. Varsayilan acik tema; koyuya donmek icin
+   base.html'de <html class="theme-dark ...">. */
+:root {
+  color-scheme: light;
+  --tr-d900: 243 245 249;   /* sayfa zemini */
+  --tr-d800: 255 255 255;   /* kart / menu */
+  --tr-d700: 238 241 246;   /* girdi, hover, ic kutu */
+  --tr-d600: 221 226 234;   /* cizgi */
+  --tr-d500: 197 204 216;
+  --tr-fg:   17 24 39;      /* text-white = ana metin */
+  --tr-g200: 31 41 55;
+  --tr-g300: 55 65 81;
+  --tr-g400: 75 85 99;
+  --tr-g500: 107 114 128;
+  --tr-g600: 140 148 161;
+  --tr-g700: 209 213 219;
+  /* Koyu zeminde okunan 300/400 tonlari beyazda soluk kaliyor -> 600-700 tonlari */
+  --tr-green3: 21 128 61;   --tr-green4: 22 163 74;
+  --tr-red3: 185 28 28;     --tr-red4: 220 38 38;
+  --tr-amber4: 217 119 6;   --tr-yellow4: 202 138 4;
+  --tr-sky4: 2 132 199;     --tr-emerald4: 5 150 105;
+  --tr-orange4: 234 88 12;  --tr-blue4: 37 99 235;
+  --tr-purple4: 147 51 234;
+  --tr-blue: 37 99 235;     --tr-green: 22 163 74;   --tr-red: 220 38 38;
+  --tr-yellow: 202 138 4;   --tr-purple: 147 51 234;
+  --tr-cal-neutral: 148 163 184;   /* takvimde sonucsuz gun */
+}
+html.theme-dark {
+  color-scheme: dark;
+  --tr-d900: 15 17 23;  --tr-d800: 22 25 37;  --tr-d700: 30 34 53;
+  --tr-d600: 39 43 64;  --tr-d500: 51 56 85;  --tr-fg: 255 255 255;
+  --tr-g200: 229 231 235;  --tr-g300: 209 213 219;  --tr-g400: 156 163 175;
+  --tr-g500: 107 114 128;  --tr-g600: 75 85 99;     --tr-g700: 55 65 81;
+  --tr-green3: 134 239 172; --tr-green4: 74 222 128;
+  --tr-red3: 252 165 165;   --tr-red4: 248 113 113;
+  --tr-amber4: 251 191 36;  --tr-yellow4: 250 204 21;
+  --tr-sky4: 56 189 248;    --tr-emerald4: 52 211 153;
+  --tr-orange4: 251 146 60; --tr-blue4: 96 165 250;
+  --tr-purple4: 192 132 252;
+  --tr-blue: 59 130 246;    --tr-green: 34 197 94;   --tr-red: 239 68 68;
+  --tr-yellow: 234 179 8;   --tr-purple: 168 85 247;
+  --tr-cal-neutral: 39 43 64;
+}
+
+/* text-white artik ana metin (koyu); mavi butonun ustundeki yazi beyaz kalsin */
+.bg-accent-blue.text-white, .bg-accent-blue .text-white { color: #fff; }
+
 body {
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
 }
@@ -10,9 +58,9 @@ body {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #161925;
+  background: rgb(var(--tr-d800));
 }
 ::-webkit-scrollbar-thumb {
-  background: #333855;
+  background: rgb(var(--tr-d500));
   border-radius: 3px;
 }

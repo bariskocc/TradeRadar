@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - Charts{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+    .ch-grid { display: grid; gap: 8px; }
+    .ch-cell { display: flex; flex-direction: column; min-width: 0; }
+    .ch-body { flex: 1; min-height: 0; position: relative; }
+    .ch-tf { padding: 2px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; color: rgb(var(--tr-g500)); }
+    .ch-tf:hover { background: rgb(var(--tr-g500) / 0.12); color: rgb(var(--tr-fg)); }
+    .ch-tf.on { background: #3b82f6; color: #fff; }
+    .ch-lay { padding: 4px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; color: rgb(var(--tr-g500)); background: rgb(var(--tr-g500) / 0.08); }
+    .ch-lay:hover { color: rgb(var(--tr-fg)); }
+    .ch-lay.on { background: #3b82f6; color: #fff; }
+    .ch-sel { background: transparent; color: rgb(var(--tr-fg)); font-size: 12px; font-weight: 600; border: 0; outline: none; max-width: 130px; }
+    .ch-sel option, .ch-sel optgroup { background: rgb(var(--tr-d800)); color: rgb(var(--tr-fg)); }
+    .ch-switch { position: relative; width: 34px; height: 18px; border-radius: 9px; background: rgb(var(--tr-g700)); transition: background .15s; flex: none; }
+    .ch-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .15s; }
+    .ch-switch.on { background: #22c55e; }
+    .ch-switch.on::after { left: 18px; }
+    /* Son fiyat etiketinin altinda mum kapanisina kalan sure (TradingView'daki gibi) */
+    .ch-cd { position: absolute; right: 0; z-index: 3; display: none; pointer-events: none; text-align: center;
+             font-size: 11px; line-height: 16px; color: #fff; font-variant-numeric: tabular-nums; border-radius: 0 0 2px 2px; }
+    .ch-legend { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 11px; color: rgb(var(--tr-g500)); pointer-events: none; font-variant-numeric: tabular-nums; }
+    @media (max-width: 767px) {
+        .ch-grid { grid-template-columns: 1fr !important; }
+        /* sidebar.html telefonda butun main tablolarina dolgu + yapiskan ilk sutun veriyor; grafik
+           kutuphanesi de icini <table> ile ciziyor -> grafik kutusundan tasip saat ekseni kesiliyordu */
+        main .ch-canvas table td, main .ch-canvas table th,
+        main .ch-canvas table td:first-child, main .ch-canvas table th:first-child {
+            padding: 0 !important; position: static !important; background: none !important;
+            box-shadow: none !important; z-index: auto !important; }
+    }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="flex h-full">
+
+    {% set active_page = 'charts' %}
+    {% include 'sidebar.html' %}
+
+    <main class="flex-1 overflow-auto">
+        <div class="p-3 md:p-4 max-w-none">
+            <div class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+                <h1 class="text-xl font-bold text-white mr-2">Charts</h1>
+                <div class="flex items-center gap-1" id="layouts">
+                    {% for n in [1, 2, 4, 6, 9] %}
+                    <button type="button" class="ch-lay" data-n="{{ n }}">{{ n }}</button>
+                    {% endfor %}
+                </div>
+                <label class="flex items-center gap-2 cursor-pointer select-none">
+                    <span id="sig-switch" class="ch-switch" role="switch" aria-checked="false" tabindex="0"></span>
+                    <span class="text-xs text-gray-400">Signals</span>
+                </label>
+                <span class="text-[11px] text-gray-500">Candles in TSİ · live from the bot's feed</span>
+            </div>
+
+            <div id="grid" class="ch-grid"></div>
+        </div>
+    </main>
+</div>
+
+<template id="cell-tpl">
+    <div class="ch-cell bg-dark-800 rounded-xl border border-dark-600 overflow-hidden">
+        <div class="flex items-center gap-2 px-2 py-1.5 border-b border-dark-600">
+            <select class="ch-sel">
+                {% for group, syms in symbol_groups %}
+                <optgroup label="{{ group }}">
+                    {% for sym, label in syms %}<option value="{{ sym }}">{{ label }}</option>{% endfor %}
+                </optgroup>
+                {% endfor %}
+            </select>
+            <div class="flex items-center gap-0.5 ch-tfs">
+                <button type="button" class="ch-tf" data-tf="15m">15m</button>
+                <button type="button" class="ch-tf" data-tf="1h">1H</button>
+                <button type="button" class="ch-tf" data-tf="4h">4H</button>
+                <button type="button" class="ch-tf" data-tf="1d">1D</button>
+                <button type="button" class="ch-tf" data-tf="1w">1W</button>
+            </div>
+            <span class="ch-info ml-auto text-[10px] text-gray-500 truncate"></span>
+        </div>
+        <div class="ch-body">
+            <div class="ch-legend"></div>
+            <div class="ch-cd"></div>
+            <div class="ch-canvas" style="position:absolute; inset:0;"></div>
+        </div>
+    </div>
+</template>
+
+<script>
+(function () {
+    const STORE_KEY = 'tr-charts';
+    const DEFAULTS = ['BTCUSDT.P', 'ETHUSDT.P', 'XAUUSD', 'US100', 'EURUSD', 'SOLUSDT.P', 'GBPUSD', 'XAGUSD', 'USDJPY'];
+    const COLS = { 1: 1, 2: 2, 4: 2, 6: 3, 9: 3 };
+    const REFRESH_MS = 15000;
+    const SIGNAL_REFRESH_MS = 60000;
+    // Izgara/eksen cizgisi temaya gore (24.10); tema degisince sayfa yeniden cizilir (secimler localStorage'da)
+    const LINE = (a) => trDark() ? `rgba(255,255,255,${a})` : `rgba(0,0,0,${a})`;
+    window.addEventListener('tr-theme', () => location.reload());
+    const C = { up: '#22c55e', down: '#ef4444', entry: '#3b82f6', sl: '#ef4444', tp: '#22c55e', be: '#9ca3af' };
+
+    const grid = document.getElementById('grid');
+    const tpl = document.getElementById('cell-tpl');
+    const sw = document.getElementById('sig-switch');
+    const validSymbols = new Set(Array.from(tpl.content.querySelectorAll('option')).map(o => o.value));
+
+    // ── durum (tarayicida; yalniz kolaylik, okunamazsa varsayilan) ──
+    let state = { layout: 4, signals: true, cells: [] };
+    try {
+        const s = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+        if (s && typeof s === 'object') state = Object.assign(state, s);
+    } catch (e) { /* yok say */ }
+    function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* yok say */ } }
+    function cellConf(i) {
+        let c = state.cells[i];
+        if (!c || !validSymbols.has(c.symbol)) {
+            const sym = DEFAULTS.find(s => validSymbols.has(s) && !state.cells.some(x => x && x.symbol === s)) || DEFAULTS[0];
+            c = { symbol: sym, tf: (c && c.tf) || '4h' };
+            state.cells[i] = c;
+        }
+        return c;
+    }
+
+    let cells = [];
+
+    // ── yardimcilar ──
+    function fmt(v, p) { return v == null ? '-' : Number(v).toFixed(p); }
+    function snap(times, t) {
+        // t'yi icine dusen mumun zamanina oturt (marker/segment mum disi zaman eklemesin)
+        if (t == null || !times.length || t < times[0]) return null;
+        let lo = 0, hi = times.length - 1;
+        while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (times[mid] <= t) lo = mid; else hi = mid - 1; }
+        return times[lo];
+    }
+
+    function makeCell(i, h) {
+        const conf = cellConf(i);
+        const el = tpl.content.firstElementChild.cloneNode(true);
+        el.style.height = h + 'px';   // grafik olusmadan once: boyutu ilk olcumde dogru alsin
+        grid.appendChild(el);
+        const sel = el.querySelector('.ch-sel');
+        const info = el.querySelector('.ch-info');
+        const legend = el.querySelector('.ch-legend');
+        sel.value = conf.symbol;
+
+        const chart = LightweightCharts.createChart(el.querySelector('.ch-canvas'), {
+            autoSize: true,
+            layout: { background: { color: 'transparent' }, textColor: trDark() ? '#9ca3af' : '#6b7280', fontSize: 11 },
+            grid: { vertLines: { color: LINE(0.05) }, horzLines: { color: LINE(0.05) } },
+            rightPriceScale: { borderColor: LINE(0.12) },
+            timeScale: { borderColor: LINE(0.12), timeVisible: true, secondsVisible: false, rightOffset: 5 },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        });
+        const series = chart.addCandlestickSeries({
+            upColor: C.up, downColor: C.down, wickUpColor: C.up, wickDownColor: C.down, borderVisible: false,
+        });
+        const cell = { i, el, chart, series, sel, info, legend, cd: el.querySelector('.ch-cd'),
+                       lastBar: null, barClose: null, expired: null, gen: 0, times: [], history: null,
+                       precision: 2, priceLines: [], segs: [], signals: [] };
+
+        chart.subscribeCrosshairMove(p => {
+            const d = p && p.seriesData ? p.seriesData.get(series) : null;
+            if (!d) { legend.textContent = ''; return; }
+            const pr = cell.precision;
+            legend.textContent = `O ${fmt(d.open, pr)}  H ${fmt(d.high, pr)}  L ${fmt(d.low, pr)}  C ${fmt(d.close, pr)}`;
+        });
+
+        chart.timeScale().subscribeVisibleLogicalRangeChange(() => tickCell(cell));
+
+        sel.addEventListener('change', () => { conf.symbol = sel.value; save(); load(cell, true); });
+        el.querySelectorAll('.ch-tf').forEach(b => {
+            b.classList.toggle('on', b.dataset.tf === conf.tf);
+            b.addEventListener('click', () => {
+                conf.tf = b.dataset.tf; save();
+                el.querySelectorAll('.ch-tf').forEach(x => x.classList.toggle('on', x === b));
+                load(cell, true);
+            });
+        });
+        cell.conf = conf;
+        return cell;
+    }
+
+    async function load(cell, full) {
+        const conf = cell.conf;
+        const gen = full ? ++cell.gen : cell.gen;
+        const last = cell.times.length ? cell.times[cell.times.length - 1] : null;
+        let url = `/api/charts/candles?symbol=${encodeURIComponent(conf.symbol)}&tf=${conf.tf}`;
+        const incremental = !full && last != null && cell.history !== 'pending';
+        if (incremental) url += `&since=${last}`;
+        if (full) { cell.info.textContent = 'loading…'; clearSignals(cell); }
+        let data;
+        try {
+            const r = await fetch(url);
+            if (r.status === 401) { location.href = '/login'; return; }
+            data = await r.json();
+            if (!r.ok) { cell.info.textContent = data.error || 'error'; return; }
+        } catch (e) { if (full) cell.info.textContent = 'load failed'; return; }
+        if (gen !== cell.gen) return;   // bu arada sembol/TF degisti
+
+        if (incremental) {
+            for (const c of data.candles) {
+                try { cell.series.update(c); } catch (e) { /* eski mum: yok say */ }
+                if (c.time > cell.times[cell.times.length - 1]) cell.times.push(c.time);
+            }
+            if (data.candles.length) cell.lastBar = data.candles[data.candles.length - 1];
+        } else {
+            cell.lastBar = data.candles.length ? data.candles[data.candles.length - 1] : null;
+            cell.precision = data.precision;
+            cell.series.applyOptions({ priceFormat: { type: 'price', precision: data.precision, minMove: Math.pow(10, -data.precision) } });
+            cell.series.setData(data.candles);
+            cell.times = data.candles.map(c => c.time);
+            const n = cell.times.length;
+            if (full && n) cell.chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 150), to: n + 5 });
+        }
+        cell.barClose = data.bar_close;
+        tickCell(cell);
+        const prevHistory = cell.history;
+        cell.history = data.history;
+        const note = { pending: ' · history after startup', failed: ' · history unavailable', store: '' }[data.history] || '';
+        cell.info.textContent = cell.times.length ? `${cell.times.length} bars${note}` : `no data${note}`;
+        if (full || prevHistory === 'pending') loadSignals(cell);
+    }
+
+    // ── mum kapanisina geri sayim ──
+    function fmtLeft(sec) {
+        const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+        const p = v => String(v).padStart(2, '0');
+        if (d > 0) return `${d}d ${p(h)}h`;
+        return h > 0 ? `${p(h)}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+    }
+    function tickCell(cell) {
+        const cd = cell.cd, b = cell.lastBar;
+        const left = cell.barClose == null ? -1 : Math.floor(cell.barClose - Date.now() / 1000);
+        if (!b || left <= 0) {
+            cd.style.display = 'none';
+            // Mum bitti: yenisini 15 sn beklemeden iste (bar basina bir kez)
+            if (b && cell.barClose != null && cell.expired !== cell.barClose && left > -60) {
+                cell.expired = cell.barClose; setTimeout(() => load(cell, false), 1500);
+            }
+            return;
+        }
+        const y = cell.series.priceToCoordinate(b.close);
+        const paneH = cell.el.querySelector('.ch-body').clientHeight - cell.chart.timeScale().height();
+        if (y == null || y < 0 || y + 26 > paneH) { cd.style.display = 'none'; return; }
+        cd.textContent = fmtLeft(left);
+        cd.style.top = Math.round(y + 9) + 'px';
+        cd.style.width = cell.chart.priceScale('right').width() + 'px';
+        cd.style.background = b.close >= b.open ? C.up : C.down;
+        cd.style.display = 'block';
+    }
+    setInterval(() => { if (!document.hidden) cells.forEach(tickCell); }, 1000);
+
+    // ── sinyal katmani ──
+    function clearSignals(cell) {
+        cell.priceLines.forEach(l => { try { cell.series.removePriceLine(l); } catch (e) {} });
+        cell.segs.forEach(s => { try { cell.chart.removeSeries(s); } catch (e) {} });
+        cell.priceLines = []; cell.segs = [];
+        cell.series.setMarkers([]);
+    }
+
+    async function loadSignals(cell) {
+        if (!state.signals) { clearSignals(cell); return; }
+        const gen = cell.gen;
+        let data;
+        try {
+            const r = await fetch(`/api/charts/signals?symbol=${encodeURIComponent(cell.conf.symbol)}`);
+            if (!r.ok) return;
+            data = await r.json();
+        } catch (e) { return; }
+        if (gen !== cell.gen || !state.signals) return;
+        cell.signals = data.signals || [];
+        drawSignals(cell);
+    }
+
+    function segment(cell, t0, t1, price, color, style) {
+        if (t0 == null || t1 == null || price == null) return;
+        const s = cell.chart.addLineSeries({
+            color, lineWidth: 1, lineStyle: style, priceLineVisible: false, lastValueVisible: false,
+            crosshairMarkerVisible: false, priceFormat: { type: 'price', precision: cell.precision, minMove: Math.pow(10, -cell.precision) },
+        });
+        s.setData(t1 > t0 ? [{ time: t0, value: price }, { time: t1, value: price }] : [{ time: t0, value: price }]);
+        cell.segs.push(s);
+    }
+
+    function drawSignals(cell) {
+        clearSignals(cell);
+        if (!state.signals || !cell.times.length) return;
+        const times = cell.times, lastT = times[times.length - 1];
+        const markers = [];
+        const L = LightweightCharts.LineStyle;
+        for (const s of cell.signals) {
+            const tag = `#${s.id} ${s.tf_label}`;
+            const long = s.direction === 'LONG';
+            if (s.open) {
+                const add = (price, color, title, style) => price != null && cell.priceLines.push(cell.series.createPriceLine({
+                    price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title,
+                }));
+                add(s.entry, C.entry, `${tag} ${s.status === 'active' ? 'Entry' : 'Limit'}`, s.status === 'active' ? L.Solid : L.Dashed);
+                add(s.sl, C.sl, `${tag} SL`, L.Solid);
+                if (s.sl_now != null && s.sl != null && Math.abs(s.sl_now - s.sl) > 1e-12) add(s.sl_now, C.be, `${tag} SL now`, L.Dashed);
+                add(s.tp, C.tp, `${tag} TP`, L.Solid);
+                const ft = snap(times, s.filled);
+                if (ft != null) markers.push({ time: ft, position: long ? 'belowBar' : 'aboveBar', color: long ? C.up : C.down,
+                                               shape: long ? 'arrowUp' : 'arrowDown', text: tag });
+                continue;
+            }
+            // Kapanan islem: dolumdan kapanisa kisa cizgiler + giris/cikis isaretleri
+            const t0 = snap(times, s.filled), t1 = snap(times, s.closed);
+            if (t0 == null) continue;
+            const end = t1 != null ? t1 : lastT;
+            segment(cell, t0, end, s.entry, C.entry, L.Solid);
+            segment(cell, t0, end, s.sl, C.sl, L.Dotted);
+            segment(cell, t0, end, s.tp, C.tp, L.Dotted);
+            markers.push({ time: t0, position: long ? 'belowBar' : 'aboveBar', color: long ? C.up : C.down,
+                           shape: long ? 'arrowUp' : 'arrowDown', text: tag });
+            if (t1 != null) {
+                const col = s.outcome === 'win' ? C.up : s.outcome === 'loss' ? C.down : C.be;
+                const rr = s.rr == null ? s.outcome || '' : `${s.rr >= 0 ? '+' : ''}${s.rr.toFixed(2)}R`;
+                markers.push({ time: t1, position: long ? 'aboveBar' : 'belowBar', color: col, shape: 'circle', text: rr });
+            }
+        }
+        markers.sort((a, b) => a.time - b.time);
+        cell.series.setMarkers(markers);
+    }
+
+    // ── yerlesim ──
+    function cellHeight(n) {
+        if (window.innerWidth < 768) return 380;   // telefon: tek sutun, alt alta
+        const rows = Math.ceil(n / (COLS[n] || 2));
+        return Math.max(260, Math.floor((window.innerHeight - 90 - 8 * (rows - 1)) / rows));
+    }
+    function build() {
+        cells.forEach(c => c.chart.remove());
+        cells = [];
+        grid.innerHTML = '';
+        const n = state.layout in COLS ? state.layout : 4;
+        grid.style.gridTemplateColumns = `repeat(${COLS[n]}, minmax(0, 1fr))`;
+        const h = cellHeight(n);
+        for (let i = 0; i < n; i++) {
+            const cell = makeCell(i, h);
+            cells.push(cell);
+            load(cell, true);
+        }
+        document.querySelectorAll('.ch-lay').forEach(b => b.classList.toggle('on', +b.dataset.n === n));
+        requestAnimationFrame(fitAll);
+    }
+
+    function fitAll() {
+        // autoSize'in ResizeObserver'i bazi tarayicilarda gec tetikleniyor: boyutu elle de ver
+        cells.forEach(c => {
+            const body = c.el.querySelector('.ch-body');
+            if (body.clientWidth && body.clientHeight) c.chart.resize(body.clientWidth, body.clientHeight);
+        });
+    }
+
+    document.querySelectorAll('.ch-lay').forEach(b => b.addEventListener('click', () => {
+        state.layout = +b.dataset.n; save(); build();
+    }));
+
+    function setSwitch() {
+        sw.classList.toggle('on', !!state.signals);
+        sw.setAttribute('aria-checked', state.signals ? 'true' : 'false');
+    }
+    function toggleSignals() {
+        state.signals = !state.signals; save(); setSwitch();
+        cells.forEach(c => state.signals ? loadSignals(c) : clearSignals(c));
+    }
+    sw.addEventListener('click', toggleSignals);
+    sw.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleSignals(); } });
+
+    let resizeT;
+    window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => {
+        const h = cellHeight(cells.length);
+        cells.forEach(c => c.el.style.height = h + 'px');
+        requestAnimationFrame(fitAll);
+    }, 150); });
+
+    setSwitch();
+    build();
+    setInterval(() => { if (!document.hidden) cells.forEach(c => load(c, c.history === 'pending')); }, REFRESH_MS);
+    setInterval(() => { if (!document.hidden && state.signals) cells.forEach(c => loadSignals(c)); }, SIGNAL_REFRESH_MS);
+})();
+</script>
+{% endblock %}

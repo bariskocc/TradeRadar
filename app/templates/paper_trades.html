@@ -64,8 +64,19 @@
                            class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if p.kind == 'week' %}bg-accent-blue text-white{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600 hover:text-white{% endif %}">Haftalık</a>
                         <a href="{{ U('overview', tab, 'month', 0) }}"
                            class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if p.kind == 'month' %}bg-accent-blue text-white{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600 hover:text-white{% endif %}">Aylık</a>
+                        <a href="{{ U('overview', tab, 'all', 0) }}"
+                           class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if p.kind == 'all' %}bg-accent-blue text-white{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600 hover:text-white{% endif %}">Tüm zamanlar</a>
                     </div>
 
+                    {% if p.kind == 'all' %}
+                    <div class="text-center min-w-[200px]">
+                        <p class="text-sm font-semibold text-white">{{ p.label }}</p>
+                        <p class="text-[10px] text-gray-500">
+                            {% if p.since %}ilk kapanış {{ p.since }}{% else %}henüz kapanan işlem yok{% endif %}
+                            · <a href="{{ p.table_link }}" class="text-gray-400 hover:text-white" title="Trades sekmesini kapanan bütün işlemlere filtrele">tabloyu bu döneme getir</a>
+                        </p>
+                    </div>
+                    {% else %}
                     <div class="flex items-center gap-2">
                         <a href="{{ U('overview', tab, p.kind, p.offset - 1) }}"
                            class="w-8 h-8 flex items-center justify-center rounded-lg bg-dark-700 text-gray-300 hover:bg-dark-600 hover:text-white transition">
@@ -90,6 +101,7 @@
                         </span>
                         {% endif %}
                     </div>
+                    {% endif %}
 
                     <div class="min-w-[90px] flex justify-end">{% if s.n and s.low_sample %}{{ m.low() }}{% endif %}</div>
                 </div>
@@ -102,17 +114,21 @@
                         <p class="text-[11px] text-gray-500 mt-1">
                             {% if s.delta_pnl is not none %}önceki döneme göre
                             <span class="{% if s.delta_pnl > 0 %}text-green-400{% elif s.delta_pnl < 0 %}text-red-400{% endif %}">{{ fmt_money(s.delta_pnl, s.currency) }}</span>
-                            {% else %}önceki dönem yok{% endif %}
+                            {% elif p.kind == 'all' %}kapanan bütün işlemler{% else %}önceki dönem yok{% endif %}
                         </p>
                     </div>
                     <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                         <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Win rate</p>
+                        {% if s.win_rate is not none %}
                         <p class="text-2xl font-bold text-white">{{ s.win_rate }}%</p>
                         <div class="mt-2 h-1.5 rounded-full bg-dark-600 overflow-hidden flex">
-                            <div class="h-full bg-green-500" style="width: {{ (s.wins / s.n * 100)|round(1) }}%"></div>
-                            <div class="h-full bg-gray-500" style="width: {{ (s.be / s.n * 100)|round(1) }}%"></div>
-                            <div class="h-full bg-red-500" style="width: {{ (s.losses / s.n * 100)|round(1) }}%"></div>
+                            <div class="h-full bg-green-500" style="width: {{ (s.wins / (s.wins + s.losses) * 100)|round(1) }}%"></div>
+                            <div class="h-full bg-red-500" style="width: {{ (s.losses / (s.wins + s.losses) * 100)|round(1) }}%"></div>
                         </div>
+                        {% else %}
+                        <p class="text-2xl font-bold text-gray-600">—</p>
+                        {% endif %}
+                        <p class="text-[11px] text-gray-500 mt-1">BE hariç</p>
                     </div>
                     <div class="bg-dark-700 rounded-lg border border-dark-600 p-3">
                         <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">İşlem</p>
@@ -205,7 +221,7 @@
                                class="block rounded-lg border p-1 md:p-2 min-h-[62px] md:min-h-[86px] overflow-hidden transition hover:border-accent-blue
                                {% if cell.tone == 'win' %}border-green-500/40{% elif cell.tone == 'loss' %}border-red-500/40{% else %}border-dark-600{% endif %}
                                {% if not cell.in_month %}opacity-40{% endif %}"
-                               style="background-color: rgba({{ '34,197,94' if cell.tone == 'win' else ('239,68,68' if cell.tone == 'loss' else '39,43,64') }}, {{ cell.alpha }})"
+                               style="background-color: rgb({{ '34 197 94' if cell.tone == 'win' else ('239 68 68' if cell.tone == 'loss' else 'var(--tr-cal-neutral)') }} / {{ cell.alpha }})"
                                title="{{ cell.n }} işlem · {{ cell.wins }}W / {{ cell.be }}BE / {{ cell.losses }}L{% if cell.open_n %} · {{ cell.open_n }} açık{% endif %}">
                                 <div class="flex items-baseline justify-between gap-1 leading-none">
                                     <span class="text-[11px] md:text-xs font-semibold {% if cell.tone == 'win' %}text-green-400{% elif cell.tone == 'loss' %}text-red-400{% else %}text-gray-300{% endif %}">{{ cell.day }}</span>
@@ -215,7 +231,7 @@
                                 {% else %}
                                 <span class="block text-[10px] md:text-sm font-bold mt-1 truncate text-gray-600">—</span>
                                 {% endif %}
-                                <span class="inline-flex items-center gap-0.5 mt-1 px-1 rounded bg-black/25 text-[9px] whitespace-nowrap">
+                                <span class="inline-flex items-center gap-0.5 mt-1 px-1 rounded bg-dark-800/70 text-[9px] whitespace-nowrap">
                                     {% if cell.wins or cell.losses or cell.be %}
                                     <span class="hidden md:inline text-gray-400">{{ cell.n }}&nbsp;·</span>
                                     {% if cell.wins %}<span class="text-green-400">{{ cell.wins }}W</span>{% endif %}
@@ -419,13 +435,30 @@
                         </div>
                     </div>
                     <div>
-                        {{ lbl('Sonuç') }}
-                        <select name="result" class="w-32 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
-                            <option value="">Hepsi</option>
-                            <option value="win" {% if filters.result == 'win' %}selected{% endif %}>Win</option>
-                            <option value="loss" {% if filters.result == 'loss' %}selected{% endif %}>Loss</option>
-                            <option value="breakeven" {% if filters.result == 'breakeven' %}selected{% endif %}>Breakeven</option>
-                        </select>
+                        {{ lbl('Sonuç', 'Birden fazla seçilebilir; hiçbiri seçili değilse hepsi') }}
+                        <div class="flex flex-wrap items-center gap-1.5">
+                            {% for value, label in result_options %}
+                            <label class="cursor-pointer select-none">
+                                <input type="checkbox" name="result" value="{{ value }}" class="peer sr-only" {% if value in filters.results %}checked{% endif %}>
+                                <span class="inline-flex items-center px-3 py-2 rounded-lg border text-sm transition
+                                    border-dark-600 bg-dark-700 text-gray-400 hover:text-white
+                                    peer-checked:bg-accent-blue/15 peer-checked:border-accent-blue peer-checked:text-accent-blue">{{ label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
+                        {{ lbl('Session', 'Girişin düştüğü ICT seansı (tablodaki SESSION sütunu); birden fazla seçilebilir') }}
+                        <div class="flex flex-wrap items-center gap-1.5">
+                            {% for value, label in session_options %}
+                            <label class="cursor-pointer select-none">
+                                <input type="checkbox" name="session" value="{{ value }}" class="peer sr-only" {% if value in filters.sessions %}checked{% endif %}>
+                                <span class="inline-flex items-center px-3 py-2 rounded-lg border text-sm transition
+                                    border-dark-600 bg-dark-700 text-gray-400 hover:text-white
+                                    peer-checked:bg-accent-blue/15 peer-checked:border-accent-blue peer-checked:text-accent-blue">{{ label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
                     </div>
                     <div>
                         {{ lbl('Tarih alanı', 'Aşağıdaki aralık hangi tarihe uygulanacak') }}

@@ -27,7 +27,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from app.score_outcome import (  # noqa: E402
-    BAND, BANDS, CAND_MIN_RR, FILTER_GAP, FILTER_HERE, CAND_MIN_SIDE, CANDIDATES, THR, cand_flip, collect, stats,
+    BAND, BANDS, CAND_MIN_RR, FILTER_GAP, FILTER_HERE, CAND_MIN_SIDE, CANDIDATES, THR, cand_flip, candidates_for, collect, stats,
 )
 
 ap = argparse.ArgumentParser()
@@ -74,7 +74,7 @@ print(f"Strateji {A.strategy} · eşik {thr} · küme {len(sub)} setup (RR ≥ {
       f"{A.since} → {ts[-1][:10] if ts else '-'} · yarı sınırı {mid[:10]}")
 print(f"Tetik: karar bandında taraf başına {CAND_MIN_SIDE} çözülmüş · bant ±{BAND}\n")
 
-for key, label, v, src, filt in CANDIDATES:
+for key, label, v, src, filt in candidates_for(A.strategy):   # 24.10: 1W-only adaylar (CAND_ONLY)
     g, b, d, (lo, hi), band = cand_flip(sub, key, thr)
     sign = 1 if v > 0 else -1
     measured = sum(1 for x in sub if x["cand"].get(key) is not None)

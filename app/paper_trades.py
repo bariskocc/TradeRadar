@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.exchange import from_display_symbol, get_all_symbols_flat
 from app.market_data import market_data
 from app.models import PaperTrade
+from app.session import TRADING_SESSIONS, trading_session
 
 log = logging.getLogger(__name__)
 
@@ -364,8 +365,8 @@ def build_conditions(f: dict) -> list:
         conds.append(PaperTrade.direction == f["direction"].upper())
     if f.get("markets"):
         conds.append(PaperTrade.market_type.in_(f["markets"]))
-    if f.get("result"):
-        conds.append(PaperTrade.result == f["result"])
+    if f.get("results"):
+        conds.append(PaperTrade.result.in_(f["results"]))
     # Tarih hangi alana uygulanacak: giris (varsayilan) ya da kapanis. Takvimden bir gune
     # tiklandiginda "kapanis" kullanilir -- takvim de donem ozeti de islemi KAPANDIGI gune sayar.
     date_col = PaperTrade.closed_at if f.get("date_basis") == "closed" else PaperTrade.entered_at
@@ -382,9 +383,32 @@ def build_conditions(f: dict) -> list:
 
 _TAB_STATUS = {"open": ["open"], "closed": ["closed"]}
 
+# Seans filtresi (22.10): girisin dustugu ICT seansi (tablodaki SESSION sutunu). "none" = seans disi
+# ya da hafta sonu.
+SESSION_OPTIONS = [(key, label) for key, label, _, _ in TRADING_SESSIONS] + [("none", "No session")]
+SESSION_KEYS = {key for key, _ in SESSION_OPTIONS}
+# Sonuc filtresi coklu secim (22.10).
+RESULT_OPTIONS = (("win", "Win"), ("loss", "Loss"), ("breakeven", "Breakeven"))
+RESULT_KEYS = {key for key, _ in RESULT_OPTIONS}
+
+
+async def _session_condition(db: AsyncSession, conds: list, keys: list[str]):
+    """Seans NY yerel saatine (yaz/kis) bagli oldugu icin SQL'de hesaplanmaz: diger filtrelere
+    uyan satirlarin girisi Python'da `trading_session` ile suzulur, id kosulu olarak doner.
+    Birden cok seans secilebilir (22.10)."""
+    want = {None if key == "none" else key for key in keys}
+    ids = [
+        tid for tid, entered in (await db.execute(
+            select(PaperTrade.id, PaperTrade.entered_at).where(*conds))).all()
+        if (trading_session(entered) or {}).get("key") in want
+    ]
+    return PaperTrade.id.in_(ids)
+
 
 async def list_page(db: AsyncSession, f: dict, tab: str, page: int) -> dict:
     conds = build_conditions(f)
+    if f.get("sessions"):
+        conds.append(await _session_condition(db, conds, f["sessions"]))
     query = select(PaperTrade).where(*conds)
     if tab in _TAB_STATUS:
         query = query.where(PaperTrade.status.in_(_TAB_STATUS[tab]))
@@ -445,7 +469,8 @@ def period_summary(rows) -> dict:
         "wins": wins,
         "losses": losses,
         "be": n - wins - losses,
-        "win_rate": round(wins / n * 100) if n else None,
+        # BE paydaya girmez (22.10, kullanici karari): win rate = W / (W + L).
+        "win_rate": round(wins / (wins + losses) * 100) if wins + losses else None,
         "avg_pnl": round(total_pnl / len(money), 2) if money else None,
         "best": _pick(max(rows, key=rank)) if n else None,
         "worst": _pick(min(rows, key=rank)) if n > 1 else None,

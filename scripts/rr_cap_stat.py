@@ -43,7 +43,7 @@ MIN_CHANGED_TF = 10        # tek stratejiye ozel karar icin
 MIN_EDGE_R = 0.15          # yeni giris, ayni setuplarda bugunku girisi bu kadar gecmeli (R/setup)
 MIN_RR = 2.0
 
-QUAL_FAIL = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected",
+QUAL_FAIL = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected",
              "bias_mismatch", "target_taken", "low_quality", "no_cisd", "low_rr", "score7", "tight_stop"}
 
 

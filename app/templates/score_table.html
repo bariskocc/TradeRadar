@@ -123,6 +123,7 @@
                 </div>
                 <p class="text-[11px] text-gray-500 mt-2">
                     Setup Journal, {{ outcome_since.strftime('%d.%m') }}'den beri {{ ranking.n }} setup (kapıda elenenler dahil), düz TP/SL (kısmi kâr + BE yok).
+                    Sonuç = fiyat önce TP'ye mi SL'ye mi gitti; giriş dolmadan TP'ye giden setup da TP sayılır (24.10).
                     Skor işini yapıyorsa üst grup alttan belirgin iyi olmalı (fark ≥ 0.15 R/setup).
                 </p>
             </div>
@@ -192,6 +193,54 @@
                     </tbody>
                 </table>
             </div>
+
+            <!-- Aday kalemler (24.10): bugun skorda olmayan, olculen kalemler -->
+            {% if candidates %}
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto mb-6">
+                <div class="px-4 py-3 border-b border-dark-600">
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Aday kalemler (skorda yok, ölçülüyor)</h3>
+                    <p class="text-[11px] text-gray-500 mt-1">
+                        Bu puan verilseydi sinyal değişir miydi? <b>KARAR BANDI</b>: bugünkü ham skoru, adayın puanı eklenince eşiğin öbür tarafına geçecek setuplar
+                        (RR ≥ {{ '%g' % cand_min_rr }}, {{ cand_since.strftime('%d.%m') }}'den beri). Aynı bantta adayı <b>taşıyan</b> ile <b>taşımayan</b> karşılaştırılır.
+                        Karar her iki tarafta {{ cand_min_side }} çözülmüş setup birikince; kesin kural (iki yarı + p &lt; 0.10) <code>python scripts/score_candidates_stat.py --strategy {{ strategy }}</code>.
+                        Motor kararı değişmez.
+                    </p>
+                </div>
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-dark-600">
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">ADAY</th>
+                            <th class="px-3 py-2 text-right text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">PUAN</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">KARAR BANDI</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TAŞIYAN</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider whitespace-nowrap">TAŞIMAYAN</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">DURUM</th>
+                            <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 tracking-wider">KAYNAK</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for c in candidates %}
+                        <tr>
+                            <td class="px-3 py-2 text-sm text-white">{{ c.label }}
+                                {% if c.only %}<div class="text-[10px] text-gray-600">yalnız {{ c.only|join(', ')|upper }}</div>{% endif %}
+                            </td>
+                            <td class="px-3 py-2 text-sm text-right font-mono whitespace-nowrap {% if c.points.startswith('−') %}text-accent-red{% else %}text-accent-green{% endif %}">{{ c.points }}</td>
+                            <td class="px-3 py-2 text-xs font-mono text-gray-400 whitespace-nowrap">ham {{ c.band }}
+                                <div class="text-[10px] text-gray-600">ölçülen {{ c.measured }}, taşıyan {{ c.have }}</div>
+                            </td>
+                            <td class="px-3 py-2 text-xs font-mono text-gray-300 whitespace-nowrap">{{ c.got }}</td>
+                            <td class="px-3 py-2 text-xs font-mono text-gray-300 whitespace-nowrap">{{ c.base }}</td>
+                            <td class="px-3 py-2">
+                                {{ health_badge(c.health) }}
+                                <div class="text-[11px] text-gray-400 mt-0.5 min-w-[16rem]">{{ c.health.detail }}</div>
+                            </td>
+                            <td class="px-3 py-2 text-xs text-gray-500">{{ c.src }}{% if c.filt %} · filtre kararı: “{{ c.filt }}”{% endif %}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
 
             <!-- Hard filtreler -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden overflow-x-auto mb-6">

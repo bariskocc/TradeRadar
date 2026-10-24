@@ -33,7 +33,7 @@ ALL_LEVELS = "--all-levels" in sys.argv
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected"}
 THR = {"4h": 7, "1d": 7, "1w": 6}
 # --- IZLEME.md'ye veri GORULMEDEN yazilan esikler (03.10) ---
 MIN_SIDE = 10      # karar bandinda tanimi tasiyan ve tasimayan, cozulmus

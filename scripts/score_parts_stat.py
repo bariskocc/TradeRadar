@@ -39,10 +39,10 @@ from app.crt_engine import (  # noqa: E402
 LABELS = {
     "base": "C2 rengi: dogru +2 / doji +1",
     "htf": "1D bias (+2 / ters -2)",
-    "weekly": "1W uyumu (+1)",
+    "weekly": "1W uyumu (+1) (1W stratejisinde 1D bias uyumu, 24.10)",
     "c2_closed": "C2 kapali (+1)",
     "pd_major": "PD major PDH/PDL/PWH/PWL (+1)",
-    "pd_monthly": "PD aylik PMH/PML (+1)",
+    "pd_monthly": "PD aylik PMH/PML (+1) (1W stratejisinde guclu C2 donusu, 24.10)",
     "pd_struct": "PD yapisal FVG/OB (+1)",
     "wick": "Purge rejection wick (+1)",
     "ifvg": "LTF IFVG (+1)",

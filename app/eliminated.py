@@ -26,56 +26,60 @@ DAYS_CHOICES = (7, 30, 90, 0)          # 0 = tum zamanlar
 MIN_RESOLVED = 10                      # hukum icin en az cozulmus (TP+SL) setup
 VERDICT_BAND = 0.15                    # R/setup bandi -- IZLEME karar kurallariyla ayni olcek
 
-# Sayfada gosterilen filtre adi: Journal etiketleri gelistirici dilinde, burada "neden elendi" diye okunur.
-GATE_LABELS = {
-    "sweep_small": "Sweep too small",
-    "range_atr": "C1 range outside ATR band",
-    "c1_stale": "C1 extreme already taken",
-    "c2_breakout": "C2 closed outside C1",
-    "c2_wrong_color": "C2 wrong color",
-    "c1_weak": "C1 body too small",
-    "not_selected": "Another CRT candidate chosen",
-    "bias_mismatch": "1D bias opposite",
-    "target_taken": "Target already taken",
-    "low_quality": "Score below threshold",
-    "no_cisd": "No CISD / MSS",
-    "low_rr": "RR below 2",
-    "score7": "Score-7 gate",
-    "tight_stop": "Stop too tight",
-    "past_tp": "Price passed TP",
-    "past_sl": "Price passed SL",
-    "invalidated": "CRT 60% crossed",
-    "missed_quality": "Score < 7 at retest",
-    "stale": "Retest too old",
-    "week_gap": "CISD before week close",
-    "cluster_limit": "Crypto cluster limit",
-    "corr_open": "Correlated pair open",
-    "has_open": "Open signal on symbol",
-    "duplicate": "Already saved",
-    "deleted_before": "Deleted once — not reopened",
-    "c2_open": "C2 never closed valid",
-    "waiting": "Signal deleted before fill",
-    "week_close": "Cancelled at week close",
-}
+# Sayfada gosterilen filtre adi + NOT sutunu (22.10, kullanici: "tablo Turkce olsun, not alani olsun").
+# (kod, ad, not) -- not: filtrenin ne yaptigi, tek cumle.
+_GATES = [
+    ("sweep_small", "Süpürme çok küçük", "C2, C1 ucunu eşiğin altında deldi (28.09'dan beri eşik yok, eski kayıtlar)"),
+    ("range_atr", "C1 boyu ATR bandı dışında", "C1 mumu ortalama mum boyuna göre çok küçük ya da çok büyük"),
+    ("c1_stale", "C1 ucu önceden alınmış", "C1'in ucu C2'den önce başka bir mumla zaten süpürülmüştü"),
+    ("c2_breakout", "C2, C1 dışında kapandı", "C2 süpürdüğü ucun ötesinde kapandı — dönüş olmadı"),
+    ("c2_wrong_color", "C2 yanlış renk", "C2 ters renkte kapandı (LONG'da kırmızı, SHORT'ta yeşil) — 4H'te kesin filtre"),
+    ("c1_weak", "C1 gövdesi küçük", "C1 gövdesi aralığının %30'undan küçük (yalnız 4H)"),
+    ("c2_second_sweep", "C2 önce öbür ucu süpürdü", "C2 iki ucu da süpürdü; yön ilk süpürülen uçtan, bu yön sonra süpürülen (24.10)"),
+    ("not_selected", "Başka CRT adayı seçildi", "Aynı anda birden çok CRT vardı, motor diğerini seçti"),
+    ("bias_mismatch", "1D bias ters", "Günlük bias işlem yönünün tersine"),
+    ("target_taken", "Hedef önceden alınmış", "TP seviyesi setup oluşmadan fiyatça alınmıştı"),
+    ("low_quality", "Skor eşiğin altında", "Kalite skoru eşiğin altında (4H/1D 7, 1W 6)"),
+    ("no_cisd", "CISD / MSS yok", "Giriş seviyesi (CISD ya da MSS) bulunamadı"),
+    ("low_rr", "RR 2'nin altında", "Risk/ödül oranı 2'den küçük"),
+    ("score7", "Skor-7 kapısı", "Skor tam eşikte; ek şartlar (yapısal giriş, key level, kapalı C2) tutmadı"),
+    ("tight_stop", "Stop çok dar", "Stop mesafesi küçük zaman diliminin mum boyundan kısa"),
+    ("past_tp", "Fiyat TP'yi geçti", "Emir dolmadan fiyat TP'ye gitti"),
+    ("past_sl", "Fiyat SL'yi geçti", "Emir dolmadan fiyat SL'nin ötesine geçti"),
+    ("invalidated", "CRT %60 geçildi", "Fiyat CRT'nin %60'ını geçti (kural 10.09'da kapandı, eski kayıtlar)"),
+    ("missed_quality", "Retestte skor < 7", "Fiyat girişe döndüğünde skor eşiğin altına düşmüştü"),
+    ("stale", "Retest çok eski", "Giriş, emir açılmadan çok önce test edilmişti (bayat emir)"),
+    ("week_gap", "CISD hafta kapanışından önce", "Seanslı sembolde CISD hafta sonundan önceydi, Pazartesi diriltilmedi"),
+    ("cluster_limit", "Kripto küme limiti", "Aynı yönde çok sayıda kripto işlemi vardı"),
+    ("corr_open", "Korele paritede açık işlem", "Bağlantılı paritede zaten açık işlem vardı"),
+    ("has_open", "Sembolde açık sinyal", "Aynı sembol ve stratejide açık sinyal vardı"),
+    ("duplicate", "Zaten kayıtlı", "Aynı setup daha önce kaydedilmişti"),
+    ("deleted_before", "Bir kez silinmiş", "Aynı CRT'nin sinyali bir kez silinmişti, yeniden açılmadı"),
+    ("c2_open", "C2 kapanmadan bozuldu", "C2 kapanışı beklenirken setup geçerliliğini yitirdi"),
+    ("waiting", "Sinyal dolmadan silindi", "Sinyal açıldı ama emir dolmadan silindi (nedeni listede)"),
+    ("week_close", "Hafta kapanışında iptal", "Cuma kapanışında dolmamış setup iptal edildi"),
+]
+GATE_LABELS = {c: lbl for c, lbl, _ in _GATES}
+GATE_NOTES = {c: note for c, _, note in _GATES}
 # Silinme nedeni (`deleted_reason`) -- kapi kodu degilse buradan; yoksa GATE_LABELS.
-DELETE_LABELS = {"crt_gone": "CRT no longer valid", "crt_replaced": "replaced by another CRT",
-                 "score7_gate": "Score-7 gate", "manual": "manual"}
+DELETE_LABELS = {"crt_gone": "CRT geçersizleşti", "crt_replaced": "başka CRT geldi",
+                 "score7_gate": "Skor-7 kapısı", "manual": "elle"}
 # Motorun kapilari hangi asamada: CRT tespiti (PRE_SETUP) / setup kapilari / sinyal sonrasi.
-GROUP_PRE = "CRT detection"
-GROUP_GATE = "Setup gates"
-GROUP_POST = "After signal"
+GROUP_PRE = "CRT tespiti"
+GROUP_GATE = "Setup kapıları"
+GROUP_POST = "Sinyal sonrası"
 _POST_STAGES = {"waiting", "week_close"}
 
 RESULT_META = {   # outcome -> (etiket, renk sinifi)
     "win": ("TP", "bg-accent-green/15 text-accent-green"),
     "loss": ("SL", "bg-accent-red/15 text-accent-red"),
-    "tp_before_entry": ("TP, no entry", "bg-accent-yellow/15 text-accent-yellow"),
-    "ambiguous": ("Same bar", "bg-dark-600 text-gray-300"),
-    "no_touch": ("No entry", "bg-dark-600 text-gray-400"),
-    "open": ("No TP/SL in time", "bg-dark-600 text-gray-400"),
-    "pending": ("Tracking", "bg-accent-blue/15 text-accent-blue"),
-    "filled": ("Tracking (filled)", "bg-accent-blue/15 text-accent-blue"),
-    None: ("No levels", "bg-dark-600 text-gray-500"),
+    "tp_before_entry": ("TP (girişsiz)", "bg-accent-yellow/15 text-accent-yellow"),
+    "ambiguous": ("Aynı mum", "bg-dark-600 text-gray-300"),
+    "no_touch": ("Dolmadı", "bg-dark-600 text-gray-400"),
+    "open": ("Süre doldu", "bg-dark-600 text-gray-400"),
+    "pending": ("İzleniyor", "bg-accent-blue/15 text-accent-blue"),
+    "filled": ("İzleniyor (doldu)", "bg-accent-blue/15 text-accent-blue"),
+    None: ("Seviye yok", "bg-dark-600 text-gray-500"),
 }
 RESULT_FILTERS = {  # ?result= -> outcome kumesi
     "tp": ("win",),
@@ -86,10 +90,10 @@ RESULT_FILTERS = {  # ?result= -> outcome kumesi
 }
 
 VERDICT_META = {
-    "protect": ("Protecting", "text-accent-green", "eliminated setups lose — the gate avoided losses"),
-    "cut": ("Cutting winners", "text-accent-red", "eliminated setups win — the gate blocks profit"),
-    "neutral": ("No clear effect", "text-gray-400", "eliminated setups are about breakeven"),
-    "few": ("Too few", "text-gray-500", f"fewer than {MIN_RESOLVED} setups reached TP or SL"),
+    "protect": ("Koruyor", "text-accent-green", "elenenler zararda — filtre kaybı önledi"),
+    "cut": ("Kazanç kesiyor", "text-accent-red", "elenenler kârda — filtre kazancı engelledi"),
+    "neutral": ("Etkisiz", "text-gray-400", "elenenler başa baş"),
+    "few": ("Az veri", "text-gray-500", f"TP ya da SL'ye giden setup {MIN_RESOLVED}'dan az"),
 }
 
 
@@ -124,7 +128,7 @@ def _js(v) -> dict:
 
 
 def _pct(x) -> Optional[str]:
-    return None if x is None else f"{float(x) * 100:.0f}%"
+    return None if x is None else f"%{float(x) * 100:.0f}"
 
 
 def why_text(row: SetupJournal) -> str:
@@ -134,29 +138,33 @@ def why_text(row: SetupJournal) -> str:
     parts: list[str] = []
     if code == "c2_wrong_color":
         b = _pct(f.get("c2_body_frac"))
-        parts.append(f"C2 closed {'red' if row.direction == 'LONG' else 'green'}" + (f", body {b} of range" if b else ""))
+        parts.append(f"C2 {'kırmızı' if row.direction == 'LONG' else 'yeşil'} kapandı" + (f", gövde oranı {b}" if b else ""))
     elif code == "c1_weak":
         b = _pct(f.get("c1_body_frac"))
-        parts.append(f"C1 body {b} of range (min 30%)" if b else "C1 body small")
+        parts.append(f"C1 gövde oranı {b} (en az %30)" if b else "C1 gövdesi küçük")
+    elif code == "c2_second_sweep":
+        parts.append("C2 önce C1 " + ("tepesini" if row.direction == "LONG" else "dibini")
+                     + " süpürdü — setup ters yönde, bu uç onun hedefi")
     elif code == "c2_breakout":
-        parts.append("C2 closed beyond the C1 extreme it swept")
+        parts.append("C2, süpürdüğü C1 ucunun ötesinde kapandı")
     elif code == "range_atr" and f.get("range_atr") is not None:
-        parts.append(f"C1 range {float(f['range_atr']):.2f}× ATR")
+        parts.append(f"C1 boyu {float(f['range_atr']):.2f}× ATR")
     elif code == "sweep_small" and f.get("sweep_pct") is not None:
-        parts.append(f"sweep {float(f['sweep_pct']):.3f}%")
+        parts.append(f"süpürme %{float(f['sweep_pct']):.3f}")
     elif code == "bias_mismatch":
-        parts.append(f"1D bias {row.htf_bias or '?'} vs {row.direction}")
+        parts.append(f"1D bias {row.htf_bias or '?'}, işlem {row.direction}")
     elif code == "low_rr" and row.rr is not None:
         parts.append(f"RR {row.rr:.2f} < 2")
     elif code in ("low_quality", "score7", "missed_quality") and row.score is not None:
-        parts.append(f"score {row.score:.0f}")
+        parts.append(f"skor {row.score:.0f}")
     elif code == "tight_stop" and f.get("stop_range_mult") is not None:
-        parts.append(f"stop {float(f['stop_range_mult']):.2f}× LTF range")
+        parts.append(f"stop {float(f['stop_range_mult']):.2f}× LTF mum boyu")
     elif row.deleted_reason:
-        parts.append(f"deleted: {DELETE_LABELS.get(row.deleted_reason) or GATE_LABELS.get(row.deleted_reason, row.deleted_reason)}")
+        reason = DELETE_LABELS.get(row.deleted_reason) or GATE_LABELS.get(row.deleted_reason, row.deleted_reason)
+        parts.append(f"silindi: {reason}")
     rec = f.get("reclaim_pct")
     if rec is not None and code not in ("c2_breakout",) and float(rec) < 25:
-        parts.append(f"weak C2 reclaim {float(rec):.0f}%")
+        parts.append(f"zayıf C2 geri dönüşü %{float(rec):.0f}")
     return " · ".join(parts)
 
 
@@ -256,17 +264,24 @@ async def build_eliminated(db: AsyncSession, *, tf: str = "all", market: str = "
         r = float(wr_sum or 0.0) - sl
         v = verdict(tp, sl, r)
         gates.append({
-            "code": code, "label": GATE_LABELS.get(code, code), "group": _gate_group(code),
+            "code": code, "label": GATE_LABELS.get(code, code), "note": GATE_NOTES.get(code, ""), "group": _gate_group(code),
             "n": int(n), "tp": tp, "sl": sl, "tbe": int(tbe or 0), "tracking": int(trk or 0), "other": int(other or 0),
             "wr": round(tp / (tp + sl) * 100, 1) if tp + sl else None,
             "r": round(r, 1), "r_per": round(r / (tp + sl), 2) if tp + sl else None,
             "verdict": v, "verdict_label": VERDICT_META[v][0], "verdict_class": VERDICT_META[v][1],
         })
+    # 22.10 (kullanici): "Cutting winners" en ustte kendi bolumunde; kalan gruplarda hukum sirasi
+    # (koruyan, etkisiz, az veri), esitlikte motor sirasi.
+    order = {"protect": 0, "neutral": 1, "few": 2}
     groups = []
+    cut = [g for g in gates if g["verdict"] == "cut"]
+    if cut:
+        groups.append({"name": "Kazanç kesenler", "cut": True, "gates": cut})
     for name in (GROUP_PRE, GROUP_GATE, GROUP_POST):
-        rows_ = [g for g in gates if g["group"] == name]
+        rows_ = sorted((g for g in gates if g["group"] == name and g["verdict"] != "cut"),
+                       key=lambda g: order[g["verdict"]])
         if rows_:
-            groups.append({"name": name, "gates": rows_})
+            groups.append({"name": name, "cut": False, "gates": rows_})
 
     tp = sum(g["tp"] for g in gates)
     sl = sum(g["sl"] for g in gates)
@@ -280,8 +295,8 @@ async def build_eliminated(db: AsyncSession, *, tf: str = "all", market: str = "
     }
     # CRT sayilan / sayilmayan ayri satir: "en bastaki" filtreler toplamin cogunu olusturuyor.
     split = []
-    for name, cond in (("Counted as CRT", lambda g: g["group"] != GROUP_PRE),
-                       ("Rejected at CRT detection", lambda g: g["group"] == GROUP_PRE)):
+    for name, cond in (("Motorun CRT saydığı setuplar", lambda g: g["group"] != GROUP_PRE),
+                       ("CRT tespitinde elenen adaylar", lambda g: g["group"] == GROUP_PRE)):
         rows_ = [g for g in gates if cond(g)]
         s_tp, s_sl = sum(g["tp"] for g in rows_), sum(g["sl"] for g in rows_)
         s_r = sum(g["r"] for g in rows_)
@@ -316,7 +331,7 @@ async def build_eliminated(db: AsyncSession, *, tf: str = "all", market: str = "
 
     return {
         "tf": tf, "market": market, "days": days, "gate": gate, "result": result, "symbol": symbol,
-        "rows": rows, "page": page, "total": total, "total_pages": total_pages,
+        "rows": rows, "rows_open": gate != "all" or result != "all" or page > 1, "page": page, "total": total, "total_pages": total_pages,
         "groups": groups, "totals": totals, "split": split,
         "reference": await _signal_reference(db, tf, market, days),
         "gate_labels": GATE_LABELS, "days_choices": DAYS_CHOICES,

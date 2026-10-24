@@ -92,9 +92,12 @@
 
 {% if total_closed > 0 %}
 <script>
+// Renkler temaya gore (24.10); tema degisince sayfa yeniden cizilir
+const GRID = trDark() ? '#1e2235' : '#eef1f6';
+window.addEventListener('tr-theme', () => location.reload());
 const CHART_DEFAULTS = {
     color: '#6b7280',
-    borderColor: '#272b40',
+    borderColor: trDark() ? '#272b40' : '#dde2ea',
     font: { family: "'Segoe UI', system-ui, sans-serif", size: 11 },
 };
 Chart.defaults.color = CHART_DEFAULTS.color;
@@ -125,11 +128,11 @@ new Chart(document.getElementById('equityChart'), {
         plugins: { legend: { display: false } },
         scales: {
             x: {
-                grid: { color: '#1e2235' },
+                grid: { color: GRID },
                 ticks: { maxTicksLimit: 10 },
             },
             y: {
-                grid: { color: '#1e2235' },
+                grid: { color: GRID },
                 ticks: { callback: v => v + 'R' },
             },
         },
@@ -224,7 +227,7 @@ new Chart(document.getElementById('weeklyChart'), {
         scales: {
             x: { grid: { display: false } },
             y: {
-                grid: { color: '#1e2235' },
+                grid: { color: GRID },
                 ticks: { callback: v => v + 'R' },
             },
         },
@@ -252,7 +255,7 @@ new Chart(document.getElementById('symbolChart'), {
         plugins: { legend: { display: false } },
         scales: {
             x: {
-                grid: { color: '#1e2235' },
+                grid: { color: GRID },
                 ticks: { callback: v => v + 'R' },
             },
             y: { grid: { display: false } },

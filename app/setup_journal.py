@@ -42,6 +42,7 @@ STAGES: list[tuple[str, str]] = [
     ("c2_breakout", "CRT: C2 closed outside C1"),
     ("c2_wrong_color", "CRT: C2 wrong color"),
     ("c1_weak", "CRT: C1 body too small"),
+    ("c2_second_sweep", "CRT: C2 swept the other side first"),
     ("not_selected", "CRT: another candidate chosen"),
     ("bias_mismatch", "1D bias opposite"),
     ("target_taken", "Target already taken"),
@@ -67,7 +68,7 @@ STAGES: list[tuple[str, str]] = [
 ]
 STAGE_LABELS = dict(STAGES)
 PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak",
-                              "not_selected"))
+                              "c2_second_sweep", "not_selected"))
 _RANK = {code: i for i, (code, _) in enumerate(STAGES)}
 SIGNAL_STAGE = "waiting"
 

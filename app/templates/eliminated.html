@@ -1,10 +1,14 @@
 {% extends "base.html" %}
 
-{% block title %}TradeRadar - Eliminated Setups{% endblock %}
+{% block title %}TradeRadar - Elenen Setuplar{% endblock %}
 
-{% macro pct(v) %}{% if v is none %}—{% else %}{{ '%.0f'|format(v) }}%{% endif %}{% endmacro %}
+{% macro pct(v) %}{% if v is none %}—{% else %}%{{ '%.0f'|format(v) }}{% endif %}{% endmacro %}
 {% macro rper(v) %}{% if v is none %}—{% else %}<span class="{% if v > 0 %}text-green-400{% elif v < 0 %}text-red-400{% else %}text-gray-400{% endif %}">{{ '%+.2f'|format(v) }}R</span>{% endif %}{% endmacro %}
 
+{# Arayuz Turkce (22.10, kullanici istegi -- Skor Tablosu gibi; diger sayfalar Ingilizce).
+   Tailwind yalniz sablonlari tarar: app/eliminated.py RESULT_META / VERDICT_META siniflari burada acik yazili ki derlensin.
+   bg-accent-green/15 text-accent-green bg-accent-red/15 text-accent-red bg-accent-yellow/15 text-accent-yellow
+   bg-dark-600 text-gray-300 text-gray-400 text-gray-500 bg-accent-blue/15 text-accent-blue #}
 {% block body %}
 <div class="flex h-full">
 
@@ -13,86 +17,100 @@
     <main class="flex-1 overflow-auto">
         <div class="p-3 md:p-6">
             <div class="mb-5">
-                <h1 class="text-xl font-bold text-white">Eliminated Setups</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Every setup the engine saw but did not trade: which filter stopped it, and whether price then hit TP or SL</p>
+                <h1 class="text-xl font-bold text-white">Elenen Setuplar</h1>
+                <p class="text-sm text-gray-500 mt-0.5">Motorun gördüğü ama işleme çevirmediği setuplar: hangi filtre eledi, fiyat sonra TP'ye mi SL'ye mi gitti</p>
             </div>
 
-            <!-- Filters -->
+            <!-- Okuma notu -->
+            <div class="mb-5 p-4 rounded-xl border border-accent-blue/30 bg-accent-blue/5 text-[13px] text-gray-300 leading-relaxed">
+                <p class="font-semibold text-white mb-1">Nasıl okunur?</p>
+                <p>Tablodaki her satır bir filtre. <span class="text-green-400 font-semibold">TP</span> / <span class="text-red-400 font-semibold">SL</span>:
+                    o filtrenin elediği setup sonra girişe dönüp TP'ye mi, SL'ye mi gitti.</p>
+                <p class="mt-1"><span class="text-white font-semibold">R / Setup</span>: elenen setuplar alınsaydı setup başına ortalama sonuç
+                    (TP = +RR, SL = −1R). <span class="text-red-400">Eksi</span> → filtre zarardan korudu (iyi).
+                    <span class="text-green-400">Artı</span> → filtre kazancı kesti. Örnek: −0.32R = her biri riskin üçte biri kadar kaybettirirdi.</p>
+                <p class="mt-1 text-gray-500 text-[12px]">Hüküm: −{{ band }}R ve altı <span class="text-accent-green">Koruyor</span> ·
+                    +{{ band }}R ve üstü <span class="text-accent-red">Kazanç kesiyor</span> · arası Etkisiz ·
+                    TP+SL {{ min_resolved }}'dan azsa Az veri. Hesap düz TP/SL ile (kısmi kâr ve BE yok) — gerçek R değil;
+                    bir filtreyi değiştirme kararı ilgili izleme maddesinden verilir.</p>
+            </div>
+
+            <!-- Filtreler -->
             <form method="GET" action="/eliminated" class="mb-5 p-4 bg-dark-800 rounded-xl border border-dark-600">
                 <div class="flex flex-wrap items-end gap-3">
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
+                        <label class="block text-xs text-gray-500 mb-1">STRATEJİ</label>
                         <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            {% for key, label in [('all', 'All'), ('4h', '4H'), ('1d', '1D'), ('1w', '1W')] %}
+                            {% for key, label in [('all', 'Hepsi'), ('4h', '4H'), ('1d', '1D'), ('1w', '1W')] %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">MARKET</label>
+                        <label class="block text-xs text-gray-500 mb-1">PİYASA</label>
                         <select name="market" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            {% for key, label in [('all', 'All'), ('crypto', 'Crypto'), ('fx', 'FX')] %}
+                            {% for key, label in [('all', 'Hepsi'), ('crypto', 'Kripto'), ('fx', 'FX')] %}
                             <option value="{{ key }}" {% if market == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">PERIOD (C2)</label>
+                        <label class="block text-xs text-gray-500 mb-1" title="C2 mumunun zamanina gore">DÖNEM</label>
                         <select name="days" class="w-32 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
                             {% for d in days_choices %}
-                            <option value="{{ d }}" {% if days == d %}selected{% endif %}>{% if d %}Last {{ d }} days{% else %}All time{% endif %}</option>
+                            <option value="{{ d }}" {% if days == d %}selected{% endif %}>{% if d %}Son {{ d }} gün{% else %}Tüm zamanlar{% endif %}</option>
                             {% endfor %}
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">FILTER</label>
-                        <select name="gate" class="w-52 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            <option value="all">All</option>
+                        <label class="block text-xs text-gray-500 mb-1">FİLTRE</label>
+                        <select name="gate" class="w-56 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            <option value="all">Hepsi</option>
                             {% for code, label in gate_labels.items() %}
                             <option value="{{ code }}" {% if gate == code %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">RESULT</label>
+                        <label class="block text-xs text-gray-500 mb-1">SONUÇ</label>
                         <select name="result" class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            {% for key, label in [('all', 'All'), ('tp', 'TP'), ('sl', 'SL'), ('tbe', 'TP, no entry'), ('tracking', 'Tracking'), ('other', 'Other')] %}
+                            {% for key, label in [('all', 'Hepsi'), ('tp', 'TP'), ('sl', 'SL'), ('tbe', 'TP (girişsiz)'), ('tracking', 'İzleniyor'), ('other', 'Diğer')] %}
                             <option value="{{ key }}" {% if result == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs text-gray-500 mb-1">SYMBOL</label>
-                        <input type="text" name="symbol" value="{{ symbol }}" placeholder="Search..."
+                        <label class="block text-xs text-gray-500 mb-1">SEMBOL</label>
+                        <input type="text" name="symbol" value="{{ symbol }}" placeholder="Ara..."
                             class="w-32 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white placeholder-gray-500">
                     </div>
-                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">Filter</button>
-                    <a href="/eliminated" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Reset</a>
+                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition">Filtrele</button>
+                    <a href="/eliminated" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Sıfırla</a>
                 </div>
             </form>
 
-            <!-- 1) Summary -->
+            <!-- 1) Ozet -->
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
                 <div class="p-4 bg-dark-800 rounded-xl border border-dark-600">
-                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Eliminated setups</p>
+                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Elenen setup</p>
                     <p class="text-2xl font-bold text-white mt-1">{{ totals.n }}</p>
-                    <p class="text-[11px] text-gray-500 mt-1">{{ totals.tracking }} still tracking</p>
+                    <p class="text-[11px] text-gray-500 mt-1">{{ totals.tracking }} tanesi hâlâ izleniyor</p>
                 </div>
                 <div class="p-4 bg-dark-800 rounded-xl border border-dark-600">
-                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Afterwards: TP / SL</p>
+                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Sonrası: TP / SL</p>
                     <p class="text-2xl font-bold mt-1"><span class="text-green-400">{{ totals.tp }}</span> <span class="text-gray-600">/</span> <span class="text-red-400">{{ totals.sl }}</span></p>
-                    <p class="text-[11px] text-gray-500 mt-1">win rate {{ pct(totals.wr) }} · {{ totals.tbe }} hit TP without entry</p>
+                    <p class="text-[11px] text-gray-500 mt-1">kazanma {{ pct(totals.wr) }} · {{ totals.tbe }} tanesi girişsiz TP'ye gitti</p>
                 </div>
                 <div class="p-4 bg-dark-800 rounded-xl border border-dark-600">
-                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">If all had been taken</p>
+                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Hepsi alınsaydı</p>
                     <p class="text-2xl font-bold mt-1 {% if totals.r > 0 %}text-green-400{% elif totals.r < 0 %}text-red-400{% else %}text-gray-400{% endif %}">{{ '%+.1f'|format(totals.r) }}R</p>
-                    <p class="text-[11px] text-gray-500 mt-1">{{ rper(totals.r_per) }} per setup (flat TP/SL)</p>
+                    <p class="text-[11px] text-gray-500 mt-1">setup başına {{ rper(totals.r_per) }} (düz TP/SL)</p>
                 </div>
                 <div class="p-4 bg-dark-800 rounded-xl border border-dark-600">
-                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Signals actually traded</p>
+                    <p class="text-[11px] text-gray-500 uppercase tracking-wider">Gerçekten açılan sinyaller</p>
                     <p class="text-2xl font-bold text-white mt-1">{{ reference.n }}</p>
                     <p class="text-[11px] text-gray-500 mt-1">
-                        {{ reference.w }}W {{ reference.be }}BE {{ reference.l }}L · win rate {{ pct(reference.wr) }} ·
+                        {{ reference.w }} kazanç · {{ reference.be }} BE · {{ reference.l }} kayıp · kazanma {{ pct(reference.wr) }} ·
                         <span class="{% if reference.r > 0 %}text-green-400{% elif reference.r < 0 %}text-red-400{% endif %}">{{ '%+.1f'|format(reference.r) }}R</span>
                     </p>
                 </div>
@@ -104,73 +122,69 @@
                         {% for s in split %}
                         <tr>
                             <td class="px-4 py-2 text-sm text-white whitespace-nowrap">{{ s.name }}</td>
-                            <td class="px-3 py-2 text-right text-sm text-gray-300 whitespace-nowrap">{{ s.n }} setups</td>
+                            <td class="px-3 py-2 text-right text-sm text-gray-300 whitespace-nowrap">{{ s.n }} setup</td>
                             <td class="px-3 py-2 text-right text-sm whitespace-nowrap"><span class="text-green-400">{{ s.tp }} TP</span> / <span class="text-red-400">{{ s.sl }} SL</span></td>
-                            <td class="px-3 py-2 text-right text-sm text-gray-300 whitespace-nowrap">win {{ pct(s.wr) }}</td>
-                            <td class="px-4 py-2 text-right text-sm whitespace-nowrap">{{ rper(s.r_per) }} / setup</td>
+                            <td class="px-3 py-2 text-right text-sm text-gray-300 whitespace-nowrap">kazanma {{ pct(s.wr) }}</td>
+                            <td class="px-4 py-2 text-right text-sm whitespace-nowrap">setup başına {{ rper(s.r_per) }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
 
-            <!-- 2) Per filter -->
+            <!-- 2) Filtre tablosu -->
             <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden mb-5">
                 <div class="px-4 py-3 border-b border-dark-600">
-                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Which filter stopped them — and what price did next</h3>
-                    <p class="text-[11px] text-gray-500 mt-1">
-                        <span class="text-accent-green">Protecting</span> = eliminated setups lose ≤ −{{ band }}R each ·
-                        <span class="text-accent-red">Cutting winners</span> = they win ≥ +{{ band }}R each ·
-                        Too few = under {{ min_resolved }} reached TP or SL. Click a filter to list its setups.
-                    </p>
+                    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Hangi filtre eledi — fiyat sonra ne yaptı</h3>
+                    <p class="text-[11px] text-gray-500 mt-1">Filtre adına tıklayınca o filtrenin setupları, TP / SL sayısına tıklayınca yalnız onlar listelenir.</p>
                 </div>
                 <div class="overflow-x-auto">
-                <table class="w-full min-w-[860px]">
+                <table class="w-full min-w-[1100px]">
                     <thead>
                         <tr class="border-b border-dark-600 text-xs text-gray-500">
-                            <th class="px-3 py-2 text-left font-semibold whitespace-nowrap">FILTER</th>
-                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">SETUPS</th>
+                            <th class="px-3 py-2 text-left font-semibold whitespace-nowrap">FİLTRE</th>
+                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">ELENEN</th>
                             <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">TP</th>
                             <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">SL</th>
-                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">WIN %</th>
-                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap" title="Fiyat girise donmeden TP'ye gitti">TP, NO ENTRY</th>
-                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">TRACKING</th>
-                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap" title="TP = +RR, SL = -1R; TP ya da SL'ye giden setup basina">R / SETUP</th>
-                            <th class="px-3 py-2 text-left font-semibold whitespace-nowrap">VERDICT</th>
+                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap">KAZANMA</th>
+                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap" title="Fiyat girişe dönmeden TP'ye gitti">GİRİŞSİZ TP</th>
+                            <th class="px-3 py-2 text-right font-semibold whitespace-nowrap" title="TP = +RR, SL = −1R; TP ya da SL'ye giden setup başına">R / SETUP</th>
+                            <th class="px-3 py-2 text-left font-semibold whitespace-nowrap">HÜKÜM</th>
+                            <th class="px-3 py-2 text-left font-semibold">NOT</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for grp in groups %}
-                        <tr class="bg-dark-700/40"><td colspan="9" class="px-3 py-1.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">{{ grp.name }}</td></tr>
+                        <tr class="{% if grp.cut %}bg-accent-red/10{% else %}bg-dark-700/40{% endif %}"><td colspan="9" class="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider {% if grp.cut %}text-accent-red{% else %}text-gray-400{% endif %}">{{ grp.name }}</td></tr>
                         {% for g in grp.gates %}
                         <tr class="border-t border-dark-700 hover:bg-dark-700/50 {% if gate == g.code %}bg-accent-blue/10{% endif %}">
                             <td class="px-3 py-2 text-sm whitespace-nowrap">
                                 <a href="/eliminated?{{ base_qs }}&gate={{ g.code }}#rows" class="text-white hover:text-accent-blue">{{ g.label }}</a>
+                                {% if grp.cut %}<span class="ml-1 text-[10px] text-gray-500">{{ g.group }}</span>{% endif %}
                             </td>
                             <td class="px-3 py-2 text-right text-sm text-gray-300">{{ g.n }}</td>
                             <td class="px-3 py-2 text-right text-sm"><a href="/eliminated?{{ base_qs }}&gate={{ g.code }}&result=tp#rows" class="{% if g.tp %}text-green-400 font-semibold{% else %}text-gray-600{% endif %} hover:underline">{{ g.tp }}</a></td>
                             <td class="px-3 py-2 text-right text-sm"><a href="/eliminated?{{ base_qs }}&gate={{ g.code }}&result=sl#rows" class="{% if g.sl %}text-red-400 font-semibold{% else %}text-gray-600{% endif %} hover:underline">{{ g.sl }}</a></td>
                             <td class="px-3 py-2 text-right text-sm text-gray-300">{{ pct(g.wr) }}</td>
                             <td class="px-3 py-2 text-right text-sm text-gray-400">{{ g.tbe }}</td>
-                            <td class="px-3 py-2 text-right text-sm text-gray-400">{{ g.tracking }}</td>
                             <td class="px-3 py-2 text-right text-sm font-semibold">{{ rper(g.r_per) }}</td>
                             <td class="px-3 py-2 text-sm font-semibold whitespace-nowrap {{ g.verdict_class }}">{{ g.verdict_label }}</td>
+                            <td class="px-3 py-2 text-xs text-gray-400 min-w-[260px]">{{ g.note }}</td>
                         </tr>
                         {% endfor %}
                         {% else %}
-                        <tr><td colspan="9" class="px-3 py-8 text-center text-sm text-gray-600">No eliminated setups in this window</td></tr>
+                        <tr><td colspan="9" class="px-3 py-8 text-center text-sm text-gray-600">Bu dönemde elenen setup yok</td></tr>
                         {% endfor %}
                         {% if groups %}
                         <tr class="border-t-2 border-dark-600 bg-dark-700/40 font-semibold">
-                            <td class="px-3 py-2 text-sm text-white">TOTAL</td>
+                            <td class="px-3 py-2 text-sm text-white">TOPLAM</td>
                             <td class="px-3 py-2 text-right text-sm text-white">{{ totals.n }}</td>
                             <td class="px-3 py-2 text-right text-sm text-green-400">{{ totals.tp }}</td>
                             <td class="px-3 py-2 text-right text-sm text-red-400">{{ totals.sl }}</td>
                             <td class="px-3 py-2 text-right text-sm text-white">{{ pct(totals.wr) }}</td>
                             <td class="px-3 py-2 text-right text-sm text-gray-300">{{ totals.tbe }}</td>
-                            <td class="px-3 py-2 text-right text-sm text-gray-300">{{ totals.tracking }}</td>
                             <td class="px-3 py-2 text-right text-sm">{{ rper(totals.r_per) }}</td>
-                            <td></td>
+                            <td colspan="2"></td>
                         </tr>
                         {% endif %}
                     </tbody>
@@ -178,33 +192,34 @@
                 </div>
             </div>
 
-            <!-- 3) Setup list -->
-            <div id="rows" class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden">
-                <div class="px-4 py-3 border-b border-dark-600 flex flex-wrap items-center justify-between gap-2">
+            <!-- 3) Setup listesi: 22.10 (kullanici) varsayilan KAPALI; filtre/sonuc linkiyle ya da sayfa >1 gelinince acik. -->
+            <details id="rows" class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden" {% if rows_open %}open{% endif %}>
+                <summary class="px-4 py-3 border-b border-dark-600 flex flex-wrap items-center justify-between gap-2 cursor-pointer select-none hover:bg-dark-700/40">
                     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                        Setups{% if gate != 'all' %} · {{ gate_labels[gate] }}{% endif %}{% if result != 'all' %} · {{ result|upper }}{% endif %}
+                        Setup listesi{% if gate != 'all' %} · {{ gate_labels[gate] }}{% endif %}{% if result != 'all' %} · {{ {'tp': 'TP', 'sl': 'SL', 'tbe': 'TP (girişsiz)', 'tracking': 'İzleniyor', 'other': 'Diğer'}[result] }}{% endif %}
                     </h3>
-                    <span class="text-xs text-gray-500">{{ total }} setup{% if total != 1 %}s{% endif %}{% if total_pages > 1 %} · page {{ page }}/{{ total_pages }}{% endif %}
-                        {% if gate != 'all' or result != 'all' %}· <a href="/eliminated?{{ base_qs }}#rows" class="text-accent-blue hover:underline">show all</a>{% endif %}
+                    <span class="text-xs text-gray-500">{{ total }} setup{% if total_pages > 1 %} · sayfa {{ page }}/{{ total_pages }}{% endif %}
+                        {% if gate != 'all' or result != 'all' %}· <a href="/eliminated?{{ base_qs }}#rows" class="text-accent-blue hover:underline">hepsini göster</a>{% endif %}
+                        {% if not rows_open %}· açmak için tıkla{% endif %}
                     </span>
-                </div>
+                </summary>
                 <div class="overflow-x-auto">
                 <table class="w-full min-w-[1100px]">
                     <thead>
                         <tr class="border-b border-dark-600 text-xs text-gray-500">
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SYMBOL</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="C1 mumunun acilisi (TSI); ipucunda C2">SETUP</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SEMBOL</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="C1 mumunun açılışı (TSİ); ipucunda C2">SETUP</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">TF</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">DIR</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">ELIMINATED BY</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">WHY</th>
-                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">YÖN</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">ELEYEN FİLTRE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">NEDEN</th>
+                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SKOR</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">BIAS</th>
-                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">ENTRY / SL / TP</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">GİRİŞ / SL / TP</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">RR</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">RESULT</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SONUÇ</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">R</th>
-                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="TP/SL: dolumdan sonuca; girissiz TP: seviyelerden TP'ye">TIME</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="TP/SL: dolumdan sonuca; girişsiz TP: seviyelerden TP'ye">SÜRE</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-dark-700">
@@ -228,10 +243,10 @@
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.rr is not none %}{{ '%.2f'|format(r.rr) }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 whitespace-nowrap"><span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ r.result_class }}" {% if r.outcome_at %}title="{{ r.outcome_at|fmt_date_tsi }}"{% endif %}>{{ r.result }}</span></td>
                             <td class="px-2 py-2 text-right text-xs font-semibold whitespace-nowrap">{% if r.r is not none %}{{ rper(r.r) }}{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
-                            <td class="px-2 py-2 text-right text-xs text-gray-400 whitespace-nowrap">{% if r.hours is not none %}{% if r.hours >= 48 %}{{ '%.1f'|format(r.hours / 24) }}d{% else %}{{ '%.0f'|format(r.hours) if r.hours >= 1 else '<1' }}h{% endif %}{% else %}—{% endif %}</td>
+                            <td class="px-2 py-2 text-right text-xs text-gray-400 whitespace-nowrap">{% if r.hours is not none %}{% if r.hours >= 48 %}{{ '%.1f'|format(r.hours / 24) }} gün{% else %}{{ '%.0f'|format(r.hours) if r.hours >= 1 else '<1' }} sa{% endif %}{% else %}—{% endif %}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="13" class="px-3 py-8 text-center text-sm text-gray-600">No setups match these filters</td></tr>
+                        <tr><td colspan="13" class="px-3 py-8 text-center text-sm text-gray-600">Bu filtrelere uyan setup yok</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -239,18 +254,17 @@
                 {% if total_pages > 1 %}
                 <div class="px-4 py-3 border-t border-dark-600 flex items-center justify-between text-sm">
                     {% set qs = base_qs ~ '&gate=' ~ gate ~ '&result=' ~ result %}
-                    {% if page > 1 %}<a href="/eliminated?{{ qs }}&page={{ page - 1 }}#rows" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">← Prev</a>{% else %}<span></span>{% endif %}
-                    <span class="text-gray-500 text-xs">page {{ page }} / {{ total_pages }}</span>
-                    {% if page < total_pages %}<a href="/eliminated?{{ qs }}&page={{ page + 1 }}#rows" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">Next →</a>{% else %}<span></span>{% endif %}
+                    {% if page > 1 %}<a href="/eliminated?{{ qs }}&page={{ page - 1 }}#rows" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">← Önceki</a>{% else %}<span></span>{% endif %}
+                    <span class="text-gray-500 text-xs">sayfa {{ page }} / {{ total_pages }}</span>
+                    {% if page < total_pages %}<a href="/eliminated?{{ qs }}&page={{ page + 1 }}#rows" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">Sonraki →</a>{% else %}<span></span>{% endif %}
                 </div>
                 {% endif %}
-            </div>
+            </details>
 
             <p class="mt-4 text-[11px] text-gray-500 leading-relaxed">
-                Source: Setup Journal, every setup that never became an active signal (signals deleted before fill included).
-                Levels are frozen when the setup is first seen; result is flat TP/SL (no partial profit / BE), so R here is not real R.
-                Many 1D/1W rows before 03.10 and 4H rows before 27.09 were frozen while C2 was still open (running SL) — biased toward SL.
-                "Signals actually traded" counts closed signals by close time, with real R.
+                Kaynak: Setup Journal — aktif sinyale dönüşmeyen her setup (dolmadan silinen sinyaller dahil). Seviyeler setup ilk görüldüğünde
+                dondurulur; sonuç düz TP/SL. 03.10 öncesi 1D/1W ve 27.09 öncesi 4H kayıtlarının çoğu C2 açıkken donmuş (SL yönüne yanlı).
+                "Gerçekten açılan sinyaller" kapanış zamanına göre, gerçek R ile sayılır.
             </p>
         </div>
     </main>

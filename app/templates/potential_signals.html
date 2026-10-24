@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - Potential Signals{% endblock %}
+
+{# 24.10 (kullanici istegi): kapida elenip POTANSIYEL bildirilen 1D/1W setuplar. Iptal olan satir silinmez.
+   Tailwind yalniz sablonlari tarar -- renk siniflari burada acik yazili:
+   bg-accent-green/15 text-accent-green bg-accent-red/15 text-accent-red bg-accent-yellow/15 text-accent-yellow
+   bg-accent-blue/15 text-accent-blue bg-dark-600 text-gray-300 #}
+{% set COLOR = {
+    'green': 'bg-accent-green/15 text-accent-green',
+    'red': 'bg-accent-red/15 text-accent-red',
+    'yellow': 'bg-accent-yellow/15 text-accent-yellow',
+    'blue': 'bg-accent-blue/15 text-accent-blue',
+    'gray': 'bg-dark-600 text-gray-300',
+} %}
+{% block body %}
+<div class="flex h-full">
+
+    {% include 'sidebar.html' %}
+
+    <main class="flex-1 overflow-auto">
+        <div class="p-3 md:p-6">
+            <div class="mb-5">
+                <h1 class="text-xl font-bold text-white">Potential Signals</h1>
+                <p class="text-sm text-gray-500 mt-0.5">1D / 1W setups the engine did not take (a gate stopped them) but sent to Telegram as POTANSİYEL — score ≥ 4, CISD confirmed, R:R ≥ 1.5</p>
+            </div>
+
+            {% if error %}
+            <div class="mb-4 px-4 py-3 rounded-lg bg-accent-yellow/10 border border-accent-yellow/20 text-sm text-accent-yellow">
+                Could not read potential notices.
+            </div>
+            {% endif %}
+
+            <!-- Filtreler -->
+            <form method="GET" action="/potential-signals" class="mb-5 p-4 bg-dark-800 rounded-xl border border-dark-600">
+                <div class="flex flex-wrap items-end gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
+                        <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, label in [('all', 'All'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
+                            <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">NOTIFIED FROM</label>
+                        <input type="date" name="date_from" value="{{ date_from }}" class="px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">TO</label>
+                        <input type="date" name="date_to" value="{{ date_to }}" class="px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                    </div>
+                    <input type="hidden" name="status" value="{{ status }}">
+                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-accent-blue/80 text-white text-sm font-medium rounded-lg transition">Filter</button>
+                    <a href="/potential-signals?tf={{ tf }}&date_from=" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">All dates</a>
+                    <a href="/potential-signals" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">This week</a>
+                </div>
+            </form>
+
+            <!-- Durum sekmeleri + sonuc ozeti -->
+            <div class="mb-4 flex flex-wrap items-center gap-2">
+                {% for key, label in status_filters %}
+                <a href="/potential-signals?{{ base_qs }}&status={{ key }}"
+                   class="px-3 py-1.5 rounded-lg text-sm transition {% if status == key %}bg-accent-blue/15 text-accent-blue font-medium{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600{% endif %}">
+                    {{ label }} <span class="text-xs text-gray-500">{{ counts[key] }}</span>
+                </a>
+                {% endfor %}
+                <span class="ml-auto text-xs text-gray-500">
+                    Result: <span class="text-green-400 font-semibold">{{ results.tp }} TP</span> ·
+                    <span class="text-red-400 font-semibold">{{ results.sl }} SL</span> ·
+                    {{ results.filled }} filled · {{ results.open }} open
+                </span>
+            </div>
+
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden">
+                <div class="overflow-x-auto">
+                <table class="w-full min-w-[1100px]">
+                    <thead>
+                        <tr class="border-b border-dark-600 text-xs text-gray-500">
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SYMBOL</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="First POTANSİYEL notice (TSİ)">NOTIFIED</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="C1 candle open (TSİ); C2 in tooltip">SETUP</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">TF</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SIDE</th>
+                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">ENTRY / SL / TP</th>
+                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">R:R</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">WHY NOT TAKEN</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Price hit TP or SL first (entry fill not required)">RESULT</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for r in rows %}
+                        <tr class="hover:bg-dark-700/50 {% if r.status in ('cancelled', 'signal_cancelled') %}opacity-70{% endif %}">
+                            <td class="px-2 py-2 text-sm font-medium text-white whitespace-nowrap">{{ fmt_ui_symbol(r.symbol) }}</td>
+                            <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="Last update {{ r.updated }}{% if not r.telegram %} · not sent to Telegram{% endif %}">{{ r.notified }}</td>
+                            <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="C2 {{ r.c2 }}">{{ r.c1 }}</td>
+                            <td class="px-2 py-2 text-xs text-gray-300 whitespace-nowrap">{{ r.tf_label }}</td>
+                            <td class="px-2 py-2 whitespace-nowrap">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ r.direction }}</span>
+                            </td>
+                            <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
+                            <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap" {% if r.model %}title="{{ r.model }}"{% endif %}>
+                                {% if r.entry is not none %}{{ r.entry|fmt_price }} / <span class="text-red-400/80">{{ r.sl|fmt_price }}</span> / <span class="text-green-400/80">{{ r.tp|fmt_price }}</span>{% else %}—{% endif %}
+                            </td>
+                            <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.rr is not none %}{{ '%.2f'|format(r.rr) }}{% else %}—{% endif %}</td>
+                            <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">{{ r.gate }}</td>
+                            <td class="px-2 py-2 whitespace-nowrap">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ COLOR[r.status_color] }}">{{ r.status_label }}</span>
+                                {% if r.status_why %}<div class="text-[10px] text-gray-500 mt-0.5">{{ r.status_why }}</div>{% endif %}
+                            </td>
+                            <td class="px-2 py-2 whitespace-nowrap"><span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ COLOR[r.result_color] }}">{{ r.result_label }}</span></td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="11" class="px-3 py-8 text-center text-sm text-gray-600">No potential signals in this period</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                </div>
+                {% if pages > 1 %}
+                <div class="px-4 py-3 border-t border-dark-600 flex items-center justify-between text-sm">
+                    {% set qs = base_qs ~ '&status=' ~ status %}
+                    {% if page > 1 %}<a href="/potential-signals?{{ qs }}&page={{ page - 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">← Previous</a>{% else %}<span></span>{% endif %}
+                    <span class="text-gray-500 text-xs">page {{ page }} / {{ pages }}</span>
+                    {% if page < pages %}<a href="/potential-signals?{{ qs }}&page={{ page + 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">Next →</a>{% else %}<span></span>{% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            <p class="mt-4 text-[11px] text-gray-500 leading-relaxed">
+                Status: <b>Watching</b> — the setup is still alive but a gate stops the engine (see "Why not taken").
+                <b>Signal</b> — the gate later opened and the engine opened a real signal. <b>Cancelled</b> — the CRT broke or a newer CRT
+                replaced it; the row stays here. Result comes from Setup Journal: did price reach TP or SL first, entry fill not required
+                (flat TP/SL, no partial profit / BE). Levels are the ones in the last notice.
+            </p>
+        </div>
+    </main>
+</div>
+{% endblock %}

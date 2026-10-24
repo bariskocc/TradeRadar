@@ -45,15 +45,15 @@ ap.add_argument("--since", default="2026-09-16", help="kalem kirilimi 16.09'dan 
 ap.add_argument("--all-levels", action="store_true", help="1D/1W: C2 acikken donmus (yanli) eski satirlar da")
 A = ap.parse_args()
 
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected"}
 KEYS = [k for k in SCORE_PART_KEYS if k not in ("raw", "score")]
 LABELS = {
     "base": "C2 rengi (dogru +2 / doji +1 / yanlis 0)",
     "htf": "Bias (1D; 1W'de aylik) +2 / ters -2",
-    "weekly": "1W uyumu +1",
+    "weekly": "1W uyumu +1 (1W stratejisinde 1D bias uyumu, 24.10)",
     "c2_closed": "C2 kapali +1",
     "pd_major": "Key level major +1",
-    "pd_monthly": "Key level aylik +1",
+    "pd_monthly": "Key level aylik +1 (1W stratejisinde guclu C2 donusu, 24.10)",
     "pd_struct": "Key level FVG/OB +1",
     "wick": "Purge fitili +1",
     "ifvg": "LTF IFVG +1",
@@ -127,8 +127,12 @@ for strat in ("4h", "1d", "1w"):
         sub = [x for x in rows if x["s"] == strat and x["seg"] == seg and x["smt_ok"] != 0]
         if not sub:
             continue
-        g_all, b_all = stats([x for x in sub if x["pal"].get("smt") == 2]), stats([x for x in sub if x["pal"].get("smt") == 0])
-        fg, fb, fd, (lo, hi) = flip_diff(sub, "smt", 2, THR[strat])
+        # 24.10: 4H altcoin SMT bonusu +1 (once +2). Eski satirlar bugunku bonusa normalize edilir (SMT haric raw ayni).
+        v = 1 if (strat == "4h" and seg == "alt") else 2
+        sub = [dict(x, pal=dict(x["pal"], smt=v, raw=(x["pal"].get("raw") or 0) - x["pal"]["smt"] + v))
+               if (x["pal"].get("smt") or 0) > 0 else x for x in sub]
+        g_all, b_all = stats([x for x in sub if x["pal"].get("smt") == v]), stats([x for x in sub if x["pal"].get("smt") == 0])
+        fg, fb, fd, (lo, hi) = flip_diff(sub, "smt", v, THR[strat])
         raw_d = (g_all["rps"] - b_all["rps"]) if g_all["res"] and b_all["res"] else None
         print(f"\n  {strat.upper()} · {label} -- {len(sub)} setup")
         print(f"   SMT'li    {g_all['n']:>5} setup, {g_all['res']:>4} cozulmus {g_all['w']:>3} TP / {g_all['l']:>3} SL, "

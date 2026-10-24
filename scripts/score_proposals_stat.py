@@ -30,7 +30,7 @@ ALL_LEVELS = "--all-levels" in sys.argv
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 
-EARLY = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "not_selected",
+EARLY = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected",
          "bias_mismatch", "target_taken"}
 MIN_RR, TIGHT = 2.0, 1.0
 # --- IZLEME.md'ye veri GORULMEDEN yazilan esikler (03.10) ---
