@@ -27,7 +27,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from app.score_outcome import (  # noqa: E402
-    BAND, BANDS, CAND_MIN_RR, FILTER_GAP, FILTER_HERE, CAND_MIN_SIDE, CANDIDATES, THR, cand_flip, candidates_for, collect, stats,
+    BAND, BANDS, CAND_DECIDED, CAND_MIN_RR, FILTER_GAP, FILTER_HERE, CAND_MIN_SIDE, CANDIDATES, THR, cand_flip, candidates_for, collect, stats,
 )
 
 ap = argparse.ArgumentParser()
@@ -121,3 +121,10 @@ for key, label, v, src, filt in candidates_for(A.strategy):   # 24.10: 1W-only a
     else:
         verdict = f"UZAT — fark var ama yarı / p tutmuyor (taraf başına {2 * CAND_MIN_SIDE})"
     print(f"   HÜKÜM: {verdict}\n")
+
+_done = [(k, txt) for (k, st), txt in CAND_DECIDED.items() if st == A.strategy]
+if _done:   # 28.10: karara baglanan adaylar yukarida hesaplanmaz
+    _lab = {c[0]: c[1] for c in CANDIDATES}
+    print("Karara bağlanan adaylar (bu stratejide listeden çıktı):")
+    for k, txt in _done:
+        print(f"   ✓ {_lab.get(k, k)} — {txt}")

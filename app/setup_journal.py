@@ -47,17 +47,20 @@ STAGES: list[tuple[str, str]] = [
     ("bias_mismatch", "1D bias opposite"),
     ("target_taken", "Target already taken"),
     ("low_quality", "Score < 7"),
+    ("liq_unswept", "Nearby liquidity not swept yet"),
     ("no_cisd", "No entry levels / MSS"),
     ("low_rr", "RR < 2"),
     ("score7", "Score-7 gate"),
     ("tight_stop", "Stop too tight"),
     ("past_tp", "TP before entry"),
+    ("near_tp", "Ran 80% to TP before entry"),
     ("past_sl", "SL before fill"),
     ("invalidated", "CRT 60% crossed"),
     ("missed_quality", "Score < 7 at retest"),
     ("stale", "Retest too old"),
     ("week_gap", "CISD before week close"),
     ("cluster_limit", "Cluster limit"),
+    ("same_setup", "Same setup traded on another coin"),
     ("corr_open", "Correlated pair open"),
     ("has_open", "Open signal exists"),
     ("duplicate", "Already saved"),
@@ -977,7 +980,7 @@ def _refreeze_at_c2_close(rec: dict, stage: str, now, why: str = "c2_close") -> 
         return
     rec["pre_c2"] = {
         "at": _iso(now),
-        "why": why,          # 03.10: "c2_close" | "signal" (1D/1W sinyalde yeniden dondurma)
+        "why": why,          # 03.10: "c2_close" | "signal" (1D/1W sinyalde yeniden dondurma) | "liq_sweep" (28.10, 4H)
         "entry": rec.get("entry"), "sl": rec.get("sl"), "tp": rec.get("tp"), "rr": rec.get("rr"),
         "levels_at": _iso(rec.get("levels_at")),
         # Seviyeler hangi asamada dondu? "c2_open" = CISD onayli + butun kapilar gecmis (radar
@@ -1214,6 +1217,18 @@ def note(
             and _levels_c2_open(rec)
         ):
             _refreeze_at_c2_close(rec, stage, now)
+            changed = True
+        elif (
+            key[0] in C2_REFREEZE_STRATEGIES
+            and stage == SIGNAL_STAGE and rec.get("outcome") != "signal"
+            and rec.get("levels_at") is not None and rec.get("sl") is not None
+            and entry is not None and sl is not None and tp is not None
+            and abs(float(rec["sl"]) - float(sl)) > 1e-7 * max(1.0, abs(float(sl)))
+        ):
+            # 28.10 (scanner LIQ_SWEEP_*): yakin likidite C2'den sonra supurulunce sinyal YENI uctan acilir (SL
+            # farkli). Journal donmus C2-ucu SL'iyle izlemeye devam etseydi gercek islemi stop olmus sayardi
+            # (LINK 4H #181 vakasi). Normal 4H sinyalinde SL = C2 ucu = donmus SL, bu dal calismaz.
+            _refreeze_at_c2_close(rec, stage, now, why="liq_sweep")
             changed = True
         elif key[0] in FINAL_REFREEZE_STRATEGIES and rec.get("levels_at") is not None:
             # 03.10: 1D/1W seviyeleri kesinlestir (bkz. FINAL_REFREEZE_STRATEGIES).

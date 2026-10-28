@@ -265,6 +265,13 @@ def _filter_rows(strategy: str) -> list[dict]:
          "label": f"Kripto aynı yön küme limiti (muaf: BTC/ETH ve skor ≥ {sc.CLUSTER_EXEMPT_MIN_SCORE})",
          "stage": "cluster_limit", "on": crypto_alts,
          "off_note": "Fiilen yok — evrende yalnız BTC/ETH var (muaf)"},
+        {"group": "Kapı",
+         "label": "Kripto: aynı setup'tan (C1 + C2 + yön) başka coinde sinyal olmamalı — muafiyet yok (28.10)",
+         "stage": "same_setup", "on": bool(sc.SAME_SETUP_ONE_TRADE)},   # 1D/1W'de de BTC/ETH arasinda
+        {"group": "Kapı",
+         "label": f"C2 ucunun ≤ {sc.LIQ_NEAR_MAX_ATR:g} ATR ötesinde alınmamış likidite varsa önce o süpürülmeli; "
+                  "süpürülünce giriş yeni uçtan (SL yeni uç) — 28.10",
+         "stage": "liq_unswept", "on": strategy in sc.LIQ_SWEEP_REQUIRED_TFS},
         {"group": "Kapı", "label": "CISD / MSS onayı ve giriş seviyesi olmalı", "stage": "no_cisd", "on": True},
         {"group": "Kapı", "label": f"RR ≥ {rr:g}", "stage": "low_rr", "on": True},
         {"group": "Kapı",
@@ -274,6 +281,9 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "Kapı", "label": "CISD hafta kapanışından önce olmamalı (yalnız FX/metal/endeks/petrol)",
          "stage": "week_gap", "on": True},
         {"group": "Kapı", "label": "Girişten önce TP görülmemiş olmalı", "stage": "past_tp", "on": True},
+        {"group": "Kapı",
+         "label": f"Girişten önce TP yolunun %{sc.PREFILL_TP_CANCEL_FRAC * 100:.0f}'i görülmemiş olmalı (28.10)",
+         "stage": "near_tp", "on": True},
         {"group": "Kapı", "label": "CISD'den sonra SL görülmemiş olmalı", "stage": "past_sl", "on": True},
         {"group": "Kapı", "label": "CRT %60 geçilmemiş olmalı", "stage": "invalidated",
          "on": bool(sc.REQUIRE_CRT_MID_INVALIDATION), "off_note": "Kapalı (10.09)"},
@@ -429,10 +439,13 @@ def _candidate_rows(sub: list[dict], strategy: str) -> list[dict]:
     thr = so.THR.get(strategy, 7)
     part = [x for x in sub if _fs(x) and _fs(x) >= CAND_SINCE]
     out = []
-    for key, label, v, src, filt in so.candidates_for(strategy):
+    for key, label, v, src, filt in so.candidates_for(strategy, include_decided=True):
         g, b, d, (lo, hi), _band = so.cand_flip(part, key, thr)
         side_n = min(g["res"], b["res"])
-        if side_n < so.CAND_MIN_SIDE or d is None:
+        decided = so.CAND_DECIDED.get((key, strategy))
+        if decided:   # 28.10: karara baglanan aday satirda kalir, hukmu kayittan
+            h = _h("bad", "Reddedildi", decided)
+        elif side_n < so.CAND_MIN_SIDE or d is None:
             lean = ""
             if d is not None:
                 good = d if v > 0 else -d

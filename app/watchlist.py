@@ -431,7 +431,7 @@ def _p_market_gated_for(strategy: str, note: str):
 async def _p_bias_outcome(db: AsyncSession, strategy: str, since: Optional[datetime], need: int,
                           note: str) -> Progress:
     """03.10 (kullanici: "bias en onemli konu"): temiz setuplarda bias'i hizali ve ters cozulmus setup, her biri `need`
-    (4H taze levels_at >= 04.10 / 100; 1D butun veri / 50). Bias = seviye aninda KAPANMIS son gunun karne bias'i
+    (4H taze levels_at >= 04.10 / 200 -- 28.10'da 100'den uzatildi; 1D butun veri / 50). Bias = seviye aninda KAPANMIS son gunun karne bias'i
     (bias_journal.combined) -- `setup_journal.htf_bias` last_seen anina ait, kullanilmaz. C2 kapali donmus sarti yalniz
     4H'te. Kural ve hesap `scripts/bias_outcome_stat.py` ile ayni."""
     t = SetupJournal.__table__
@@ -1016,6 +1016,30 @@ async def _p_missed_quality(db: AsyncSession) -> Progress:
                           Bar("retest C2 kapalıyken", len(late), 30)], note=note)
 
 
+async def _p_liq_sweep(db: AsyncSession) -> Progress:
+    """28.10 (kullanici karari): yakin asil likidite alinmadan giris yok. Iki sayi: kapida bekleyip (best_stage =
+    liq_unswept) sonuclanan setup -- elenenler TP'ye mi gidiyor -- ve supurmeden sonra acilan 4H sinyal (Journal
+    pre_c2.why = liq_sweep; 1D/1W sinyalde zaten why=signal ile dondurulur)."""
+    t = _journal_table()
+    n_gate = await db.scalar(select(func.count()).select_from(t).where(
+        t.c.best_stage == "liq_unswept", t.c.outcome.in_(("win", "loss", "tp_before_entry")))) or 0
+    n_sig = await db.scalar(select(func.count()).select_from(t).where(
+        func.json_extract(t.c.pre_c2, "$.why") == "liq_sweep")) or 0
+    return Progress(bars=[Bar("kapıda kalıp sonuçlanan setup (likidite hiç alınmadı)", n_gate, 30),
+                          Bar("süpürmeden sonra açılan 4H sinyal", n_sig, 10)],
+                    note="log SKIPPED (LIQ UNSWEPT) / LIQ SWEPT · radar liq_unswept · /eliminated")
+
+
+async def _p_near_tp(db: AsyncSession) -> Progress:
+    """28.10 (kullanici karari): dolmadan TP yolunun %80'ini goren bekleyen sinyal iptal. Elenen setup (best_stage =
+    near_tp) sonuclandi mi -- Journal donmus seviyelerle sonrasini izliyor (TP once mi SL once mi)."""
+    t = _journal_table()
+    n = await db.scalar(select(func.count()).select_from(t).where(
+        t.c.best_stage == "near_tp", t.c.outcome.in_(("win", "loss", "tp_before_entry")))) or 0
+    return Progress(bars=[Bar("near_tp ile elenip sonuçlanan setup", n, 30)],
+                    note="log SKIPPED (NEAR TP) / MISSED (NEAR TP BEFORE FILL) · /eliminated (Fiyat TP'ye %80 yaklaştı)")
+
+
 async def _p_sticky_delete(db: AsyncSession) -> Progress:
     """02.10+ silinen (kalici silme canli), sonucu belli, RR >= 2 setup; past_sl/past_tp haric (tanim geregi SL/TP)."""
     t = _journal_table()
@@ -1212,43 +1236,89 @@ async def _p_score_parts_4h(db: AsyncSession) -> Progress:
                     note=(note + f" · giren {w_in} / düşen {n - w_in}" if n else note))
 
 
+async def _cand_prog(db: AsyncSession, strategy: str) -> list[tuple[str, int]]:
+    """Aday basina karar bandinda AZ olan tarafin cozulmusu (`score_outcome.cand_progress`; rapor ile ayni kume)."""
+    from app import score_outcome as so
+    t = SetupJournal.__table__
+    res = await db.execute(select(t).where(
+        t.c.strategy == strategy, t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
+        t.c.first_seen >= datetime(2026, 9, 29),
+    ))
+    sub = so.collect(res.mappings().all(), strategy=strategy)
+    return so.cand_progress(sub, so.THR[strategy], strategy)
+
+
 def _p_score_candidates(strategy: str):
-    """21.10 (kullanici): "Skor tablosu yeni adaylar" -- bugun skorda olmayan 9 aday, strateji bazinda. Kume ve karar
+    """21.10 (kullanici): "Skor tablosu yeni adaylar" -- bugun skorda olmayan adaylar, strateji bazinda. Kume ve karar
     bandi `app/score_outcome` (rapor `scripts/score_candidates_stat.py` ile ayni fonksiyonlar). Cubuk: karar bandinda
-    AZ olan tarafi en cok birikmis aday (tetik taraf basina 30) -- herhangi bir aday dolunca madde aksiyona duser."""
+    AZ olan tarafin cozulmusu, aday basina bir cubuk (tetik taraf basina 30). 28.10'dan beri madde BUTUN adaylar dolunca
+    aksiyona duser (eskiden herhangi biri); karara baglanan aday (`CAND_DECIDED`) ve ayri izlenen aday (`CAND_SEPARATE`,
+    kendi maddesi) cubuk olmaz."""
     async def _fn(db: AsyncSession) -> Progress:
         from app import score_outcome as so
-        t = SetupJournal.__table__
-        res = await db.execute(select(t).where(
-            t.c.strategy == strategy, t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
-            t.c.first_seen >= datetime(2026, 9, 29),
-        ))
-        sub = so.collect(res.mappings().all(), strategy=strategy)
-        prog = so.cand_progress(sub, so.THR[strategy], strategy)
+        prog = await _cand_prog(db, strategy)
         labels = {k: lab for k, lab, *_ in so.CANDIDATES}
-        best_k, best_n = prog[0]
-        note = " · ".join(f"{labels[k].split(' (')[0]} {n}" for k, n in prog[:4])
-        return Progress(bars=[Bar(f"en ileri aday: {labels[best_k].split(' (')[0]}", best_n, so.CAND_MIN_SIDE)],
-                        note=f"karar bandı, az taraf: {note} — rapor: python scripts/score_candidates_stat.py "
-                             f"--strategy {strategy}")
+        done = [labels[k].split(" (")[0] for (k, st) in so.CAND_DECIDED if st == strategy]
+        sep = [f"{labels[k].split(' (')[0]} {n}" for k, n in prog if k in so.CAND_SEPARATE]
+        note = "karar bandında az tarafın çözülmüşü, aday başına 30 — rapor: python scripts/score_candidates_stat.py "                f"--strategy {strategy}" + (f" · karara bağlandı: {', '.join(done)}" if done else "")                + (f" · ayrı maddede: {', '.join(sep)}" if sep else "")
+        return Progress(bars=[Bar(labels[k].split(" (")[0], n, so.CAND_MIN_SIDE) for k, n in prog
+                              if k not in so.CAND_SEPARATE], note=note)
     return _fn
 
 
+async def _p_cand_separate(db: AsyncSession) -> Progress:
+    """28.10 (kullanici "ayri tutalim"): `CAND_SEPARATE` adaylari (puansiz key level) -- strateji maddelerinin "butun
+    adaylar" tetigini bekletmesin. Tek cubuk: en ileri strateji; herhangi bir stratejide 30 olunca aksiyon."""
+    from app import score_outcome as so
+    counts = [(max((n for k, n in await _cand_prog(db, st) if k in so.CAND_SEPARATE), default=0), st)
+              for st in ("4h", "1d", "1w")]
+    best = max(counts, key=lambda c: c[0])   # esitlikte ilk (4H)
+    return Progress(bars=[Bar(f"puansız key level, en ileri strateji ({best[1].upper()})", best[0], so.CAND_MIN_SIDE)],
+                    note="karar bandında az tarafın çözülmüşü · rapor: python scripts/score_candidates_stat.py --strategy 4h|1d|1w")
+
+
 async def _proposals_a_count(db: AsyncSession, strategy: str, since: datetime) -> int:
-    """`scripts/score_proposals_stat.py` A koluna (bugunku kural @7) yaklasan sayim: CRT-oncesi / bias_mismatch /
-    target_taken haric, skor >= 7, RR >= 2, sonuclanmis ya da dolmamis; 4H'te C2 kapali donmus. Kesin sayi rapordan."""
+    """`scripts/score_proposals_stat.py` A kolu (bugunku kural @7): CRT-oncesi / bias_mismatch / target_taken haric,
+    sonuclanmis ya da dolmamis (sinyalde golge shadow["1"]), RR >= 2, dar stop degil, skor >= 7 ve skor TAM 7'de skor-7
+    kapisi (bolge girisi degil + key level var); 4H'te C2 kapali donmus. Skor `analysis_parts`'tan.
+    28.10: sayac dar stop ve skor-7 kapisini atliyordu (71 sayiyordu, rapor 43) ve madde erken "aksiyon bekliyor"a dustu --
+    kurallar artik raporun `load` + `passes` ile ayni."""
+    from app.setup_journal import analysis_parts
     t = _journal_table()
     early = tuple(PRE_SETUP_STAGES | {"bias_mismatch", "target_taken"})
-    # Skor raporla ayni andan (`analysis_parts`): 4H donmus, 1D/1W son skor (parts_final restart sonrasi kolon;
-    # sayac eski DB'de de calissin diye score_parts -- kesin sayi rapordan).
-    score_col = t.c.parts_at_levels if strategy == "4h" else t.c.score_parts
     where = [t.c.strategy == strategy, t.c.levels_at >= since, t.c.best_stage.not_in(early),
-             func.json_extract(score_col, "$.score") >= 7, t.c.rr >= 2.0,
+             t.c.parts_at_levels.is_not(None),
              t.c.outcome.in_(("win", "loss", "tp_before_entry", "no_touch", "signal"))]
     if strategy == "4h":
         where.append(func.json_extract(t.c.parts_at_levels, "$.c2_closed") == 1)
     where.append(_final_levels_cond(t, strategy))
-    return await db.scalar(select(func.count()).select_from(t).where(*where)) or 0
+    rows = (await db.execute(select(t).where(*where))).mappings().all()
+    n = 0
+    for r in rows:
+        p, f = analysis_parts(r)
+        if not p or "raw" not in p:
+            continue
+        o, rr = r["outcome"], r["rr"]
+        if o == "signal":
+            try:
+                sh = (json.loads(r["shadow"]) if r["shadow"] else {}).get("1") or {}
+            except Exception:
+                continue
+            o, rr = sh.get("o"), sh.get("rr", rr)
+        if o not in ("win", "loss", "tp_before_entry", "no_touch") or rr is None or rr < 2.0:
+            continue
+        f = f or {}
+        if f.get("stop_range_mult") is not None and f["stop_range_mult"] < 1.0:
+            continue
+        sc = p.get("score") or 0
+        if sc < 7:
+            continue
+        if sc == 7:   # skor-7 kapisi: yapisal giris + key level
+            pd_any = (p.get("pd_major", 0) + p.get("pd_monthly", 0) + p.get("pd_struct", 0)) > 0                 or (f.get("key_level_n") or 0) > 0
+            if (r["model"] or "cisd") in ("ifvg", "bpr") or not pd_any:
+                continue
+        n += 1
+    return n
 
 
 async def _p_score_proposals_1d(db: AsyncSession) -> Progress:
@@ -1257,6 +1327,58 @@ async def _p_score_proposals_1d(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("1D 25.09+, bugünkü kural @7 (A kolu)", n, 30)],
                     note="1D'de bugünkü kural haftada ~1 setup açıyor; 03.10'dan beri yalnız seviyesi kesin satır "
                          "(sinyalde / C2 kapanışında) sayılır — örneklem baştan birikiyor")
+
+
+_D1_SCORE6_GATES = ("low_quality", "missed_quality", "score7")
+
+
+async def _p_d1_score6(db: AsyncSession) -> Progress:
+    """28.10 (kullanici): 1D esigi 7 -> 6 mi? Skor kapisinda (`_D1_SCORE6_GATES`) elenen, skoru TAM 6, secilen giris
+    RR >= 2, seviyesi kesin 1D setup (25.09+). Cozulmus = TP once mi SL once mi (`score_outcome.outcome_of`: win +
+    tp_before_entry = TP, loss = SL). Skor `analysis_parts`. Tetik 30 cozulmus."""
+    from app.score_outcome import outcome_of
+    from app.setup_journal import analysis_parts
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(
+        t.c.strategy == "1d", t.c.purge_time >= datetime(2026, 9, 25), t.c.entry.is_not(None),
+        t.c.best_stage.in_(_D1_SCORE6_GATES), _final_levels_cond(t, "1d"),
+    ))).mappings().all()
+    w = l = 0
+    rs = 0.0
+    for r in rows:
+        p, _f = analysis_parts(r)
+        if not p or p.get("score") != 6:
+            continue
+        o, rr = outcome_of(r)
+        if (rr or 0) < 2:
+            continue
+        if o in ("win", "tp_before_entry"):
+            w += 1
+            rs += rr
+        elif o == "loss":
+            l += 1
+            rs -= 1
+    n = w + l
+    note = f"{w} TP / {l} SL" + (f" · {rs / n:+.2f} R/setup (TP önce mi)" if n else "") + \
+           " · dolum bazlı R ve iki yarı okumada ayrıca hesaplanır"
+    return Progress(bars=[Bar("1D skor 6, skor kapısında elenen, RR ≥ 2 — çözülmüş", n, 30)], note=note)
+
+
+async def _p_bias_neutral(db: AsyncSession) -> Progress:
+    """28.10 (kullanici): 1D bias NEUTRAL'i azaltan varyant ("celismede taze structure"). Karsi-olgu `app/bias_variant`
+    (rapor `scripts/bias_neutral_stat.py` ile ayni fonksiyon); yalniz levels_at >= DECISION_SINCE (hipotez verisi
+    disarida). Cubuklar: 4H'te varyantin ekledigi ve dusurdugu setuplarin cozulmusu."""
+    from app import bias_variant as bv
+    bj = (await db.execute(select(BiasJournal.__table__))).mappings().all()
+    bmap = bv.build_map(dict(r) for r in bj)
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(t.c.strategy == "4h", t.c.levels_at >= bv.DECISION_SINCE))).mappings().all()
+    a, d = bv.flips([dict(r) for r in rows], bmap, bv.bias_variant, bv.DECISION_SINCE)
+    sa, sd = bv.stats(a), bv.stats(d)
+    return Progress(bars=[Bar("4H varyantın eklediği — çözülmüş", sa["res"], bv.NEED_ADDED),
+                          Bar("4H varyantın düşürdüğü — çözülmüş", sd["res"], bv.NEED_DROPPED)],
+                    note="hipotez verisi (04.10–28.10): eklenen 23 TP / 15 SL (dolum +0.80 R/işlem), düşen 3 TP / 10 SL · "
+                         "rapor: python scripts/bias_neutral_stat.py")
 
 
 async def _p_score_proposals_4h(db: AsyncSession) -> Progress:
@@ -1269,7 +1391,7 @@ async def _p_score_proposals_4h(db: AsyncSession) -> Progress:
 
 async def _p_smt_variants(db: AsyncSession) -> Progress:
     """03.10 (kullanici: "SMT onemli konfirme, cikarmak yerine duzeltelim"): C1 ucuna bagli SMT olcumu (smt_htf / smt_lvl)
-    tasiyan cozulmus 4H setup, cift turune gore. Kaba hedef: FX ciftleri 100, altcoin->BTC 150 -- hukum karar bandinda
+    tasiyan cozulmus 4H setup, cift turune gore. Kaba hedef: FX ciftleri 200, altcoin->BTC 300 (28.10'da 100/150'den) -- hukum karar bandinda
     taraf basina 10 ile `scripts/smt_variants_stat.py`'den. 4H'te C2 kapali donmus sarti raporla ayni."""
     t = _journal_table()
 
@@ -1282,8 +1404,9 @@ async def _p_smt_variants(db: AsyncSession) -> Progress:
             t.c.outcome.in_(("win", "loss", "signal"))]
     n_fx = await db.scalar(select(func.count()).select_from(t).where(*base, kind_is("fx"))) or 0
     n_alt = await db.scalar(select(func.count()).select_from(t).where(*base, kind_is("alt_btc"))) or 0
-    return Progress(bars=[Bar("4H FX çiftleri, SMT ölçümlü", n_fx, 100), Bar("4H altcoin→BTC, SMT ölçümlü", n_alt, 150)],
-                    note="ölçüm restart'tan sonra başlar · 1D/1W raporda (--strategy)")
+    return Progress(bars=[Bar("4H FX çiftleri, SMT ölçümlü", n_fx, 200), Bar("4H altcoin→BTC, SMT ölçümlü", n_alt, 300)],
+                    note="28.10 ara okuma (119/413): hiçbir tanım geçmedi, altcoinde bugünkü TERS — hedef 100/150 → 200/300 "
+                         "(kullanıcı) · 1D/1W raporda (--strategy)")
 
 
 async def _p_score_parts_1w(db: AsyncSession) -> Progress:
@@ -1696,14 +1819,14 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="bias_outcome_4h", status="open", started="03.10", onem=0, pinned=True, pin_order=0,
         title="1D bias kazananı seçiyor mu? — 4H",
-        trigger="taze (levels_at ≥ 04.10) temiz 4H setupta bias hizalı ve ters her biri 100 çözülmüş: B1 ters − hizalı "
+        trigger="taze (levels_at ≥ 04.10) temiz 4H setupta bias hizalı ve ters her biri 200 çözülmüş (28.10: 100'de B3, uzatıldı): B1 ters − hizalı "
                 "≥ +0.15 R/setup + WR ≥ 0 + iki yarı → filtre/+2 için tek replay · B2 ters − NEUTRAL ≤ −0.15 + iki yarı → "
                 "filtre kalır · B3 → değişiklik yok, kullanıcıya sor; ayrıca yalnız-ict karşı-olgusu (C1)",
         measure="python scripts/bias_outcome_stat.py (en alttaki KARAR bloğu) · python scripts/bias_stat.py",
         md="1D bias 4H'te kazananı seçiyor mu? (03.10.2026)",
-        progress_fn=_p_bias_outcome_for("4h", datetime(2026, 10, 4), 100,
-                                        "03.10 görülen veri (482): hizalı %28.7 · NEUTRAL %30.8 · ters %36.1 WR — "
-                                        "karar taze veriyle"),
+        progress_fn=_p_bias_outcome_for("4h", datetime(2026, 10, 4), 200,
+                                        "28.10 ara okuma (141/231): hizalı +0.34 · NEUTRAL −0.17 · ters −0.18 R/setup — "
+                                        "B3, 03.10 hipotezi tersine döndü; 200'e uzatıldı (kullanıcı)"),
     ),
     WatchItem(
         key="bias_outcome_1d", status="open", started="03.10", onem=0, pinned=True, pin_order=0,
@@ -1716,6 +1839,16 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_outcome_for("1d", None, 50,
                                         "03.10'dan beri yalnız seviyesi kesin 1D satırı (eski 130'un çoğu C2 açık "
                                         "donmuş, koşan SL) — örneklem baştan birikiyor"),
+    ),
+    WatchItem(
+        key="bias_neutral", status="open", started="28.10", onem=0, pinned=True, pin_order=0,  # bias en onemli konu
+        title="1D bias NEUTRAL'ı azaltmak — çatışmada taze yapısal yön",
+        trigger="levels_at ≥ 29.10 4H'te varyantın eklediği 40 ve düşürdüğü 15 çözülmüş (TP önce mi): K1 eklenen dolum "
+                "R/işlem > 0 + (eklenen − düşen) ≥ +0.15 R/setup + iki yarı + 1D'de ≤ −0.15 değil → tek replay (4H + 1D), "
+                "karar kullanıcıya · K2 fark ≤ −0.15 ya da eklenen dolum ≤ 0 → kural aynı · K3 → kullanıcıya sor",
+        measure="python scripts/bias_neutral_stat.py (en alttaki KARAR bloğu)",
+        md="1D bias NEUTRAL'ı azaltmak — çatışmada taze yapısal yön (28.10.2026)",
+        progress_fn=_p_bias_neutral,
     ),
     WatchItem(
         key="key_level_filter", status="open", started="29.09", onem=0, pinned=True,
@@ -1754,7 +1887,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_liq_near_bonus,
     ),
     WatchItem(
-        key="c1_shape", status="open", started="29.09", onem=0,
+        key="c1_shape", status="done", started="29.09", onem=0,
         title="C1'in şekli: TP'si C1'in uzun fitilinin ucunda olan setup daha kötü mü?",
         trigger="fitilli grupta (TP fitili ≥ 0.40) 100 sonuçlanmış RR ≥ 2 setup + fark tek yönlü bootstrap p < 0.10: "
                 "fitilli grup ≥ 0.3 R/setup kötüyse hard filtre, 0.15–0.3 → puan sorusu 'Skor tablosu yeni adaylar'da (21.10), < 0.15 ise değişiklik yok "
@@ -1762,6 +1895,9 @@ ITEMS: list[WatchItem] = [
         measure="python scripts/c1_shape_stat.py · setup_journal.features.c1_same_color / c1_body_frac / c1_tp_wick_frac"
                 " · 30.09: 4H'te C1 gövdesi < %30 filtrelendi (c1_weak, kullanıcı kararı)",
         md="C1'in şekli — fitil tepesine TP (başladı 29.09.2026; aynı renk kapandı 21.10, ⏰ tetik: fitilli grupta 100)",
+        result="(28.10) H2 TP fitili de kapandı: filtre yok — fitilli 119 / kısa 557 (RR ≥ 2) kötülük +0.11 R/setup (p 0.28, "
+               "yarılar +0.09 / +0.14); TP önce mi ölçüsünde fitilli daha iyi (%52 / %48). İşaret yalnız 1D'de (n 36) → puan "
+               "sorusu 'Skor tablosu yeni adaylar — 1D' (c1_tp_wick). H1 (aynı renk) 21.10'da kapanmıştı.",
         progress_fn=_p_c1_shape,
     ),
     WatchItem(
@@ -1995,6 +2131,27 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_deleted_gate,
     ),
     WatchItem(
+        # 28.10 (kullanici karari, LINK 4H #181): kural olcumsuz canliya alindi -> tuttu mu?
+        key="liq_sweep", status="open", started="28.10", onem=2,
+        title="Yakın asıl likidite alınmadan giriş yok — tuttu mu?",
+        trigger="kapıda kalıp sonuçlanan 30 setup + süpürmeden sonra açılan 10 sinyal: elenenlerin (likidite hiç "
+                "alınmadı) TP önce mi %'si taban oranın ≥ 10 puan üstündeyse kural kazanç kesiyor → kullanıcıya; süpürme "
+                "sonrası sinyaller R/işlem < −0.3 ise yeniden giriş kısmı kullanıcıya",
+        measure="log SKIPPED (LIQ UNSWEPT) / LIQ SWEPT · /eliminated (Yakın asıl likidite alınmadı) · Journal pre_c2.why",
+        md="Yakın asıl likidite alınmadan giriş yok — tuttu mu? (28.10.2026)",
+        progress_fn=_p_liq_sweep,
+    ),
+    WatchItem(
+        # 28.10 (kullanici karari "garanti olsun", AUDUSD #184 / GBPJPY #183 / ETH #182): olcumsuz canliya alindi
+        key="near_tp", status="open", started="28.10", onem=2,
+        title="Dolmadan TP'ye %80 yaklaşan sinyal iptal — tuttu mu?",
+        trigger="near_tp ile elenip sonuçlanan 30 setup: elenenlerin TP önce mi %'si aynı dönemde kapıları geçen "
+                "setuplardan ≥ 10 puan yüksekse kural kazanç kesiyor → kullanıcıya (eşik / geri alma)",
+        measure="/eliminated (Fiyat TP'ye %80 yaklaştı) · log SKIPPED (NEAR TP) · scripts/prefill_signal_stat.py",
+        md="Dolmadan TP'ye %80 yaklaşan sinyal iptal — tuttu mu? (28.10.2026)",
+        progress_fn=_p_near_tp,
+    ),
+    WatchItem(
         key="sticky_delete", status="open", started="01.10", onem=2,
         title="Kalıcı silme — engellenen setup TP'ye gidiyor mu?",
         trigger="02.10 sonrası silinen 30 çözülmüş setup (RR ≥ 2, past_sl/past_tp hariç): R/işlem > +0.3 ve "
@@ -2057,6 +2214,16 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_proposals_1d,
     ),
     WatchItem(
+        key="d1_score6", status="open", started="28.10", onem=1,
+        title="1D giriş eşiği 7 → 6 mı? (skor 6'da elenen setuplar)",
+        trigger="skor kapısında elenen, skoru tam 6, RR ≥ 2, seviyesi kesin 1D setup 30 çözülmüş (TP önce mi): R/setup "
+                "≥ +0.15 VE dolum bazlı R/işlem > 0 VE iki zaman yarısında aynı yön → tek replay, sonra eşik 6 kararı "
+                "kullanıcıya; aksi halde 7 kalır",
+        measure="Journal 1D 25.09+, best_stage low_quality|missed_quality|score7, analysis_parts skor 6, RR ≥ 2",
+        md="1D giriş eşiği 7 → 6 mı? (28.10.2026)",
+        progress_fn=_p_d1_score6,
+    ),
+    WatchItem(
         key="score_parts_1d", status="open", started="16.09", onem=1,
         title="Skor kalemleri — 1D",
         trigger="300 sonuçlanmış 1D setup (25.09+; 03.10'da tarih doldu, kalemlerin karar bandı < 10 → örneklem "
@@ -2078,16 +2245,26 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="score_candidates_4h", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 4H",
-        trigger="bir adayda karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
+        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
         measure="python scripts/score_candidates_stat.py --strategy 4h · adaylar app/score_outcome.CANDIDATES (seans, CISD "
-                "gücü, likidite, EQ/SSL, MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi)",
+                "gücü, likidite, EQ/SSL, MSS, C1 aralığı, key level yok, C1 TP fitili, BPR girişi; IFVG/BPR bölgesi oluşmamış 28.10 RED)",
         md="Skor tablosu yeni adaylar — 4H",
         progress_fn=_p_score_candidates("4h"),
     ),
     WatchItem(
+        # 28.10 (kullanici): cok yavas biriken aday strateji maddelerinden ayrildi (4H'te 1/30).
+        key="score_candidate_eq_ssl", status="open", started="28.10", onem=1,
+        title="Skor adayı ayrı — puansız key level (EQ / SSL) +1",
+        trigger="herhangi bir stratejide karar bandında taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda "
+                "aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada 60'a uzat (aday maddeleriyle aynı kural)",
+        measure="python scripts/score_candidates_stat.py --strategy 4h|1d|1w (aday 'Puansız key level')",
+        md="Skor adayı ayrı — puansız key level (EQ / SSL) +1 (28.10.2026)",
+        progress_fn=_p_cand_separate,
+    ),
+    WatchItem(
         key="score_candidates_1d", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 1D",
-        trigger="bir adayda karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
+        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
         measure="python scripts/score_candidates_stat.py --strategy 1d · adaylar app/score_outcome.CANDIDATES (seans, CISD "
                 "gücü, likidite, EQ/SSL, MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi)",
         md="Skor tablosu yeni adaylar — 1D",
@@ -2097,7 +2274,7 @@ ITEMS: list[WatchItem] = [
         # 24.10 (kullanici, 1W skor kalemleri incelemesi): 5 yalniz-1W aday eklendi, madde pasiften cikti (onem 3 -> 1).
         key="score_candidates_1w", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 1W",
-        trigger="bir adayda karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde. "
+        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde. "
                 "Sonuç = TP önce mi SL önce mi (24.10, giriş dolmadan TP de TP). 1W'de birikme yavaş (haftada ~10 setup)",
         measure="python scripts/score_candidates_stat.py --strategy 1w · ortak adaylar (seans, CISD gücü, likidite, EQ/SSL, "
                 "MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi) + 24.10 yalnız 1W: haftalık "

@@ -603,6 +603,8 @@ SCORE_FEATURE_KEYS = (
     "ifvg_checked", "bias_checked", "smt_possible",
     # 29.09: key level sayisi (EQ/SSL dahil) + purge otesindeki en yakin alinmamis likidite
     "key_level_n", "liq_beyond_atr", "liq_beyond_frac", "liq_beyond_kind",
+    # 28.10: o likiditenin fiyati -- scanner'in "yakin asil likidite alinmadan girme" kapisi (LIQ_SWEEP_*) kullanir
+    "liq_beyond_level",
     # 29.09: C1 sekli -- C2 ile ayni renk (1/0), govde orani, TP tarafindaki fitil / C1 range
     "c1_same_color", "c1_body_frac", "c1_tp_wick_frac",
     # 03.10: SMT'nin C1 ucuna bagli tanimlari (yalniz olcum, `smt_level_features`) + cift turu
@@ -1591,7 +1593,8 @@ def liquidity_beyond_purge(df: pd.DataFrame, purge_idx: int, direction: str,
     BNB 4H #135 / UNI 4H #141: C2 asil swing dibe (756.72 / 8.509) varmadan dondu, fiyat sonra oraya
     inip SL'yi aldi. Soru: "otede yakin alinmamis likidite varsa setup daha cok stop mu oluyor?"
     Donus (features'a): liq_beyond_atr (uzaklik / ATR), liq_beyond_frac (uzaklik / C1 araligi),
-    liq_beyond_kind (1 = swing, 2 = esit dip/tepe). Bulunamazsa bos dict. Motor karari DEGISMEZ.
+    liq_beyond_kind (1 = swing, 2 = esit dip/tepe), liq_beyond_level (fiyat, 28.10). Bulunamazsa bos dict.
+    28.10'dan beri motor KARARI bunu kullanir: scanner `LIQ_SWEEP_REQUIRED_TFS` (yakin likidite alinmadan giris yok).
     """
     if purge_idx is None or purge_idx >= len(df) or purge_idx < 2:
         return {}
@@ -1616,6 +1619,7 @@ def liquidity_beyond_purge(df: pd.DataFrame, purge_idx: int, direction: str,
         if rng > 0:
             out["liq_beyond_frac"] = round(dist / rng, 4)
     out["liq_beyond_kind"] = kind
+    out["liq_beyond_level"] = round(float(lvl), 8)
     return out
 
 
@@ -2472,6 +2476,7 @@ def check_cisd_confirmation(
     *,
     cisd_only: bool = False,
     stop_frac: float = 1.0,
+    extend_extreme: bool = False,
 ) -> Optional[CISDConfirmation]:
     """15M seviyeleri + (varsa) MSS kapanis onayi.
 
@@ -2488,6 +2493,9 @@ def check_cisd_confirmation(
     `cisd_only` (01.10, 1W kullanici karari): MSS adayi yarismaz, giris daima CISD seviyesi (gecersizse None).
     `stop_frac` (01.10, 1W): SL = giris + stop_frac x (purge ucu - giris); 1.0 = purge ucu. Adayin gecerliligi
     ve onay yine purge ucuna gore (SL yalniz yakinlasir).
+    `extend_extreme` (28.10, scanner LIQ_SWEEP kapisi): dip/tepe C2 penceresiyle sinirli degil, C2 acilisindan
+    serinin sonuna kadar aranir -- C2'nin almadigi yakin likidite sonradan supurulunce CISD / MSS o yeni uctan
+    hesaplanir. SL'yi cagiran `setup.purge_extreme` ile verir (yeni uc).
     """
     if len(df_15m) < 3:
         return None
@@ -2516,12 +2524,12 @@ def check_cisd_confirmation(
     if setup.direction == "LONG":
         return _check_bullish_cisd(
             recent, setup, min_confirm_time=min_confirm_time, c2_hours=c2_hours,
-            cisd_only=cisd_only, stop_frac=stop_frac,
+            cisd_only=cisd_only, stop_frac=stop_frac, extend_extreme=extend_extreme,
         )
     else:
         return _check_bearish_cisd(
             recent, setup, min_confirm_time=min_confirm_time, c2_hours=c2_hours,
-            cisd_only=cisd_only, stop_frac=stop_frac,
+            cisd_only=cisd_only, stop_frac=stop_frac, extend_extreme=extend_extreme,
         )
 
 
@@ -2711,17 +2719,19 @@ def _c2_extreme_iloc(
     purge_time,
     direction: str,
     c2_hours: float = 4.0,
+    extend: bool = False,
 ) -> Optional[int]:
     """4H purge (C2) mum araligindaki 15M ekstreminin work iloc'u.
 
     SHORT: C2 icindeki max high mumu; LONG: C2 icindeki min low mumu.
     Boylece C2 sonrasi yeni HH/LL MSS referansini kaydiramaz.
+    `extend` (28.10): C2 acilisindan serinin sonuna kadar (yakin likidite C2'den sonra supuruldu).
     """
     if purge_time is None or work is None or work.empty:
         return None
     start = _as_utc_ts(purge_time)
     end = start + pd.Timedelta(hours=c2_hours)
-    seg = work[(work.index >= start) & (work.index < end)]
+    seg = work[(work.index >= start) & ((work.index < end) | extend)]
     if seg.empty:
         return None
     if direction == "LONG":
@@ -2743,6 +2753,7 @@ def _check_bullish_cisd(
     c2_hours: float = 4.0,
     cisd_only: bool = False,
     stop_frac: float = 1.0,
+    extend_extreme: bool = False,
 ) -> Optional[CISDConfirmation]:
     """15M bullish onay: swing vs bearish blog (CISD), tek aday (genis stop).
 
@@ -2756,7 +2767,7 @@ def _check_bullish_cisd(
         return None
 
     # Dip: C2 (4H purge) icindeki 15M ekstrem; yoksa eski fallback (purge sonrasi min).
-    low_iloc = _c2_extreme_iloc(work, setup.purge_time, "LONG", c2_hours=c2_hours)
+    low_iloc = _c2_extreme_iloc(work, setup.purge_time, "LONG", c2_hours=c2_hours, extend=extend_extreme)
     if low_iloc is None:
         if min_confirm_time is not None:
             cand = work[work.index > min_confirm_time]
@@ -2842,6 +2853,7 @@ def _check_bearish_cisd(
     c2_hours: float = 4.0,
     cisd_only: bool = False,
     stop_frac: float = 1.0,
+    extend_extreme: bool = False,
 ) -> Optional[CISDConfirmation]:
     """15M bearish onay: swing vs bullish blog (CISD), tek aday (genis stop).
 
@@ -2855,7 +2867,7 @@ def _check_bearish_cisd(
         return None
 
     # Tepe: C2 (4H purge) icindeki 15M ekstrem; yoksa eski fallback.
-    high_iloc = _c2_extreme_iloc(work, setup.purge_time, "SHORT", c2_hours=c2_hours)
+    high_iloc = _c2_extreme_iloc(work, setup.purge_time, "SHORT", c2_hours=c2_hours, extend=extend_extreme)
     if high_iloc is None:
         if min_confirm_time is not None:
             cand = work[work.index > min_confirm_time]

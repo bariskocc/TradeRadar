@@ -36,7 +36,7 @@ ALL_LEVELS = "--all-levels" in sys.argv
 
 # --- IZLEME.md'ye veri GORULMEDEN yazilan esikler (03.10) ---------------------------------
 DECISION_SINCE = "2026-10-04"   # 4H taze veri: 03.10 okumasindan sonra donan seviyeler
-MIN_GROUP = 100                 # 4H: hizali ve ters gruplarin her biri, cozulmus setup
+MIN_GROUP = 200                 # 4H: hizali ve ters gruplarin her biri, cozulmus setup (28.10: 100'de B3, kullanici uzatti)
 # strateji -> (levels_at alt siniri, grup basina esik). 1D (03.10, eski "+2 puan" maddesinden devralindi): 1D'de setup
 # seyrek, taze veriyle 50 aylar surer -> butun veri; esikler 4H'ten kopyalandi, 1D verisine bakilarak secilmedi.
 DECISION = {"4h": (DECISION_SINCE, MIN_GROUP), "1d": (None, 50)}

@@ -147,6 +147,8 @@ RADAR_STATE_META = {
     # "same_color":   {"label": "CRT/purge same color",      "color": "red",    "rank": 4},
     "bias_mismatch":  {"label": "1D bias opposite",           "color": "orange", "rank": 5},
     "cluster_limit":  {"label": "Same-direction cluster limit", "color": "orange", "rank": 6},
+    "same_setup":     {"label": "Same setup on another coin",  "color": "orange", "rank": 6},
+    "liq_unswept":    {"label": "Nearby liquidity not swept",  "color": "yellow", "rank": 4},
     "has_open":       {"label": "Open signal exists",         "color": "purple", "rank": 7},
     "corr_open":      {"label": "Correlated pair open",       "color": "purple", "rank": 8},
     "duplicate":      {"label": "Setup already saved",        "color": "purple", "rank": 9},
@@ -1794,14 +1796,14 @@ async def api_radar(request: Request):
             cnt.get("no_cisd", 0) + cnt.get("c2_open", 0) + cnt.get("low_rr", 0) + cnt.get("missed", 0)
             + cnt.get("invalidated", 0)  # + cnt.get("same_color", 0)  # eski hard filter
             + cnt.get("tight_stop", 0) + cnt.get("bias_mismatch", 0)
-            + cnt.get("cluster_limit", 0)
+            + cnt.get("cluster_limit", 0) + cnt.get("same_setup", 0) + cnt.get("liq_unswept", 0)
             + cnt.get("stale", 0) + cnt.get("same_bar_sl", 0) + cnt.get("week_gap", 0)
             + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0)
         ),
         "setups": sum(cnt.get(k, 0) for k in (
             "waiting", "c2_open", "no_cisd", "low_rr", "missed", "stopped", "invalidated",
             # "same_color",  # eski hard filter
-            "tight_stop", "bias_mismatch", "cluster_limit", "low_quality",
+            "tight_stop", "bias_mismatch", "cluster_limit", "same_setup", "liq_unswept", "low_quality",
             "has_open", "duplicate", "deleted_before", "corr_open", "stale", "same_bar_sl", "week_gap",
             "past_sl", "missed_quality",
         )),

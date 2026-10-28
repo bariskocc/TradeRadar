@@ -33,6 +33,7 @@ GATE_LABELS = {
     "has_open": "Open signal on this symbol",
     "corr_open": "Correlated pair has an open signal",
     "duplicate": "Setup already saved",
+    "same_setup": "Same setup already traded on another coin",
 }
 CANCEL_LABELS = {
     "crt_gone": "CRT structure broke",

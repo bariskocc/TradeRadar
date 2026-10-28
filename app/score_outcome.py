@@ -202,9 +202,21 @@ CAND_POINTS = {k: v for k, _l, v, _s, _f in CANDIDATES}
 CAND_ONLY = {k: frozenset({"1w"}) for k in ("w_bias_with", "w_bias_against", "wick_big", "liq_far", "c2_doji")}
 
 
-def candidates_for(strategy: str | None) -> tuple:
-    """Stratejide gecerli adaylar (CANDIDATES sirasiyla)."""
-    return tuple(c for c in CANDIDATES if strategy is None or strategy in CAND_ONLY.get(c[0], (strategy,)))
+# 28.10 (kullanici): cok yavas biriken aday -- strateji maddesinin "butun adaylar dolunca" tetigini bekletmesin diye
+# /izleme'de AYRI madde ("Skor adayı ayrı — puansız key level"). Rapor ve /skor-tablosu her zamanki gibi basar.
+CAND_SEPARATE = frozenset({"eq_ssl"})
+# 28.10: karara baglanan aday (aday, strateji) -> tek satir sonuc. O stratejide listeden, sayactan ve hukumden cikar;
+# rapor ve /skor-tablosu ayrica "karara baglandi" diye basar. Diger stratejilerde aday surer.
+CAND_DECIDED = {
+    ("no_zone", "4h"): "28.10 RED (kullanıcı onayı): karar bandında bölgesiz setup tersine daha iyi — TP önce mi %63 / %51 "
+                       "(56 / 55), iki yarıda aynı yön; ceza da bölge şartı da yok",
+}
+
+
+def candidates_for(strategy: str | None, include_decided: bool = False) -> tuple:
+    """Stratejide gecerli adaylar (CANDIDATES sirasiyla). Karara baglananlar (CAND_DECIDED) yalniz istenirse."""
+    return tuple(c for c in CANDIDATES if (strategy is None or strategy in CAND_ONLY.get(c[0], (strategy,)))
+                 and (include_decided or (c[0], strategy) not in CAND_DECIDED))
 CAND_MIN_RR = 2.0      # karar kumesi: islem acilabilir dilim (C1 sekli dersi, 21.10)
 CAND_MIN_SIDE = 30     # tetik: karar bandinda taraf basina cozulmus
 CISD_DISP_MIN = 1.0
@@ -343,7 +355,8 @@ def cand_flip(sub, key: str, thr: int):
 
 
 def cand_progress(sub, thr: int, strategy: str | None = None) -> list[tuple[str, int]]:
-    """Aday basina karar bandinda AZ olan tarafin cozulmus sayisi (tetik CAND_MIN_SIDE), en ileri once."""
+    """Aday basina karar bandinda AZ olan tarafin cozulmus sayisi (tetik CAND_MIN_SIDE), en ileri once.
+    Karara baglanan aday (CAND_DECIDED) sayilmaz."""
     out = []
     for key, *_ in candidates_for(strategy):
         g, b, _d, _band, _x = cand_flip(sub, key, thr)

@@ -300,6 +300,7 @@ _POTENTIAL_GATE_LABELS = {
     "corr_open": "Korele paritede zaten açık işlem var",
     "duplicate": "Aynı setup zaten kayıtlı",
     "cluster_limit": "Aynı yönde küme limiti dolu",
+    "same_setup": "Aynı setup başka coinde zaten sinyal",
     "no_cisd": "Entry/MSS seviyeleri henüz yok",
 }
 

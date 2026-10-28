@@ -23,6 +23,7 @@ run_scan() ise manuel tetikleme / REST mutabakati icin ayni mantigi calistirir.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -137,6 +138,33 @@ CLUSTER_EXEMPT_SYMBOLS = frozenset({"BTCUSDT.P", "ETHUSDT.P"})
 # Muaf setup limiti DELER ama sayima DAHILDIR: kotayi doldurur, boylece
 # siradan setuplar icin koruma calismaya devam eder.
 CLUSTER_EXEMPT_MIN_SCORE = 9
+
+# Ayni setup tek islem (28.10, kullanici karari): kriptoda ayni strateji + yon + C1 + C2 mumundan (crt_bar_time +
+# purge_time) BASKA sembolde sinyal varsa (bekleyen, aktif ya da kapanmis) yeni sinyal acilmaz -- ilk kaydedilen
+# kazanir. Vaka: LINK 4H #181 ve ETH 4H #182, ikisi de 26.10 19:00 TSI C1'li ayni LONG setup, ikisi de SL. Kume limiti
+# bunu yakalamiyordu (ETH muaf, kota 2). Muafiyet YOK (BTC/ETH ve yuksek skor dahil). Dolmadan silinen sinyal
+# tablodan gittigi icin engellemez. FX/metal/endeks/petrol etkilenmez. False eski davranis.
+SAME_SETUP_ONE_TRADE = True
+
+# Yakin asil likidite alinmadan giris yok (28.10, kullanici karari): C2'nin uc'unun hemen otesinde (<= LIQ_NEAR_MAX_ATR
+# x HTF ATR) alinmamis swing / esit dip-tepe varsa (`crt_engine.liquidity_beyond_purge`) C2 asil likiditeyi almadan
+# donmus demektir -- MSS/CISD "sahte" sayilir, sinyal acilmaz (radar/Journal `liq_unswept`). Setup izlenmeye devam
+# eder: fiyat C2'den sonra o seviyeyi delerse dip/tepe yeni uca tasinir (SL = yeni uc), CISD / MSS / bolge o uctan
+# yeniden hesaplanir (`check_cisd_confirmation(extend_extreme=True)`), TP ayni (C1'in karsi ucu); retest gelirse islem.
+# Vaka: LINK 4H #181 -- C2 dibi 11.246, 12 tick altinda 24.10'un alinmamis 4H swing dibi 11.234; C3 onu supurup
+# (11.223) SL'yi aldi, fiyat TP'ye gitti. Yeni kuralla: CISD 11.292, RR 3.6, retest + TP. Journal 29.09-28.10: bu
+# gruba (4H RR >= 2) 47 setup; dolan islemlerde sistematik kotu degildi -- kazanc beklentisi yeniden giristen.
+LIQ_SWEEP_REQUIRED_TFS = frozenset({"4h", "1d", "1w"})
+LIQ_NEAR_MAX_ATR = 0.10
+
+# Dolmadan TP'ye yaklasma (28.10, kullanici karari "garanti olsun"): bekleyen sinyalde fiyat girise donmeden ONCE
+# giris -> TP yolunun bu kesrini gorduyse firsat kacmis sayilir -- sinyal acilmaz / bekleyen silinir (Journal
+# `near_tp`; tam TP eskisi gibi `past_tp`). Gerekce: BingX'in sentetik FX fiyati broker grafiginden 1-3 nokta farkli
+# (AUDUSD 4H #184: TP'ye 1 nokta, %99; GBPJPY 4H #183: 3 pip, %89; ETH 4H #182 %89 -- ucu de sonra girise donup SL).
+# Kosu dolumdan SONRA olursa islem kazanmaktadir, iptal sebebi degildir (ayni mumda giris + %80 -> dolum).
+# Veri bunu desteklemiyordu: Journal'da %85-98 kosup dolan 75 islem +0.22 R/islem (taban -0.14); gercek
+# sinyallerde >= %85 kosan 9 islem 1 TP / 6 SL. IZLEME "Dolmadan TP'ye %80 yaklasan sinyal iptal -- tuttu mu?".
+PREFILL_TP_CANCEL_FRAC = 0.80
 
 # Entry'ye gore minimum stop mesafesi (%). Simdilik tum marketlerde kapali.
 # Tekrar acmak icin ilgili satiri geri al (fx / index).
@@ -611,6 +639,47 @@ async def _is_duplicate_setup(session: AsyncSession, setup: CRTSetup) -> bool:
     return result.scalars().first() is not None
 
 
+async def _same_setup_signal(session: AsyncSession, setup: CRTSetup) -> Signal | None:
+    """Ayni setup'tan (strateji + yon + C1 + C2 zamani) baska kripto sembolde kayitli sinyal (SAME_SETUP_ONE_TRADE)."""
+    result = await session.execute(
+        select(Signal).where(
+            Signal.market_type == CLUSTER_MARKET,
+            Signal.symbol != setup.symbol,
+            Signal.direction == setup.direction,
+            Signal.timeframe == (setup.timeframe or STRATEGY_4H),
+            Signal.crt_bar_time == setup.crt_bar_time,
+            Signal.purge_time == setup.purge_time,
+        ).order_by(Signal.id)
+    )
+    return result.scalars().first()
+
+
+def _liq_sweep_state(setup: CRTSetup, df_ltf: pd.DataFrame | None, strategy: str) -> dict | None:
+    """LIQ_SWEEP kapisi (28.10): kural bu setup'a uygulaniyorsa {"level", "swept", "ext"}; uygulanmiyorsa None.
+
+    `swept`: C2 acilisindan beri bir LTF mumu seviyeyi deldi (LONG low < seviye, SHORT high > seviye). `ext`: o
+    araliktaki yeni uc (LONG min low / SHORT max high) -- swept ise yeni SL. Seviye ve uzaklik setup'in kendi
+    olcumunden (`score_features.liq_beyond_*`, her tespitte taze)."""
+    if strategy not in LIQ_SWEEP_REQUIRED_TFS or df_ltf is None or df_ltf.empty:
+        return None
+    feats = setup.score_features or {}
+    dist, level = feats.get("liq_beyond_atr"), feats.get("liq_beyond_level")
+    if dist is None or level is None or float(dist) > LIQ_NEAR_MAX_ATR or setup.purge_time is None:
+        return None
+    start = pd.Timestamp(setup.purge_time)
+    start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    seg = df_ltf[df_ltf.index >= start]
+    if seg.empty:
+        return {"level": float(level), "swept": False, "ext": None}
+    if setup.direction == "LONG":
+        ext = float(seg["low"].min())
+        swept = ext < float(level)
+    else:
+        ext = float(seg["high"].max())
+        swept = ext > float(level)
+    return {"level": float(level), "swept": bool(swept), "ext": ext}
+
+
 # Kalici silme (01.10, kullanici karari — IZLEME.md "Silinen waiting setup" H3): bekleyen kayit bir kez
 # silindiyse ayni CRT'den (strateji + sembol + yon + purge) bir daha sinyal acilmaz. Kapi girdileri (skor, dar
 # stop esigi, CRT penceresi) mum mum oynadigi icin sinirdaki setup silinip ilk gectigi mumda yeniden doguyordu:
@@ -618,7 +687,7 @@ async def _is_duplicate_setup(session: AsyncSession, setup: CRTSetup) -> bool:
 # (seviye henuz yok — veri), `week_close` (hafta boslugu kapisi zaten tutar). Restart'ta Journal'in
 # `deleted_reason` satirlarindan yuklenir (yeni tablo yok). False yapmak eski davranisi geri getirir.
 STICKY_DELETE_ENABLED = True
-_STICKY_EXEMPT_REASONS = frozenset({"no_levels", "week_close"})
+_STICKY_EXEMPT_REASONS = frozenset({"no_levels", "week_close", "liq_unswept"})   # 28.10: likidite sonra supurulunce setup yeniden acilabilmeli
 _STICKY_LOOKBACK = timedelta(days=60)
 _STICKY: set[tuple] = set()
 _STICKY_LOADED = False
@@ -1016,7 +1085,7 @@ async def _notify_potential_1d(session: AsyncSession, sig: Signal, cfg: dict) ->
 # dahil) ve her biri ayrica IPTAL reply'i uretiyordu.
 _GATED_NOTIFY_GATES = frozenset({
     "bias_mismatch", "low_quality", "score7_gate",
-    "cluster_limit", "has_open", "corr_open", "duplicate",
+    "cluster_limit", "has_open", "corr_open", "duplicate", "same_setup",
 })
 
 # RR tabani: min RR'nin bu kesrinin altindaki setup manuel de alinmaz, mesaj gitmez.
@@ -1264,6 +1333,11 @@ def _blend_partial_rr(sig: Signal, rr_rest: float, bar_ts=None) -> float:
     return size * float(sig.partial_rr) + (1.0 - size) * float(rr_rest)
 
 
+def _tp_cancel_level(entry: float, take_profit: float) -> float:
+    """Giris -> TP yolunun PREFILL_TP_CANCEL_FRAC'i (LONG/SHORT ayni formul)."""
+    return float(entry) + PREFILL_TP_CANCEL_FRAC * (float(take_profit) - float(entry))
+
+
 def _waiting_event(
     direction: str,
     high: float,
@@ -1275,11 +1349,12 @@ def _waiting_event(
     close: float | None = None,
     bar_closed: bool = False,
 ) -> str | None:
-    """Bekleyen giris icin: 'invalidated' | 'fill' | 'missed' | None.
+    """Bekleyen giris icin: 'invalidated' | 'fill' | 'missed' | 'near_tp' | None.
 
     CRT %60: yalniz kapanmis LTF close (wick iptal yok); fill'den once.
     Fill ve missed iğnede. Ayni mumda entry+TP varsa fill; TP o mumda yazilmaz
     (mum ici sira bilinmez), bir sonraki mumdan itibaren degerlendirilir.
+    'near_tp' (28.10): TP'ye degmedi ama giris -> TP yolunun PREFILL_TP_CANCEL_FRAC'ini gordu; 'missed' gibi iptal.
     """
     if (
         REQUIRE_CRT_MID_INVALIDATION
@@ -1291,17 +1366,53 @@ def _waiting_event(
         )
     ):
         return "invalidated"
+    near = _tp_cancel_level(entry, take_profit)
     if direction == "LONG":
         if low <= entry:
             return "fill"
         if high >= take_profit:
             return "missed"
+        if high >= near:
+            return "near_tp"
     else:
         if high >= entry:
             return "fill"
         if low <= take_profit:
             return "missed"
+        if low <= near:
+            return "near_tp"
     return None
+
+
+def _near_tp_before_fill(
+    df_ltf: pd.DataFrame,
+    direction: str,
+    entry: float | None,
+    take_profit: float | None,
+    after_time: datetime | None,
+    fill_from: datetime | None = None,
+) -> bool:
+    """Tespit icin (28.10): `after_time`'dan sonra fiyat GIRISE DEGMEDEN TP yolunun PREFILL_TP_CANCEL_FRAC'ini gordu mu?
+
+    `_price_hit_tp_after` ile ayni mumlar (forming dahil). Giris once dolduysa (ayni mum dahil) False: dolumdan
+    sonraki kosu kazanan islemdir. Tam TP'yi `_price_hit_tp_after` zaten ayri yakalar (past_tp).
+    `fill_from`: bundan once ACILAN mumdaki giris dokunusu dolum sayilmaz (require_c2_closed: C2 kapanisi) -- GBPJPY
+    4H #183: giris C2 acikken (04:00 UTC) test edildi, kosu %89, gercek dolum 05:45."""
+    if entry is None or take_profit is None:
+        return False
+    work = _slice_ltf_after(df_ltf, after_time, closed_only=False)
+    if work is None or work.empty:
+        return False
+    ent, near = float(entry), _tp_cancel_level(entry, take_profit)
+    start = _as_utc(fill_from)
+    for ts, row in work.iterrows():
+        high, low = float(row["high"]), float(row["low"])
+        fillable = start is None or _as_utc(ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts) >= start
+        if fillable and ((low <= ent) if direction == "LONG" else (high >= ent)):
+            return False
+        if (high >= near) if direction == "LONG" else (low <= near):
+            return True
+    return False
 
 
 def _closed_ltf_bars(df_15m: pd.DataFrame) -> pd.DataFrame:
@@ -1596,7 +1707,7 @@ def _resting_fill_ts(sig: Signal, df_ltf: pd.DataFrame | None, cfg: dict) -> dat
             sig.direction, high, low, entry, tp,
             invalidation_level=inv, close=close, bar_closed=True,
         )
-        if ev in ("invalidated", "missed"):
+        if ev in ("invalidated", "missed", "near_tp"):
             return None
         if ev != "fill":
             continue
@@ -2764,6 +2875,24 @@ async def _detect_and_create_waiting_locked(
         return None
 
     if (
+        SAME_SETUP_ONE_TRADE
+        and (setup.market_type or "").lower() == CLUSTER_MARKET
+        and existing_pending is None
+    ):
+        twin = await _same_setup_signal(session, setup)
+        if twin is not None:
+            _radar("same_setup", direction=setup.direction,
+                       score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
+                       smt=setup.smt_pair, pd=setup.pd_array)
+            sk = ("same_setup",) + _sticky_key(setup.timeframe, setup.symbol, setup.direction, setup.purge_time)
+            if sk not in _STICKY_LOGGED:   # her LTF kapanisinda yeniden degerlendiriliyor; satir anahtar basina bir kez
+                _STICKY_LOGGED.add(sk)
+                log.info("SKIPPED (SAME SETUP): %s %s C1=%s ayni setup %s #%s'de zaten sinyal (%s).",
+                         setup.symbol, setup.direction, setup.crt_bar_time, twin.symbol, twin.id, twin.status)
+            await _gated("same_setup")
+            return None
+
+    if (
         (setup.market_type or "").lower() == CLUSTER_MARKET
         and existing_pending is None
         and setup.symbol not in CLUSTER_EXEMPT_SYMBOLS
@@ -2795,7 +2924,31 @@ async def _detect_and_create_waiting_locked(
                    smt=setup.smt_pair, pd=setup.pd_array)
         return None
 
-    cisd = await _cpu(check_cisd_confirmation, df_ltf, setup, c2_hours=cfg["c2_hours"], **_cisd_opts(cfg))
+    # Yakin asil likidite (28.10, LIQ_SWEEP_*): alinmadiysa giris yok, setup izlenir; alindiysa uc + SL yeni uca.
+    liq = _liq_sweep_state(setup, df_ltf, strategy)
+    if liq is not None and not liq["swept"]:
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "liq_unswept")
+        _radar("liq_unswept", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        lk = ("liq_unswept",) + _sticky_key(strategy, setup.symbol, setup.direction, setup.purge_time)
+        if lk not in _STICKY_LOGGED:   # her LTF kapanisinda yeniden degerlendiriliyor; satir anahtar basina bir kez
+            _STICKY_LOGGED.add(lk)
+            log.info("SKIPPED (LIQ UNSWEPT): %s %s C2 ucu %s, yakin likidite %s alinmadi -- supurulmesi bekleniyor.",
+                     setup.symbol, setup.direction, setup.purge_extreme, liq["level"])
+        return None
+    extend_extreme = liq is not None
+    if extend_extreme and liq["ext"] is not None:
+        lk = ("liq_swept",) + _sticky_key(strategy, setup.symbol, setup.direction, setup.purge_time)
+        if lk not in _STICKY_LOGGED:
+            _STICKY_LOGGED.add(lk)
+            log.info("LIQ SWEPT: %s %s likidite %s alindi, yeni uc %s (C2 ucu %s) -- giris yeni uctan.",
+                     setup.symbol, setup.direction, liq["level"], liq["ext"], setup.purge_extreme)
+        setup = dataclasses.replace(setup, purge_extreme=liq["ext"])
+
+    cisd = await _cpu(check_cisd_confirmation, df_ltf, setup, c2_hours=cfg["c2_hours"],
+                      extend_extreme=extend_extreme, **_cisd_opts(cfg))
     if cisd is None:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "no_levels")
@@ -2919,6 +3072,26 @@ async def _detect_and_create_waiting_locked(
             setup.symbol, setup.direction, cisd.take_profit,
         )
         await _gated("past_tp")
+        return None
+
+    near_fill_from = (
+        _as_utc(setup.purge_time) + timedelta(hours=float(cfg["c2_hours"]))
+        if cfg.get("require_c2_closed") and setup.purge_time is not None else None
+    )
+    if _near_tp_before_fill(df_ltf, setup.direction, cisd.entry_price, cisd.take_profit, tp_after,
+                            fill_from=near_fill_from):
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "near_tp")
+        _radar("missed", reason="near_tp", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
+                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        nk = ("near_tp",) + _sticky_key(strategy, setup.symbol, setup.direction, setup.purge_time)
+        if nk not in _STICKY_LOGGED:   # her LTF kapanisinda yeniden degerlendiriliyor; satir anahtar basina bir kez
+            _STICKY_LOGGED.add(nk)
+            log.info("SKIPPED (NEAR TP): %s %s entry %s dolmadan TP yolunun %%%.0f'i goruldu (TP %s).",
+                     setup.symbol, setup.direction, cisd.entry_price, PREFILL_TP_CANCEL_FRAC * 100, cisd.take_profit)
+        await _gated("near_tp")
         return None
 
     if cisd.confirmed and _price_hit_sl_after(
@@ -3429,9 +3602,12 @@ async def manage_symbol_on_price(
                         sig.symbol, sig.direction, sig.invalidation_level,
                     )
                     continue
-                if ev == "missed":
+                if ev in ("missed", "near_tp"):
+                    gate = "past_tp" if ev == "missed" else "near_tp"
                     await record_event(
-                        "cancelled", "Entry (CISD) dolmadan TP'ye ulasildi, firsat kacti",
+                        "cancelled",
+                        "Entry (CISD) dolmadan TP'ye ulasildi, firsat kacti" if ev == "missed" else
+                        f"Entry dolmadan TP yolunun %{PREFILL_TP_CANCEL_FRAC * 100:.0f}'i goruldu, firsat kacti",
                         symbol=sig.symbol, direction=sig.direction,
                         market_type=sig.market_type, level="warning", session=session,
                     )
@@ -3447,13 +3623,14 @@ async def manage_symbol_on_price(
                         smt=sig.smt_pair, pd=sig.pd_array,
                         c2_closed=sig.c2_closed,
                         purge_time=sig.purge_time, crt_bar_time=sig.crt_bar_time,
-                        strategy=sig.timeframe or timeframe,
+                        strategy=sig.timeframe or timeframe, reason=gate,
                     )
-                    _note_deleted(sig, "past_tp")
+                    _note_deleted(sig, gate)
                     await session.delete(sig)
                     changed = True
                     result["cancelled"].append(sig.symbol)
-                    log.info("MISSED (TP BEFORE FILL): %s %s waiting entry removed.", sig.symbol, sig.direction)
+                    log.info("MISSED (%s): %s %s waiting entry removed.",
+                             "TP BEFORE FILL" if ev == "missed" else "NEAR TP BEFORE FILL", sig.symbol, sig.direction)
                     continue
                 # Fill yalnizca kapanmis LTF mumunda.
                 if ev == "fill" and not bar_closed:
