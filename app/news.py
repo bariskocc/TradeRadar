@@ -1004,6 +1004,19 @@ def _in_text(delta: timedelta) -> str:
     return f"in {h}h {m:02d}m" if h < 24 else f"in {h // 24}d {h % 24}h"
 
 
+def _web_hint(info: EventInfo) -> str:
+    """Open Signals haber satiri icin tek cumlelik yon rehberi (29.10, kullanici: "benim anlayacagim sekilde")."""
+    if info.kind in ("talk", "text"):
+        return (info.tone or "").replace("Okuma rehberi: ", "")
+    if info.sign > 0:
+        return ("Beklentiden yüksek gelirse USD güçlenir → altın, EURUSD, Nasdaq ve kripto aşağı baskı görebilir; "
+                "düşük gelirse tersi.")
+    if info.sign < 0:
+        return ("Beklentiden yüksek gelirse USD zayıflar → altın, EURUSD, Nasdaq ve kripto yukarı gidebilir; "
+                "düşük gelirse tersi.")
+    return ""
+
+
 def web_context(now: datetime | None = None) -> dict:
     """Bugunun (TSI) henuz aciklanmamis haberleri + bugunku tatiller (kullanici istegi 30.09:
     gecmis haber ve yarin gosterilmez). Arayuz metinleri Ingilizce."""
@@ -1018,6 +1031,10 @@ def web_context(now: datetime | None = None) -> dict:
             "time": t.strftime("%H:%M"),
             "impact": ev.impact,
             "title": ev.title,
+            # 29.10 (kullanici): Turkce ad + ne oldugu + yon rehberi (haber botunun sozlugu `_EVENTS`)
+            "tr": ev.tr if ev.tr != ev.title else "",
+            "meaning": ev.info.meaning,
+            "hint": _web_hint(ev.info),
             "forecast": _clean(ev.forecast) or "",
             "previous": _clean(ev.previous) or "",
             "in": _in_text(ev.at - now),

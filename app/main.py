@@ -187,6 +187,33 @@ templates.env.globals["calc_rr_ratio"] = _calc_rr_ratio
 templates.env.globals["signal_planned_rr"] = _signal_planned_rr
 templates.env.globals["signal_realized_rr"] = _signal_realized_rr
 templates.env.globals["fmt_ui_symbol"] = _fmt_ui_symbol
+
+
+def _shown_smt(sig) -> str | None:
+    """Arayuzde gosterilecek SMT paritesi: puan vermeyen SMT (29.10'dan beri 4H altcoin) eski kayitta da gosterilmez."""
+    pair = getattr(sig, "smt_pair", None)
+    if not pair:
+        return None
+    try:
+        from app.scanner import smt_bonus_for
+        if smt_bonus_for(getattr(sig, "timeframe", None) or "4h", getattr(sig, "symbol", None),
+                         getattr(sig, "market_type", None)) <= 0:
+            return None
+    except Exception:
+        pass
+    return pair
+
+
+templates.env.globals["shown_smt"] = _shown_smt
+
+
+def _min_score_for(tf) -> int:
+    """Stratejinin sinyal esigi (29.10: 4H 6, 1D 7, 1W 6) -- skor rengi bunu kullanir."""
+    from app.scanner import STRATEGY_CFG, _min_score
+    return _min_score(STRATEGY_CFG.get(tf or "4h"))
+
+
+templates.env.globals["min_score_for"] = _min_score_for
 templates.env.globals["fmt_money"] = paper.fmt_money
 templates.env.globals["trade_session"] = trading_session
 
@@ -1380,7 +1407,8 @@ async def score_table_page(request: Request, db: AsyncSession = Depends(get_db))
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
-    data = await build_score_table(db, request.query_params.get("tf") or "4h")
+    data = await build_score_table(db, request.query_params.get("tf") or "4h",
+                                   segment=request.query_params.get("seg") or "all")
     return templates.TemplateResponse(request=request, name="score_table.html", context={
         "user": user,
         "active_page": "score_table",
@@ -1978,11 +2006,18 @@ async def recalc_scores(request: Request, db: AsyncSession = Depends(get_db)):
                 df_ltf = await fetch_ohlcv(
                     bingx_symbol, ltf, limit=BOOTSTRAP_LIMITS.get(ltf, 200), client=client,
                 )
-                bias, score = _calc_live_setup_bias(
+                bias, score, parts, _feats = _calc_live_setup_bias(
                     df_4h, crt_idx, sig.direction, htf_bias,
                     pd_labels=pd_labels, purge_idx=purge_idx, df_1d=df_1d,
-                    df_ltf=df_ltf, timeframe=sig.timeframe or STRATEGY_4H,
+                    df_ltf=df_ltf, timeframe=sig.timeframe or STRATEGY_4H, with_parts=True,
                 )
+                # 29.10 4H yeni tablo: CISD mumu guclu kalemi (sinyalin kendi onay mumundan), tavan 9 icinde.
+                from app.crt_engine import CISD_STRONG_DISP, SCORE_V2_TFS
+                from app.scanner import _cisd_features, _min_score
+                if (sig.timeframe or STRATEGY_4H) in SCORE_V2_TFS:
+                    disp = _cisd_features(sig, df_ltf, sig.direction).get("cisd_disp")
+                    if isinstance(disp, (int, float)) and disp >= CISD_STRONG_DISP:
+                        score = max(0, min(9, int(parts.get("raw") or 0) + 1))
 
                 # SMT bonusu (detection ile ayni mantik): korele parite 15M
                 # divergence varsa +SMT_QUALITY_BONUS (max 10). purge_time'a gore sabitlenir.
@@ -1991,13 +2026,13 @@ async def recalc_scores(request: Request, db: AsyncSession = Depends(get_db)):
                 if corr is not None and sig.purge_time is not None:
                     df_15m = df_ltf
                     corr_15m = await fetch_ohlcv(corr, ltf, limit=BOOTSTRAP_LIMITS.get(ltf, 200), client=client)
-                    if check_smt_divergence(
+                    bonus = smt_bonus_for(sig.timeframe or "4h", sig.symbol, sig.market_type)
+                    if bonus > 0 and check_smt_divergence(   # 29.10: puansiz SMT (4H altcoin) yazilmaz
                         df_15m, corr_15m, sig.direction, sig.purge_time, window_hours=smt_hours,
                     ):
                         smt_pair = to_display_symbol(corr)
-                        score = min(MAX_QUALITY_SCORE, int(score) + smt_bonus_for(
-                            sig.timeframe or "4h", sig.symbol, sig.market_type))
-                        if score >= 7:
+                        score = min(MAX_QUALITY_SCORE, int(score) + bonus)
+                        if score >= _min_score(cfg):
                             bias = "BULLISH" if sig.direction == "LONG" else "BEARISH"
                         elif score <= 3:
                             bias = "BEARISH" if sig.direction == "LONG" else "BULLISH"
@@ -2005,7 +2040,11 @@ async def recalc_scores(request: Request, db: AsyncSession = Depends(get_db)):
                 sig.bias = bias
                 sig.bias_score = score
                 sig.smt_pair = smt_pair
-                sig.pd_array = ",".join(pd_labels) if pd_labels else None
+                from app.crt_engine import key_level_labels
+                if (sig.timeframe or STRATEGY_4H) in SCORE_V2_TFS:   # 29.10: 4H'te puani veren key level temasi
+                    sig.pd_array = ",".join(key_level_labels(_feats, pd_labels)) or None
+                else:
+                    sig.pd_array = ",".join(pd_labels) if pd_labels else None
                 if purge_idx is not None:
                     sig.c2_closed = bool(purge_idx < (len(df_4h) - 1))
                 updated += 1

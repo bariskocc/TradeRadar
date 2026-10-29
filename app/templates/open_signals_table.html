@@ -19,15 +19,23 @@
     {% else %}
     <div class="space-y-1">
         {% for r in news.rows %}
-        <div class="flex items-center gap-2 text-xs">
+        <div class="text-xs py-0.5">
+        <div class="flex items-center gap-2">
             <span class="w-16 shrink-0 font-mono text-gray-400">{{ r.time }}</span>
             <span class="inline-block w-2 h-2 rounded-full shrink-0" style="background: {% if r.impact == 'High' %}#ef4444{% else %}#fb923c{% endif %}"
                 title="{% if r.impact == 'High' %}High impact (red){% else %}Medium impact (orange){% endif %}"></span>
-            <span class="flex-1 min-w-0 truncate text-gray-200" title="{{ r.title }}">{{ r.title }}</span>
+            <span class="flex-1 min-w-0 truncate text-gray-200" title="{{ r.title }}">
+                {% if r.tr %}<span class="font-semibold text-white">{{ r.tr }}</span> <span class="text-gray-500">· {{ r.title }}</span>{% else %}{{ r.title }}{% endif %}
+            </span>
             <span class="text-gray-500 shrink-0">
                 {% if r.forecast %}F {{ r.forecast }}{% endif %}{% if r.previous %} · P {{ r.previous }}{% endif %}
             </span>
             <span class="w-20 shrink-0 text-right {% if r.soon %}text-amber-400 font-semibold{% else %}text-gray-400{% endif %}">{{ r.in }}</span>
+        </div>
+        {# 29.10 (kullanici): Turkce aciklama + yon rehberi (app/news.py sozlugu) #}
+        {% if r.meaning or r.hint %}
+        <p class="ml-[4.5rem] mt-0.5 text-[11px] leading-snug text-gray-400">{{ r.meaning }}{% if r.meaning and r.hint %} {% endif %}{% if r.hint %}<span class="text-gray-500">{{ r.hint }}</span>{% endif %}</p>
+        {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -148,9 +156,9 @@
         </div>
         <div class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-gray-400">
             {% if s.bias_score is not none %}{% set score_n = s.bias_score|int %}
-            <span class="font-bold {% if score_n >= 11 %}text-accent-purple{% elif score_n >= 7 %}text-green-400{% else %}text-orange-400{% endif %}">{{ score_n }}/11</span>{% endif %}
+            <span class="font-bold {% if score_n >= 11 %}text-accent-purple{% elif score_n >= min_score_for(s.timeframe) %}text-green-400{% else %}text-orange-400{% endif %}">{{ score_n }}/11</span>{% endif %}
             <span>{{ (s.entry_model or 'cisd')|upper }}</span>
-            {% if s.smt_pair %}<span class="text-accent-purple">SMT {{ fmt_ui_symbol(s.smt_pair) }}</span>{% endif %}
+            {% if shown_smt(s) %}<span class="text-accent-purple">SMT {{ fmt_ui_symbol(s.smt_pair) }}</span>{% endif %}
             {% if s.pd_array %}<span class="text-accent-blue">Key level {{ s.pd_array }}</span>{% endif %}
             {% if r.c2_open %}<span class="text-red-400">C2 open · {{ r.c2_close_at|fmt_date_tsi }}</span>{% endif %}
             {% if r.banked_r is not none %}<span class="text-green-400">Partial {{ '%+.2f'|format(r.banked_r) }}R</span>{% endif %}
@@ -240,14 +248,14 @@
                 <td class="px-2 py-2 whitespace-nowrap">
                     {% if s.bias_score is not none %}
                     {% set score_n = s.bias_score|int %}
-                    <span class="text-xs font-bold {% if score_n >= 11 %}text-accent-purple{% elif score_n >= 7 %}text-green-400{% else %}text-orange-400{% endif %}">{{ score_n }}/11</span>
+                    <span class="text-xs font-bold {% if score_n >= 11 %}text-accent-purple{% elif score_n >= min_score_for(s.timeframe) %}text-green-400{% else %}text-orange-400{% endif %}">{{ score_n }}/11</span>
                     {% if score_n >= 11 %}<span class="ml-1 inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-accent-purple/15 text-accent-purple">Premium</span>{% endif %}
                     {% else %}
                     <span class="text-gray-600 text-xs">-</span>
                     {% endif %}
                 </td>
                 <td class="px-2 py-2 text-center whitespace-nowrap">
-                    {% if s.smt_pair %}
+                    {% if shown_smt(s) %}
                     <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="Korele parite ile SMT divergence (skora +2): {{ s.smt_pair }}">{{ fmt_ui_symbol(s.smt_pair) }}</span>
                     {% else %}
                     <span class="text-gray-600 text-xs">-</span>

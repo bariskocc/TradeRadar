@@ -261,10 +261,10 @@
                                 {% set pct = ((score_n / 11) * 100)|int %}
                                 <div class="flex items-center gap-1.5 min-w-[88px]">
                                     <div class="flex-1 h-2 rounded-full bg-dark-600 overflow-hidden">
-                                        <div class="h-full rounded-full {% if score_n >= 11 %}bg-accent-purple{% elif score_n >= 7 %}bg-green-400{% elif score_n >= 4 %}bg-orange-400{% else %}bg-gray-400{% endif %}"
+                                        <div class="h-full rounded-full {% if score_n >= 11 %}bg-accent-purple{% elif score_n >= min_score_for(signal.timeframe) %}bg-green-400{% elif score_n >= 4 %}bg-orange-400{% else %}bg-gray-400{% endif %}"
                                              style="width: {{ pct }}%"></div>
                                     </div>
-                                    <span class="text-xs font-bold whitespace-nowrap {% if score_n >= 11 %}text-accent-purple{% elif score_n >= 7 %}text-green-400{% elif score_n >= 4 %}text-orange-400{% else %}text-gray-400{% endif %}">
+                                    <span class="text-xs font-bold whitespace-nowrap {% if score_n >= 11 %}text-accent-purple{% elif score_n >= min_score_for(signal.timeframe) %}text-green-400{% elif score_n >= 4 %}text-orange-400{% else %}text-gray-400{% endif %}">
                                         {{ score_n }}/11
                                     </span>
                                     {% if score_n >= 11 %}
@@ -276,7 +276,7 @@
                                 {% endif %}
                             </td>
                             <td class="px-2 py-2 text-center whitespace-nowrap">
-                                {% if signal.smt_pair %}
+                                {% if shown_smt(signal) %}
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-accent-purple/15 text-accent-purple" title="{{ '5M' if stf == '1h' else '1H' if stf == '1d' else '4H' if stf == '1w' else '15M' }} SMT divergence: {{ signal.smt_pair }}">
                                     ✓ {{ fmt_ui_symbol(signal.smt_pair, 'crypto') }}
                                 </span>

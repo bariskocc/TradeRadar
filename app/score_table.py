@@ -47,8 +47,9 @@ TABS = (("4h", "4H-15M"), ("1d", "1D-1H"), ("1w", "1W-4H"))
 #   30.09 donem ucunu C1 yaptiysa PDL/PWL/PML sayilmaz (pd_major/pd_monthly + NEUTRAL'da htf): ilerletilmedi.
 #   29.09 IFVG'nin FVG'si C2 icinde olusmali (ifvg kalemi): tarih ILERLETILMEDI -- eski satirlar da
 #   izinli degerleri (0/1) tasiyor, yanlis alarm uretmez; pencereyi sifirlamak tum kalemleri korlestirirdi.
+#   4H 29.10: yeni skor tablosu (crt_engine.SCORE_V2_TFS) -- eski satirlar kural disi puan tasir.
 RULES_SINCE = {
-    "4h": datetime(2026, 9, 25, tzinfo=timezone.utc),
+    "4h": ce.SCORE_V2_SINCE.replace(tzinfo=timezone.utc),
     "1d": datetime(2026, 9, 25, tzinfo=timezone.utc),
     "1w": datetime(2026, 9, 28, tzinfo=timezone.utc),
 }
@@ -57,7 +58,7 @@ WINDOW = timedelta(days=7)
 # 04.10 (kullanici: "efektif calismali, bilgi vermeli"): kalem basina SONUC -- puani alan setup TP'ye mi SL'ye mi
 # gitti. Pencere 7 gun degil, kalemin bugunku tanimindan beri (TP/SL icin 7 gun cok az). Tanim degisince guncelle.
 OUTCOME_SINCE = {
-    "4h": datetime(2026, 9, 16),      # kalem kirilimi 16.09'dan beri kayitli
+    "4h": ce.SCORE_V2_SINCE,          # 29.10 yeni tablo (score_outcome.collect eski tablo satirlarini zaten almaz)
     "1d": datetime(2026, 9, 25),      # 25.09: 1D C2 rengi / c2_closed kurali degisti
     "1w": datetime(2026, 9, 28),      # strateji acildi
 }
@@ -72,18 +73,26 @@ ALWAYS_FRAC = 0.95    # kalem setuplarin >= %95'inde puan veriyorsa ayirt etmiyo
 
 # Olcum notu (IZLEME.md'deki kararin tek satirlik hali). Kalem/strateji karara baglaninca guncelle.
 _NOTES: dict[tuple[str, str], str] = {
-    ("4h", "htf"): "+2 hak ediliyor mu? Karar 03.10",
-    ("4h", "pd_major"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10 · 29.09 tanım değişti (ilk süpüren C2) · 30.09 ucu C1 yaptıysa sayılmaz",
-    ("4h", "pd_struct"): "29.09 tanım değişti (OB yapı kırılımı, bölgeye ilk giren C2) — öncesi setupların %65'inde yanıyordu",
-    ("4h", "pd_monthly"): "28.09 ilk okuma: katkısı görünmüyor, karar 03.10",
-    ("4h", "wick"): "28.09: eşiği 0.30'a çıkarmak aday, karar 03.10",
+    ("4h", "htf"): "−2 tek başına bir şey değiştirmez: 4H'te bias hard filtresi ters setupu zaten eler. 29.10: reversal-at-PD "
+                   "(NEUTRAL'da PD seviyesinde +2) kalktı — key level'ı ikinci kez sayıyordu. Karar /izleme \"1D bias "
+                   "kazananı seçiyor mu? — 4H\"",
+    ("4h", "base"): "29.10: doji +1 → 0 (Journal: doğru renk %62 / doji %43 TP önce)",
+    ("4h", "key_level"): "29.10 yeni (PD major / PD aylık / FVG-OB yerine). Journal kripto: temaslı %62 / temassız %54; "
+                         "FX'te henüz ölçülmedi",
+    ("4h", "wick"): "29.10: kademeli (Journal: < %10 %38 · %10–40 %53 · ≥ %40 %62 TP önce)",
+    ("4h", "cisd"): "29.10 yeni. Journal 21.10+ 328 setup: güçlü %81 / değil %60 TP önce",
+    ("4h", "weekly"): "29.10 kaldırıldı: altcoinde ters (−18 puan WR, iki yarıda), FX'te dengesiz. Ölçüm features.w1_align",
+    ("4h", "c2_closed"): "29.10 kaldırıldı: 4H'te her sinyal zaten C2 kapalı — herkese +1 veriyordu (eşik 7 → 6)",
+    ("4h", "pd_major"): "29.10 kaldırıldı → key level teması (features.kl_pd)",
+    ("4h", "pd_monthly"): "29.10 kaldırıldı → key level teması (features.kl_pd)",
+    ("4h", "pd_struct"): "29.10 kaldırıldı → key level teması (4H / 1D FVG saygısı; OB ters çıkmıştı)",
     ("1d", "htf"): "Filtre koruyor; +2 ödülü karar 03.10",
+    ("1d", "wick"): "29.10: +2 kademesi (≥ %40) eklendi — Journal 1D: ≥ %40 +29 WR puanı, iki yarıda; 29.10 öncesi satırlar 0/1",
     ("1d", "c2_closed"): "25.09'dan beri açık C2 +1 almıyor, karar 03.10",
     ("1d", "base"): "25.09'dan beri yanlış renk de setup olur (0 puan)",
-    ("4h", "weekly"): "24.10: altcoinde kazananı seçmiyor (karar bandı uyumlu +0.90R vs uyumsuz +2.67R), FX/BTC-ETH'de "
-                      "çalışıyor — kullanıcı: dokunma, izle (sinyal sayısı düşmesin)",
-    ("4h", "smt"):"24.10: altcoinde +2 → +1 (SMT'li setup aynı skor bandında −0.63 R/setup kötü, iki yarıda da). "
-                   "+2 satırları eski altcoin + FX/BTC-ETH; +1 satırları 24.10 sonrası altcoin",
+    ("4h", "smt"): "29.10: altcoinde puan 0 (24.10'da +2 → +1; karar bandında SMT'li %48 / SMT'siz %69 TP önce). Sayfa "
+                   "bugünkü kuralla okur: +2 = FX + BTC/ETH, eski altcoin satırları 0'a çekilir. /izleme \"SMT +2 — "
+                   "segment bazında\", \"SMT doğru tanımla\"",
     ("1w", "htf"): "Yeni (28.09), henüz ölçüm yok",
     ("1w", "weekly"): "24.10 eklendi (eski yuva hep 0'dı); Journal: hizalı %53 TP, değil %14 · 7 gün dolana kadar "
                       "eski satırlar 0 taşır",
@@ -190,6 +199,41 @@ def _score_rows(strategy: str) -> list[dict]:
                         else {0, sc.SMT_QUALITY_BONUS}),
         },
     ]
+    rows += [
+        {"key": "key_level", "label": "Key level teması", "points": "+1",
+         "rule": "C2 bir key level'a dokunup saygı duydu: 4H ya da 1D FVG (C1'den önce oluşmuş, C2 bölgeye girip berisinde "
+                 "kapandı, önceki temas serbest) · PDH/PDL/PWH/PWL/PMH/PML süpürmesi · EQH/EQL ya da SSL/BSL süpürmesi",
+         "allowed": {0, 1}},
+        {"key": "cisd", "label": "CISD mumu güçlü", "points": "+1",
+         "rule": f"CISD onay mumunun işlem yönündeki gövdesi ≥ {ce.CISD_STRONG_DISP:g} × ort. LTF mumu (onay yoksa 0)",
+         "allowed": {0, 1}},
+    ]
+    if strategy in ce.SCORE_V2_TFS:
+        # 29.10 yeni tablo: degisen kurallar + kalkan kalemler (absent, hep 0)
+        by = {r["key"]: r for r in rows}
+        by["base"].update(points="+2 / 0", allowed={0, 2},
+                          rule=f"Doğru renk +2 · doji (gövde < %{doji}) 0 — yanlış renk zaten hard filtrede elenir")
+        by["htf"].update(rule="1D bias yönde +2 · ters −2 · NEUTRAL 0 (reversal-at-PD yok)")
+        by["wick"].update(points="+1 / +2", allowed={0, 1, 2},
+                          rule=f"C2 fitili ≥ C1 aralığının %{ce.PURGE_WICK_SCORE_PCT * 100:g}'u +1, "
+                               f"≥ %{ce.PURGE_WICK_STRONG_PCT * 100:g}'ı +2")
+        for k, why in (("weekly", "1W bias uyumu"), ("c2_closed", "C2 kapalı"), ("pd_major", "PD major"),
+                       ("pd_monthly", "PD aylık"), ("pd_struct", "HTF FVG / OB")):
+            by[k].update(absent=True, allowed={0}, points="—", label=why, rule="29.10'da kaldırıldı (ölçüm olarak kalır)")
+        # c2_closed 4H'te puan degil bayrak (1 = C2 kapali; Journal suzgecleri okur), raw'a girmez
+        by["c2_closed"].update(allowed={0, 1}, flag=True,
+                               rule="29.10'da puan olarak kaldırıldı; kırılımda yalnız \"C2 kapalı\" bayrağı (toplama girmez)")
+        order = ("base", "htf", "key_level", "wick", "ifvg", "cisd", "reclaim", "smt",
+                 "weekly", "c2_closed", "pd_major", "pd_monthly", "pd_struct")
+        rows = [by[k] for k in order]
+    else:
+        if strategy in ce.WICK_STRONG_TFS:   # 29.10: 1D'de de fitil kademesi
+            w = next(r for r in rows if r["key"] == "wick")
+            w.update(points="+1 / +2", allowed={0, 1, 2},
+                     rule=f"C2 fitili ≥ C1 aralığının %{ce.PURGE_WICK_SCORE_PCT * 100:g}'u +1, "
+                          f"≥ %{ce.PURGE_WICK_STRONG_PCT * 100:g}'ı +2 (29.10)")
+        for r in rows[-2:]:
+            r.update(absent=True, allowed={0}, points="—", rule="Yalnız 4H (29.10)")
     for r in rows:
         r.setdefault("absent", False)
         r["note"] = _RECLAIM_NOTE if r["key"] == "reclaim" else _NOTES.get((strategy, r["key"]), "")
@@ -262,7 +306,8 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "Kapı", "label": "Aynı setup daha önce silinmemiş olmalı (silinen CRT yeniden açılmaz)",
          "stage": "deleted_before", "on": bool(sc.STICKY_DELETE_ENABLED)},
         {"group": "Kapı",
-         "label": f"Kripto aynı yön küme limiti (muaf: BTC/ETH ve skor ≥ {sc.CLUSTER_EXEMPT_MIN_SCORE})",
+         "label": "Kripto aynı yön küme limiti (muaf: BTC/ETH ve skor ≥ "
+                  f"{cfg.get('cluster_exempt_score', sc.CLUSTER_EXEMPT_MIN_SCORE)})",
          "stage": "cluster_limit", "on": crypto_alts,
          "off_note": "Fiilen yok — evrende yalnız BTC/ETH var (muaf)"},
         {"group": "Kapı",
@@ -276,7 +321,8 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "Kapı", "label": f"RR ≥ {rr:g}", "stage": "low_rr", "on": True},
         {"group": "Kapı",
          "label": f"Skor tam {lim['min']} ise: CISD/MSS girişi + key level" + (" + kapalı C2" if c2_wait else ""),
-         "stage": "score7", "on": bool(cfg.get("score7_requires_cisd_pd"))},
+         "stage": "score7", "on": bool(cfg.get("score7_requires_cisd_pd")),
+         "off_note": "Kapalı (29.10) — sınırdaki setupları kalite farkı olmadan eliyordu"},
         {"group": "Kapı", "label": f"Stop ≥ {stop_mult:g} × ort. LTF mumu", "stage": "tight_stop", "on": True},
         {"group": "Kapı", "label": "CISD hafta kapanışından önce olmamalı (yalnız FX/metal/endeks/petrol)",
          "stage": "week_gap", "on": True},
@@ -312,7 +358,7 @@ def _score_health(rows: list[dict], parts_list: list[dict], lim: dict) -> dict:
     ok "Doğru çalışıyor" · warn "Etkisi yok" (hep ya da hic puan -> iyiyi kotuden ayirmiyor) ·
     bad "Hatalı" (kural disi puan / toplam-tavan tutmuyor) · na "Yetersiz veri"."""
     n = len(parts_list)
-    item_keys = [r["key"] for r in rows]
+    item_keys = [r["key"] for r in rows if not r.get("flag")]   # 29.10: 4H c2_closed bayrak, toplama girmez
     for r in rows:
         vals = [int(p.get(r["key"]) or 0) for p in parts_list]
         bad = sum(1 for v in vals if v not in r["allowed"])
@@ -324,6 +370,8 @@ def _score_health(rows: list[dict], parts_list: list[dict], lim: dict) -> dict:
             r["health"] = _h("bad", "Hesap hatalı", f"{bad} setupa kurala aykırı puan verdi ({wrong}).")
         elif n < MIN_N:
             r["health"] = _h("na", "Yetersiz veri", f"Son 7 günde {n} setup var, karar için en az {MIN_N} gerekli.")
+        elif r.get("flag"):
+            r["health"] = _h("ok", "Hesap doğru", "Puan değil, bayrak; toplama girmiyor.")
         elif r["absent"]:
             r["health"] = _h("ok", "Hesap doğru", "Bu stratejide kullanılmıyor; beklendiği gibi hiç puan vermedi.")
         elif top_n / n >= ALWAYS_FRAC and top_v == 0:
@@ -351,8 +399,26 @@ def _h(level: str, text: str, detail: str = "") -> dict:
     return {"level": level, "text": text, "detail": detail}
 
 
-async def build_score_table(db: AsyncSession, strategy: str, now: datetime | None = None) -> dict:
+# 29.10 (kullanici): tablo tek, ama sonuc okumasi segment bazinda da gorulsun -- bir kalem bir segmentte tutup
+# otekinde ters cikarsa yalniz o kalemin puani segmente ozel olur (SMT gibi). Kod -> (etiket, collect `seg` kumesi).
+SEGMENTS = {
+    "all": ("Hepsi", None),
+    "alt": ("Altcoin", {"alt"}),
+    "major": ("BTC/ETH", {"major"}),
+    "fx": ("FX", {"fx"}),
+    "fxmajor": ("FX + BTC/ETH", {"fx", "major"}),
+}
+_SEG_TABS = {"4h": ("all", "alt", "major", "fx", "fxmajor")}   # 1D/1W evreninde altcoin yok
+
+
+def segments_for(strategy: str) -> tuple:
+    return _SEG_TABS.get(strategy, ("all", "major", "fx"))
+
+
+async def build_score_table(db: AsyncSession, strategy: str, now: datetime | None = None,
+                            segment: str = "all") -> dict:
     strategy = strategy if strategy in dict(TABS) else TABS[0][0]
+    segment = segment if segment in segments_for(strategy) else "all"
     now = now or datetime.now(timezone.utc)
     since = max(now - WINDOW, RULES_SINCE.get(strategy, now - WINDOW))
     rows = _score_rows(strategy)
@@ -385,6 +451,9 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
 
     total = _score_health(rows, parts_list, lim)
     sub_out = await _outcome_rows(db, strategy)
+    seg_set = SEGMENTS[segment][1]
+    if seg_set:   # yalniz sonuc okumasi suzulur; canli hesap kontrolu (HESAP / filtreler) butun setuplardan
+        sub_out = [x for x in sub_out if x["seg"] in seg_set]
     ranking = _attach_outcomes(rows, sub_out, strategy)
     candidates = _candidate_rows(sub_out, strategy)
     for f in filters:
@@ -426,6 +495,9 @@ async def build_score_table(db: AsyncSession, strategy: str, now: datetime | Non
         "cand_since": CAND_SINCE,
         "cand_min_side": so.CAND_MIN_SIDE,
         "cand_min_rr": so.CAND_MIN_RR,
+        "segment": segment,
+        "segment_label": SEGMENTS[segment][0],
+        "segments": [(c, SEGMENTS[c][0]) for c in segments_for(strategy)],
     }
 
 
@@ -440,30 +512,29 @@ def _candidate_rows(sub: list[dict], strategy: str) -> list[dict]:
     part = [x for x in sub if _fs(x) and _fs(x) >= CAND_SINCE]
     out = []
     for key, label, v, src, filt in so.candidates_for(strategy, include_decided=True):
-        g, b, d, (lo, hi), _band = so.cand_flip(part, key, thr)
+        g, b, _d, (lo, hi), _band = so.cand_flip(part, key, thr)
         side_n = min(g["res"], b["res"])
         decided = so.CAND_DECIDED.get((key, strategy))
-        if decided:   # 28.10: karara baglanan aday satirda kalir, hukmu kayittan
+        # 29.10: sayfadaki hukum WR farkindan (so.judge); aday raporunun KARAR kurali (R) ayri, rapordadir.
+        lvl, jt = so.judge(g, b, v < 0, min_n=1)
+        if decided and decided.startswith("KABUL"):   # 29.10: skora giren aday
+            h = _h("ok", "Skora girdi", decided[len("KABUL"):].strip())
+        elif decided:   # 28.10: karara baglanan aday satirda kalir, hukmu kayittan
             h = _h("bad", "Reddedildi", decided)
-        elif side_n < so.CAND_MIN_SIDE or d is None:
-            lean = ""
-            if d is not None:
-                good = d if v > 0 else -d
-                lean = " · eğilim " + ("olumlu" if good >= so.BAND else "olumsuz" if good <= -so.BAND else "nötr") \
-                       + f" ({d:+.2f})"
-            h = _h("na", "Veri birikiyor", f"Karar bandında az taraf {side_n}/{so.CAND_MIN_SIDE} çözülmüş{lean}.")
+        elif side_n < so.CAND_MIN_SIDE:
+            h = _h("na", "Veri birikiyor", f"Karar bandında az taraf {side_n}/{so.CAND_MIN_SIDE} çözülmüş"
+                                           + (f" · {jt}" if g["res"] and b["res"] else "") + ".")
+        elif lvl == "ok":
+            h = _h("ok", "Puana aday", f"{jt.capitalize()}. Tam kural rapordan (iki yarı + p), sonra tek replay.")
+        elif lvl == "bad":
+            h = _h("bad", "Ters", f"Bu puan kazananı seçmiyor: {jt}.")
+        elif lvl == "warn":
+            h = _h("warn", "Fark yok", f"{jt.capitalize()} (bant ±{so.WR_BAND:g} puan).")
         else:
-            good = d if v > 0 else -d
-            if good >= so.BAND:
-                h = _h("ok", "Puana aday", f"Fark {d:+.2f} R/setup lehte. Tam kural (iki yarı + p < 0.10) rapordan, "
-                                            "sonra tek replay.")
-            elif good <= -so.BAND:
-                h = _h("bad", "Ters", f"Fark {d:+.2f} R/setup aleyhte; bu puan kazananı seçmiyor.")
-            else:
-                h = _h("warn", "Fark yok", f"Fark {d:+.2f} R/setup (bant ±{so.BAND}).")
+            h = _h("na", "Belirsiz", jt.capitalize() + ".")
 
         def txt(st):
-            return (f"{st['w']} TP / {st['l']} SL · {st['rps']:+.2f}R" if st["res"] else "çözülmüş yok")
+            return (f"{st['w']} TP / {st['l']} SL · WR %{st['wr']:.0f}" if st["res"] else "çözülmüş yok")
 
         out.append(dict(
             key=key, label=label, points=f"{v:+d}".replace("-", "−"), src=src, filt=filt,
@@ -515,19 +586,29 @@ _VERDICT_WHY = {   # (seviye, ceza mi)
     ("warn", True): "Ceza veriyor ama ceza alan ile almayan aynı gidiyor; iyi setupları boşuna eliyor olabilir.",
     ("bad", False): "Puan verdiğimiz setuplar DAHA KÖTÜ gidiyor; kalem kaybedeni seçiyor.",
     ("bad", True): "Ceza verdiğimiz setuplar DAHA İYİ gidiyor; kalem kazananı eliyor.",
-    ("na", False): "Karar için yeterli çözülmüş setup yok.",
-    ("na", True): "Karar için yeterli çözülmüş setup yok.",
+    ("na", False): "Karar için yeterli kanıt yok (veri az ya da fark şansla ayrılamıyor).",
+    ("na", True): "Karar için yeterli kanıt yok (veri az ya da fark şansla ayrılamıyor).",
 }
 
 
 def _lean(part: list[dict], key: str, v: int) -> str:
-    """Veri azken egilim: tum bantlarda kontrollu fark (bu kalem haric skor ayni) -- hukum degil, yon bilgisi."""
-    d = so.controlled_diff(part, key, v)
+    """Veri azken egilim: tum bantlarda kontrollu WR farki (bu kalem haric skor ayni) -- hukum degil, yon bilgisi."""
+    if so.stats([x for x in part if x["pal"].get(key) == 0])["res"] < 5:   # karsilastirma grubu yok denecek kadar az
+        return ""
+    d = so.controlled_diff(part, key, v, wr=True)
     if d is None:
         return ""
     good = -d if v < 0 else d
-    word = "olumlu" if good >= so.BAND else ("olumsuz" if good <= -so.BAND else "nötr")
-    return f"eğilim {word} ({v:+d}: fark {d:+.2f}, örneklem küçük)"
+    word = "olumlu" if good >= so.WR_BAND else ("olumsuz" if good <= -so.WR_BAND else "nötr")
+    return f"eğilim {word} ({v:+d}: tüm bantlarda WR farkı {d:+.0f} puan, örneklem küçük)"
+
+
+def _wr(st) -> str:
+    return f"%{st['wr']:.0f}" if st["res"] else "—"
+
+
+# 29.10: SMT 4H'te segment bazinda okunur (altcoin +1 24.10'dan beri); deger -> etiket.
+_SMT_SEG = {("4h", 2): "FX + BTC/ETH"}   # 29.10: altcoin SMT puani 0
 
 
 def _attach_outcomes(rows: list[dict], sub: list[dict], strategy: str) -> dict:
@@ -540,7 +621,8 @@ def _attach_outcomes(rows: list[dict], sub: list[dict], strategy: str) -> dict:
         since = ITEM_SINCE.get((strategy, r["key"]), ITEM_SINCE.get(r["key"]))
         part = [x for x in sub if since is None or (_fs(x) and _fs(x) >= since)]
         io = so.item_outcomes(part, r["key"], thr)
-        cells = [dict(v=v, w=io["by"][v]["w"], l=io["by"][v]["l"], rps=io["by"][v]["rps"]) for v in io["vals"]]
+        cells = [dict(v=v, w=io["by"][v]["w"], l=io["by"][v]["l"], wr=io["by"][v]["wr"], rps=io["by"][v]["rps"],
+                      seg=_SMT_SEG.get((strategy, v)) if r["key"] == "smt" else None) for v in io["vals"]]
         n_res = sum(io["by"][v]["res"] for v in io["vals"])
         if io["single"] and n_res < so.MIN_TOTAL:
             out = _h("na", _VERDICT_TEXT["na"], f"{n_res} çözülmüş setup; hepsi aynı puanı almış.")
@@ -558,13 +640,15 @@ def _attach_outcomes(rows: list[dict], sub: list[dict], strategy: str) -> dict:
             for z in io["verdicts"]:
                 g, b = z["g"], z["b"]
                 tag = _VERDICT_TAG[z["level"]]
-                if z["level"] == "na":
+                seg = _SMT_SEG.get((strategy, z["v"])) if r["key"] == "smt" else None
+                head = f"{z['v']:+d}" + (f" ({seg})" if seg else "")
+                if z["text"] == "veri az":
                     ln = _lean(part, r["key"], z["v"])
-                    parts.append(f"{z['v']:+d}: belirsiz ({g['res']}/{b['res']} çözülmüş, taraf başına {so.MIN_FLIP})"
+                    parts.append(f"{head}: belirsiz ({g['res']}/{b['res']} çözülmüş, taraf başına {so.MIN_FLIP})"
                                  + (f" — {ln}" if ln else ""))
                 else:
-                    parts.append(f"{z['v']:+d} {tag}: alan {g['w']} TP / {g['l']} SL (R {g['rps']:+.2f}) vs almayan "
-                                 f"{b['w']} TP / {b['l']} SL (R {b['rps']:+.2f})")
+                    parts.append(f"{head} {tag}: alan {g['w']} TP / {g['l']} SL (WR {_wr(g)}) vs almayan "
+                                 f"{b['w']} TP / {b['l']} SL (WR {_wr(b)}) — {z['text']}")
             out = _h(lvl, _VERDICT_TEXT[lvl], _VERDICT_WHY[(lvl, vds[0]["v"] < 0)] + " " + " · ".join(parts))
         out["cells"] = cells
         out["since"] = since
@@ -573,13 +657,14 @@ def _attach_outcomes(rows: list[dict], sub: list[dict], strategy: str) -> dict:
     hi, lo = tr["hi"], tr["lo"]
 
     def side(st):
-        return (f"{st['w']} TP / {st['l']} SL · WR {st['wr']:.0f}% · R/setup {st['rps']:+.2f}" if st["res"]
-                else "çözülmüş yok")
+        return (f"{st['w']} TP / {st['l']} SL · WR %{st['wr']:.0f}" if st["res"] else "çözülmüş yok")
 
     tr["text"] = {"ok": "İyi — skor kazananı seçiyor",
                   "warn": "Kötü — skor kazananı seçmiyor (≥ eşik olanlar elenenlerden iyi değil)",
                   "bad": "Çok kötü — skor ters çalışıyor (≥ eşik olanlar elenenlerden kötü)",
-                  "na": "Belirsiz — veri az"}[tr["level"]]
+                  "na": "Belirsiz — " + ("veri az" if tr["text"] == "veri az" else "fark şansla ayrılamıyor")}[tr["level"]]
+    if tr["d"] is not None:
+        tr["text"] += f" (WR farkı {tr['d']:+.0f} puan)"
     if tr["level"] == "warn":
         tr["level"] = "bad"          # sistem kazanmiyorken "siralamiyor" uyari degil sorun (kullanici 04.10)
     tr["thr"] = thr

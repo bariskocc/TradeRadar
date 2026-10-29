@@ -16,13 +16,22 @@ yaniltir (kalemler birbirine bagli: ceza alan setup zaten dusuk skorlu).
 from __future__ import annotations
 
 import json
+from math import erf, sqrt
 
 from app.setup_journal import PRE_SETUP_STAGES, analysis_parts, levels_final
 
-BAND = 0.15            # karar bandi farki (R/setup)
+BAND = 0.15            # karar bandi farki (R/setup) -- aday raporu (score_candidates_stat) hala bununla
 MIN_FLIP = 10          # karar bandinda taraf basina cozulmus
+# 29.10 (kullanici: "Score Table dogru bilgi versin"): kalem / toplam skor HUKMU kazanma oranindan (WR = TP once mi SL once
+# mi). R/setup dolmadan TP'yi tam RR'yle sayiyor (TP'lerin ~%60'i) -> RR'si yuksek grup kendiliginden iyi gorunuyordu
+# (4H 1D bias +2: WR %77 / %68 ama R +1.00 / +1.06, cunku alanin medyan RR'si 1.40 / 1.81). WR girisinden bagimsizdir.
+WR_BAND = 5.0          # hukum icin en az WR farki (puan)
+P_MAX = 0.10           # tek yonlu p (iki oran z-testi)
 MIN_TOTAL = 20         # toplam skor sirasi: taraf basina cozulmus
-THR = {"4h": 7, "1d": 7, "1w": 6}
+# 29.10: 4H yeni skor tablosu (crt_engine.SCORE_V2_TFS) esik 6. Eski tablo satirlari (kirilimda `key_level` yok)
+# 4H kumesine girmez -- karar bandi raw'a bagli, iki tablo karisirsa bant anlamsizlasir (`collect(old_4h=)`).
+THR = {"4h": 6, "1d": 7, "1w": 6}
+THR_V1_4H = 7
 BANDS = ((0, 4), (5, 6), (7, 99))
 
 
@@ -46,8 +55,11 @@ def outcome_of(row) -> tuple[str | None, float]:
     return o, (rr if rr is not None else (_get(row, "rr") or 0.0))
 
 
-def collect(rows, strategy: str | None = None, all_levels: bool = False) -> list[dict]:
-    """Journal satirlarindan analiz kumesi: CRT-oncesi aday yok, seviyesi kesin, skor kirilimi olan."""
+def collect(rows, strategy: str | None = None, all_levels: bool = False, old_4h: bool = False) -> list[dict]:
+    """Journal satirlarindan analiz kumesi: CRT-oncesi aday yok, seviyesi kesin, skor kirilimi olan.
+
+    4H: yalniz yeni tablo satirlari (29.10+, kirilimda `key_level` var); `old_4h=True` yalniz ESKI tablo satirlarini
+    verir (esik THR_V1_4H) -- gecmis okumalar icin."""
     out = []
     for r in rows:
         st = _get(r, "strategy")
@@ -65,6 +77,8 @@ def collect(rows, strategy: str | None = None, all_levels: bool = False) -> list
         pal, fe = analysis_parts(r)
         if not pal:
             continue
+        if st == "4h" and (("key_level" in pal) == old_4h):
+            continue
         if st == "1w":   # 1W adayi: setup anindaki haftalik bias (bias karnesinden)
             fe = dict(fe or {})
             fe.setdefault("w_bias", weekly_bias_at(_get(r, "symbol"), _get(r, "levels_at")))
@@ -72,8 +86,14 @@ def collect(rows, strategy: str | None = None, all_levels: bool = False) -> list
         sym, mk = _get(r, "symbol") or "", (_get(r, "market_type") or "").lower()
         seg = "fx" if mk != "crypto" else ("major" if sym in ("BTCUSDT.P", "ETHUSDT.P") else "alt")
         out.append(dict(s=st, pal=pal, o=o, rr=rr or 0.0, seg=seg, smt_ok=fe.get("smt_possible"),
+                        smt_div=fe.get("smt_div"),   # 29.10: SMT bulundu mu (puandan bagimsiz; 4H altcoin puan 0)
+                        v1_raw=fe.get("v1_raw"),     # 29.10: 4H eski tablonun ham toplami (SMT / CISD haric)
                         first_seen=_get(r, "first_seen"), cand=candidate_values(r, pal, fe)))
-    return out
+    # 29.10: butun kalemler BUGUNKU kuralla okunsun -- eski 4H altcoin SMT puani raw/score'dan dusulur (karar bandi
+    # raw'a bagli; normalize edilmeyince FVG/OB gibi kalemler eski SMT puaniyla yanlis banda dusuyordu).
+    return normalize_smt(out, strategy) if strategy == "4h" else [
+        y for st in THR for y in (normalize_smt([x for x in out if x["s"] == st], st) if st == "4h"
+                                  else [x for x in out if x["s"] == st])]
 
 
 def stats(sub) -> dict:
@@ -100,38 +120,59 @@ def flip_diff(sub, k, v, thr):
     return g, b, d, (lo, hi)
 
 
-def controlled_diff(sub, k, v):
-    """Bu kalem HARIC skor bandinda (puan alan - almayan) R/setup farki, puan alanin cozulmusuyle agirlikli."""
+def controlled_diff(sub, k, v, wr: bool = False):
+    """Bu kalem HARIC skor bandinda (puan alan - almayan) R/setup farki (`wr`: WR farki, puan), puan alanin cozulmusuyle
+    agirlikli."""
+    m = "wr" if wr else "rps"
     num = w = 0.0
     for lo, hi in BANDS:
         band = [x for x in sub if lo <= (x["pal"].get("raw", 0) - (x["pal"].get(k) or 0)) <= hi]
         g = stats([x for x in band if x["pal"].get(k) == v])
         b = stats([x for x in band if x["pal"].get(k) == 0])
         if g["res"] and b["res"]:
-            num += g["res"] * (g["rps"] - b["rps"])
+            num += g["res"] * (g[m] - b[m])
             w += g["res"]
     return (num / w) if w else None
 
 
-def judge(fg, fb, fd, penalty: bool) -> tuple[str, str]:
-    """(seviye, hukum) -- seviye: ok / warn / bad / na. Odulde puan alan iyi olmali, cezada kotu."""
-    if fg["res"] < MIN_FLIP or fb["res"] < MIN_FLIP or fd is None:
+def wr_test(g, b):
+    """(WR farki puan, p 'g daha iyi', p 'g daha kotu') -- tek yonlu iki oran z-testi (havuzlu). Cozulmus yoksa Nones."""
+    if not g["res"] or not b["res"]:
+        return None, None, None
+    d = g["wr"] - b["wr"]
+    pool = (g["w"] + b["w"]) / (g["res"] + b["res"])
+    se = sqrt(pool * (1 - pool) * (1 / g["res"] + 1 / b["res"]))
+    if se == 0:
+        return d, 0.5, 0.5
+    z = (d / 100) / se
+    phi = 0.5 * (1 + erf(z / sqrt(2)))
+    return d, 1 - phi, phi
+
+
+def judge(fg, fb, penalty: bool, min_n: int = MIN_FLIP) -> tuple[str, str]:
+    """(seviye, hukum) -- seviye: ok / warn / bad / na. Odulde puan alan iyi olmali, cezada kotu. WR farki + p (29.10)."""
+    if fg["res"] < min_n or fb["res"] < min_n:
         return "na", "veri az"
-    good = -fd if penalty else fd
-    if good >= BAND:
-        return "ok", "kazananı ayırıyor"
-    if good <= -BAND:
-        return "bad", "TERS"
-    return "warn", "fark yok"
+    d, p_hi, p_lo = wr_test(fg, fb)
+    good, p_good, p_bad = (-d, p_lo, p_hi) if penalty else (d, p_hi, p_lo)
+    if good >= WR_BAND and p_good < P_MAX:
+        return "ok", f"kazananı ayırıyor (fark {d:+.0f} puan, p {p_good:.2f})"
+    if good <= -WR_BAND and p_bad < P_MAX:
+        return "bad", f"TERS (fark {d:+.0f} puan, p {p_bad:.2f})"
+    if abs(good) < WR_BAND:
+        return "warn", f"fark yok (fark {d:+.0f} puan)"
+    word = "olumlu" if good > 0 else "olumsuz"
+    return "na", f"eğilim {word} ama şansla ayrılamıyor (fark {d:+.0f} puan, p {min(p_good, p_bad):.2f})"
 
 
 def verdict(fg, fb, fd, penalty: bool) -> str:
-    """Terminal raporu icin metin (eski bicim)."""
-    lvl, txt = judge(fg, fb, fd, penalty)
-    if lvl == "na":
+    """Terminal raporu icin metin."""
+    lvl, txt = judge(fg, fb, penalty)
+    if txt == "veri az":
         return f"veri az (karar bandi {fg['res']}/{fb['res']}, taraf basina {MIN_FLIP})"
-    word = {"ok": "DOGRU CALISIYOR", "bad": "TERS", "warn": "fark yok"}[lvl]
-    return f"{word} (karar bandi fark {fd:+.2f})"
+    if lvl == "ok":
+        txt = f"DOGRU CALISIYOR -- {txt}"
+    return f"{txt} · R farki {fd:+.2f} (bilgi)" if fd is not None else txt
 
 
 def item_outcomes(sub, key: str, thr: int) -> dict:
@@ -144,25 +185,46 @@ def item_outcomes(sub, key: str, thr: int) -> dict:
             if v == 0:
                 continue
             fg, fb, fd, band = flip_diff(sub, key, v, thr)
-            lvl, txt = judge(fg, fb, fd, v < 0)
+            lvl, txt = judge(fg, fb, v < 0)
             verdicts.append(dict(v=v, level=lvl, text=txt, d=fd, g=fg, b=fb, band=band))
     return dict(vals=vals, by=by, verdicts=verdicts, single=len(vals) == 1)
 
 
 def total_ranking(sub, thr: int) -> dict:
-    """Toplam skor kazanani siraliyor mu: skor >= esik vs < esik (duz TP/SL R/setup)."""
+    """Toplam skor kazanani siraliyor mu: skor >= esik vs < esik, WR farki + p (29.10; R/setup bilgi)."""
     hi = stats([x for x in sub if (x["pal"].get("score") or 0) >= thr])
     lo = stats([x for x in sub if (x["pal"].get("score") or 0) < thr])
-    d = (hi["rps"] - lo["rps"]) if hi["res"] and lo["res"] else None
-    if hi["res"] < MIN_TOTAL or lo["res"] < MIN_TOTAL or d is None:
-        lvl, txt = "na", "veri az"
-    elif d >= BAND:
-        lvl, txt = "ok", "sıralıyor"
-    elif d <= -BAND:
-        lvl, txt = "bad", "TERS sıralıyor"
-    else:
-        lvl, txt = "warn", "sıralamıyor"
+    d = (hi["wr"] - lo["wr"]) if hi["res"] and lo["res"] else None
+    lvl, txt = judge(hi, lo, False, min_n=MIN_TOTAL)
+    if lvl == "ok":
+        txt = "sıralıyor"
+    elif lvl == "bad":
+        txt = "TERS sıralıyor"
+    elif lvl == "warn":
+        txt = "sıralamıyor"
     return dict(hi=hi, lo=lo, d=d, level=lvl, text=txt)
+
+
+def has_smt(x) -> bool:
+    """SMT bulundu mu: puan aldiysa ya da (29.10'dan beri puansiz 4H altcoin) `features.smt_div`."""
+    return (x["pal"].get("smt") or 0) > 0 or x.get("smt_div") == 1
+
+
+def normalize_smt(sub, strategy: str) -> list[dict]:
+    """4H altcoin SMT bonusu 24.10 +2 -> +1, 29.10 +1 -> 0 (`scanner.smt_bonus_for`). Eski altcoin satirlari bugunku
+    bonusa cekilir (SMT haric raw ayni) ki SMT kalemi bugunku kuralla okunsun: 4H'te +2 = FX + BTC/ETH, altcoin 0.
+    Sonuc skora bagli degil."""
+    if strategy != "4h":
+        return sub
+    out = []
+    for x in sub:
+        smt = x["pal"].get("smt") or 0
+        if x["seg"] == "alt" and smt > 0:
+            raw = (x["pal"].get("raw") or 0) - smt
+            # SMT bulunmustu: `has_smt` gormeye devam etsin; skor bugunku tavanla (4H 9, SMT yok)
+            x = dict(x, smt_div=1, pal=dict(x["pal"], smt=0, raw=raw, score=min(9, max(0, raw))))
+        out.append(x)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -208,6 +270,14 @@ CAND_SEPARATE = frozenset({"eq_ssl"})
 # 28.10: karara baglanan aday (aday, strateji) -> tek satir sonuc. O stratejide listeden, sayactan ve hukumden cikar;
 # rapor ve /skor-tablosu ayrica "karara baglandi" diye basar. Diger stratejilerde aday surer.
 CAND_DECIDED = {
+    # 29.10 4H yeni skor tablosu (kullanici karari): adaylar ya kaleme girdi ya reddedildi. "KABUL" ile baslayan
+    # metin /skor-tablosu'nda "Skora girdi" basar.
+    ("cisd_disp", "4h"): "KABUL 29.10: 4H skor kalemi oldu (CISD mumu güçlü +1)",
+    ("eq_ssl", "4h"): "KABUL 29.10: key level teması kalemine dahil (EQ / SSL-BSL süpürmesi +1)",
+    ("no_key_level", "4h"): "KABUL 29.10: key level teması kalemi karşılıyor (temas yoksa 0 puan)",
+    ("mss_broken", "4h"): "29.10 RED: karar bandında ters (MSS de kırılmış setup daha kötü)",
+    ("c1_tp_wick", "4h"): "29.10 RED: ters (TP fitilli C1 daha iyi)",
+    ("bpr_entry", "4h"): "29.10 RED: ters (BPR girişli setup karar bandında daha iyi)",
     ("no_zone", "4h"): "28.10 RED (kullanıcı onayı): karar bandında bölgesiz setup tersine daha iyi — TP önce mi %63 / %51 "
                        "(56 / 55), iki yarıda aynı yön; ceza da bölge şartı da yok",
 }
@@ -220,7 +290,8 @@ def candidates_for(strategy: str | None, include_decided: bool = False) -> tuple
 CAND_MIN_RR = 2.0      # karar kumesi: islem acilabilir dilim (C1 sekli dersi, 21.10)
 CAND_MIN_SIDE = 30     # tetik: karar bandinda taraf basina cozulmus
 CISD_DISP_MIN = 1.0
-FILTER_GAP = 0.30     # eski maddesi kapanan adayda (no_zone) filtre secenegi esigi
+FILTER_GAP = 0.30     # eski maddesi kapanan adayda (no_zone) filtre secenegi esigi (R; 29.10'dan beri kullanilmiyor)
+FILTER_GAP_WR = 10.0  # 29.10: ayni esik WR puaninda (RR 2'de 0.30 R ~ 10 puan; 0.15 R ~ WR_BAND 5)
 FILTER_HERE = ("no_zone",)
 KILLZONES = ("london", "ny_am")
 

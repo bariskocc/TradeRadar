@@ -90,6 +90,22 @@ CISD_STRONG_CLOSE_RANGE_MULT = 0.30
 CISD_MARGIN_LOOKBACK = 20
 # Purge rejection wick: fitil / CRT range esigi (kalite skoru)
 PURGE_WICK_SCORE_PCT = 0.10
+# 4H yeni skor tablosu (29.10, kullanici karari -- IZLEME "4H yeni skor tablosu canlida -- tuttu mu?").
+# Journal 4H kripto 1178 cozulmus setup, TP once mi SL once mi: esik 6'da sinyal %78 (RR >= 2 %67), eski tablo esik 7'de
+# %69 (%57). Kalemler: C2 rengi dogru +2 / doji 0 · 1D bias +2 / -2 (NEUTRAL 0; reversal-at-PD yok -- key level'i ikinci
+# kez sayiyordu, %57 vs htf 0 %55) · key level temasi +1 (`key_level_touch`) · purge fitili %10 +1 / %40 +2 · LTF IFVG +1
+# · CISD mumu guclu +1 (scanner ekler, onay mumu gerekir) · zayif C2 -4. Kalkanlar: 1W uyumu (altcoinde ters), C2 kapali
+# (4H'te herkese +1), PD major / PD aylik / FVG-OB (ayirmiyordu, OB ters) -- olcum olarak `v1_raw` / `w1_align` kalir.
+# ⚠️ 4H'te `parts["c2_closed"]` PUAN DEGIL BAYRAKTIR (1 = C2 kapali), raw'a girmez -- kalem toplami raw'i 4H'te
+# c2_closed HARIC verir (score_table `_score_health` bunu bilir).
+# Tavan 9, esik 6 (`scanner.STRATEGY_CFG`), SMT ile 11. 1D / 1W eski tabloda.
+SCORE_V2_TFS = frozenset({"4h"})
+SCORE_V2_SINCE = datetime(2026, 10, 29, 12, 0)   # restart sonrasi; oncesi eski tablo (rapor kumeleri buna gore keser)
+PURGE_WICK_STRONG_PCT = 0.40     # fitil +2 esigi (Journal: < %10 %38 · %10-40 %53 · >= %40 %62)
+# 29.10 (kullanici karari): fitil kademesi 1D'de de (yalniz bu kalem; 1D'nin geri kalani eski tabloda). Journal 1D 169 cozulmus:
+# fitil >= %40 +29 WR puani (iki yarida +33 / +24, RR >= 2 +41); esik 7'de sinyal 17 %88 -> 25 %84, giren 8 (6 TP / 2 SL).
+WICK_STRONG_TFS = frozenset({"4h", "1d"})
+CISD_STRONG_DISP = 1.0           # CISD onay mumu govdesi / ort. LTF mum araligi (score_outcome.CISD_DISP_MIN ile ayni)
 # C2'nin C1 araligina geri donusu: (C2 close) supurulen kenardan C1 range'inin
 # yuzde kaci kadar iceri girdi. Supurup aralik dibinden kapatan bir C2, derin
 # geri donen bir C2'den zayiftir; kod eskiden yalnizca "iceri kapandi mi"
@@ -590,7 +606,10 @@ def _calc_bias(
 # Setup Journal'a JSON olarak yazilir -> hangi +1/+2 gercekten kazandiriyor sorusu olculebilsin.
 SCORE_PART_KEYS = (
     "base", "htf", "weekly", "c2_closed", "pd_major", "pd_monthly", "pd_struct",
-    "wick", "ifvg", "reclaim", "smt", "raw", "score",
+    "wick", "ifvg", "reclaim", "smt",
+    # 29.10: 4H yeni tablo (SCORE_V2_TFS) -- key level temasi + CISD mumu guclu; 1D / 1W'de daima 0
+    "key_level", "cisd",
+    "raw", "score",
 )
 
 
@@ -611,6 +630,9 @@ SCORE_FEATURE_KEYS = (
     "smt_htf", "smt_lvl", "smt_main_sweep", "smt_corr_sweep", "smt_kind",
     # 21.10: CISD onay mumunun gucu (govde / ort. LTF mum; scanner._cisd_features) -- "Skor tablosu yeni adaylar"
     "cisd_disp",
+    # 29.10 4H yeni tablo: key level temasinin turleri (4H FVG / 1D FVG / PD seviyesi / likidite) + eski tablonun ham
+    # toplami (SMT ve CISD haric) ve 1W uyumu -- eski tabloyla ayni setuplarda kiyas icin (yalniz olcum)
+    "kl_fvg4", "kl_fvg1d", "kl_pd", "kl_liq", "v1_raw", "w1_align",
 )
 
 
@@ -790,7 +812,8 @@ def _calc_live_setup_bias(
         and has_major_pd
         and (correct_c2 or doji_c2)
     )
-    if htf_aligned or reversal_at_pd:
+    v2 = tf in SCORE_V2_TFS
+    if htf_aligned or (reversal_at_pd and not v2):   # 29.10: 4H'te reversal-at-PD yok (key level temasi sayar)
         htf_score = 2
     elif htf_contrary:
         htf_score = -2
@@ -868,10 +891,31 @@ def _calc_live_setup_bias(
         + c2_closed_score + pd_score + wick_score + ifvg_score
         + reclaim_score
     )
+    key_level_score = 0
+    v2_feats: dict = {}
+    if (not v2 and tf in WICK_STRONG_TFS and wick_score
+            and _purge_wick_ratio(crt_range, rev, direction) >= PURGE_WICK_STRONG_PCT):
+        wick_score = 2      # 29.10: 1D fitil kademesi (4H'te asagidaki v2 dali yapar)
+        raw += 1
+    if v2:
+        # 29.10 4H yeni tablo (SCORE_V2_TFS). Eski ham toplam olcum olarak kalir (reversal-at-PD dahil eski kural).
+        old_htf = 2 if (htf_aligned or reversal_at_pd) else htf_score
+        v2_feats = {"v1_raw": raw - htf_score + old_htf, "w1_align": weekly_score}
+        kl = key_level_touch(df_4h, crt_idx, purge_idx, direction, df_1d, label_set)
+        v2_feats.update({f"kl_{k}": v for k, v in kl.items() if k != "hit"})
+        key_level_score = kl["hit"]
+        base_score = 2 if correct_c2 else 0
+        # c2_closed kirilimda BAYRAK olarak kalir (1 = C2 kapali) ama raw'a girmez: Journal'in donmus-C2 suzgecleri
+        # (parts_at_levels.c2_closed -- levels_final, C2 kapanisinda yeniden dondurma, raporlar) onu okuyor.
+        weekly_score = 0
+        pd_major_score = pd_monthly_score = pd_struct_score = 0
+        if wick_score and _purge_wick_ratio(crt_range, rev, direction) >= PURGE_WICK_STRONG_PCT:
+            wick_score = 2
+        raw = base_score + htf_score + key_level_score + wick_score + ifvg_score + reclaim_score
     # SMT'siz tavan 9 (1W: 8); +SMT 2 ile max 11 / 10 (premium).
     score = max(0, min(W1_SCORE_CAP if is_w1 else 9, raw))
 
-    if score >= (6 if is_w1 else 7):
+    if score >= (6 if (is_w1 or v2) else 7):
         bias = "BULLISH" if direction == "LONG" else "BEARISH"
     elif score <= 3:
         bias = "BEARISH" if direction == "LONG" else "BULLISH"
@@ -891,6 +935,8 @@ def _calc_live_setup_bias(
         "ifvg": ifvg_score,
         "reclaim": reclaim_score,
         "smt": 0,          # scanner._apply_smt_bonus doldurur
+        "key_level": key_level_score,
+        "cisd": 0,         # 4H: scanner._apply_cisd_item doldurur (CISD onay mumu gerekir)
         "raw": raw,        # tavan uygulanmadan onceki toplam
         "score": score,    # tavanli (motorun kullandigi)
     }
@@ -914,6 +960,7 @@ def _calc_live_setup_bias(
         # "0 puan" ile "bakilamadi"yi ayirmak icin uygunluk bayraklari (bkz. score_parts).
         "ifvg_checked": int(ifvg_checked),
         "bias_checked": int(df_1d is not None and not df_1d.empty),
+        **v2_feats,
     }
     return bias, score, parts, features
 
@@ -1292,6 +1339,92 @@ def _previous_month_levels(
 def _utc_ts(ts) -> pd.Timestamp:
     t = pd.Timestamp(ts)
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
+_KL_LIQ_LABELS = frozenset({"EQH", "EQL", "SSL", "BSL"})
+KL_FVG_1D_LOOKBACK = 40   # 1D FVG icin geriye bakilan gun
+
+
+def _fvg_zones_before(df: pd.DataFrame, last_third: int, lookback: int, atr: Optional[float],
+                      is_short: bool, bar_len: pd.Timedelta) -> list[tuple[float, float, pd.Timestamp]]:
+    """Islem yonlu FVG'ler: 3'lu desenin ucuncu mumu indeksi <= last_third. (alt, ust, ucuncu mumun kapanisi).
+    Bosluk >= MIN_HTF_FVG_ATR_FRAC x ATR (detect_pd_arrays ile ayni taban)."""
+    out = []
+    for i in range(max(1, last_third - lookback), last_third):
+        a, b = df.iloc[i - 1], df.iloc[i + 1]
+        if is_short:
+            z_lo, z_hi = float(b["high"]), float(a["low"])
+        else:
+            z_lo, z_hi = float(a["high"]), float(b["low"])
+        if z_hi <= z_lo or (atr and (z_hi - z_lo) < MIN_HTF_FVG_ATR_FRAC * atr):
+            continue
+        out.append((z_lo, z_hi, df.index[i + 1] + bar_len))
+    return out
+
+
+def _c2_respects_fvg(zones, df_htf: pd.DataFrame, purge_idx: int, is_short: bool) -> bool:
+    """C2 FVG'ye saygi duydu mu: bolge C2'ye kadar gecerli (oteki kenarin otesinde kapanis yok; onceki temas
+    serbest -- 2. temas da sayilir), C2 bolgeye girdi ve bolgenin berisinde kapandi."""
+    c2 = df_htf.iloc[purge_idx]
+    lo, hi, cl = float(c2["low"]), float(c2["high"]), float(c2["close"])
+    c2_open = df_htf.index[purge_idx]
+    for z_lo, z_hi, formed in zones:
+        between = df_htf[(df_htf.index >= formed) & (df_htf.index < c2_open)]
+        if is_short:
+            if (between["close"] > z_hi).any():
+                continue
+            if hi >= z_lo and cl < z_lo:
+                return True
+        else:
+            if (between["close"] < z_lo).any():
+                continue
+            if lo <= z_hi and cl > z_hi:
+                return True
+    return False
+
+
+def key_level_touch(df_htf: pd.DataFrame, crt_idx: int, purge_idx: int, direction: str,
+                    df_1d: Optional[pd.DataFrame], labels) -> dict:
+    """4H key level temasi (29.10, kullanici tanimi): C2 bir key level'a dokunup saygi duydu mu.
+
+    Turler (biri yeter, +1): 4H FVG (C1 acilmadan tamamlanmis) · 1D FVG (C1 acilmadan kapanmis gunlerden) -- C2 bolgeye
+    girip berisinde kapandi, bolge o ana kadar gecerli; PD seviyesi (PDH/PDL/PWH/PWL/PMH/PML) ya da likidite (EQH/EQL,
+    SSL/BSL) supurmesi -- `detect_pd_arrays` etiketleri. Journal 4H kripto: temasli %62 / temassiz %54 TP once (p 0.02).
+    Donus {fvg4, fvg1d, pd, liq, hit} -> 0/1."""
+    is_short = direction == "SHORT"
+    lab = {str(x).upper() for x in (labels or ())}
+    out = {"fvg4": 0, "fvg1d": 0,
+           "pd": int(bool(lab & (_PD_MAJOR_LABELS | _PD_MONTHLY_LABELS))),
+           "liq": int(bool(lab & _KL_LIQ_LABELS))}
+    try:
+        zones = _fvg_zones_before(df_htf, crt_idx - 1, PD_ARRAY_LOOKBACK_4H, _htf_atr(df_htf, purge_idx),
+                                  is_short, pd.Timedelta(hours=4))
+        out["fvg4"] = int(_c2_respects_fvg(zones, df_htf, purge_idx, is_short))
+        if df_1d is not None and not df_1d.empty:
+            d1 = df_1d.sort_index()
+            c1_open = df_htf.index[crt_idx]
+            days = d1[d1.index + pd.Timedelta(days=1) <= c1_open]
+            if len(days) > 3:
+                last = d1.index.get_loc(days.index[-1])
+                z1 = _fvg_zones_before(d1, last, KL_FVG_1D_LOOKBACK, _htf_atr(d1, last + 1), is_short,
+                                       pd.Timedelta(days=1))
+                out["fvg1d"] = int(_c2_respects_fvg(z1, df_htf, purge_idx, is_short))
+    except Exception:
+        log.debug("key_level_touch hata", exc_info=True)
+    out["hit"] = int(any(out.values()))
+    return out
+
+
+def key_level_labels(features: Optional[dict], labels) -> list[str]:
+    """4H "Key Level" etiketleri (29.10, kullanici: sutun puani veren temasi gostersin): PD seviyesi ve likidite adlariyla,
+    FVG temasi "4H FVG" / "1D FVG". OB ve key level temasi saymayan FVG/OB etiketi yazilmaz. `features` = kl_* olcumleri."""
+    f = features or {}
+    lab = [str(x).upper() for x in (labels or ())]
+    out = [x for x in lab if x in (_PD_MAJOR_LABELS | _PD_MONTHLY_LABELS)] if f.get("kl_pd") else []
+    out += [x for x in lab if x in _KL_LIQ_LABELS] if f.get("kl_liq") else []
+    out += ["4H FVG"] if f.get("kl_fvg4") else []
+    out += ["1D FVG"] if f.get("kl_fvg1d") else []
+    return out
 
 
 def _htf_atr(df: pd.DataFrame, purge_idx: int) -> Optional[float]:
@@ -2140,7 +2273,9 @@ def _build_crt_setup(
         last_4h_high=round(float(purge_row["high"]), 8),
         last_4h_low=round(float(purge_row["low"]), 8),
         market_type=market_type,
-        pd_array=",".join(pd_labels) if pd_labels else None,
+        # 29.10: 4H'te "Key Level" = puani veren key level temasi (kl_* olcumleri); 1D/1W eski etiketler
+        pd_array=(",".join(key_level_labels(score_features, pd_labels)) or None) if (timeframe or "").lower() in SCORE_V2_TFS
+        else (",".join(pd_labels) if pd_labels else None),
         c2_closed=purge_j < (len(df_4h) - 1),
         color_opposite=not same_color,
         timeframe=timeframe,

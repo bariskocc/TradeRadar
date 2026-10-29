@@ -50,6 +50,9 @@ LABELS = {
     # "puanli" = cezayi yiyen (reclaim < 0), yani iki donemin satirlari birlikte sayilir.
     "reclaim": f"Zayif C2 geri donusu (-{C2_RECLAIM_PENALTY}; 19.09 oncesi -2)",
     "smt": "SMT divergence (+2)",
+    # 29.10 4H yeni tablo (crt_engine.SCORE_V2_TFS); 1D/1W'de hep 0. 4H'te c2_closed puan degil bayrak.
+    "key_level": "Key level temasi (+1, 4H 29.10)",
+    "cisd": "CISD mumu guclu (+1, 4H 29.10)",
 }
 PARTS = [k for k in SCORE_PART_KEYS if k not in ("raw", "score")]
 

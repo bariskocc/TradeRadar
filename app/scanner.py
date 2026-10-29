@@ -49,6 +49,8 @@ from app.crt_engine import (
     detect_ltf_bpr,
     detect_ltf_ifvg,
     detect_ltf_ifvgs,
+    CISD_STRONG_DISP,
+    SCORE_V2_TFS,
 )
 from app.database import async_session
 from app.event_log import record_event
@@ -86,17 +88,24 @@ SMT_QUALITY_BONUS = 2  # Korele parite ile 15M SMT divergence varsa +2
 # 24.10 (kullanici karari): 4H ALTCOIN SMT bonusu +2 -> +1. Journal (29.09+, zamaninda gorulen, RR >= 2, TP once mi
 # SL once mi): SMT'li setup ayni skor bandinda -0.63 R/setup kotu, iki yarida da (-0.97 / -0.17), altcoin -0.60.
 # FX / BTC-ETH ve 1D/1W'de +2 kalir. Replay yapilmadi (kullanici karari). IZLEME "SMT +2 — segment bazinda".
-SMT_ALT_4H_BONUS = 1
+# 29.10 (kullanici karari): +1 -> 0. Karar bandinda (SMT haric skor 6) SMT'li altcoin %48 / SMT'siz %69 TP once (40 / 103
+# cozulmus, p 0.01; iki yarida, RR >= 2'de ve 02.10+ taze veride ayni yon; dolum R -0.51 / +0.08). SMT'nin belirleyici
+# oldugu 3 gercek sinyal 3 SL. Puan 0 iken SMT yalniz OLCULUR (`features.smt_div`); smt_pair yazilmaz, arayuzde gorunmez.
+SMT_ALT_4H_BONUS = 0
 _SMT_MAJORS = frozenset({"BTCUSDT", "ETHUSDT"})
 MAX_QUALITY_SCORE = 11  # baz tavan 9 + SMT 2
 
 
 def smt_bonus_for(strategy: str | None, symbol: str | None, market: str | None) -> int:
-    """SMT bulunursa eklenecek puan: 4H altcoin +1, digerleri +2 (24.10). Sembol ham ya da gorunum adi."""
+    """SMT bulunursa eklenecek puan: 4H altcoin 0 (29.10; 24.10-29.10 +1), digerleri +2. Sembol ham ya da gorunum adi."""
     sym = (symbol or "").upper().replace("-", "").replace(".P", "")
     if (strategy or "4h") == "4h" and (market or "").lower() == "crypto" and sym not in _SMT_MAJORS:
         return SMT_ALT_4H_BONUS
     return SMT_QUALITY_BONUS
+# 4H yeni skor tablosu (29.10, crt_engine.SCORE_V2_TFS): her setupa +1 veren C2 kapali kalemi kalkti -> esik 7 -> 6
+# (ayni sinyal kumesi), tavan 9, SMT ile 11. Kume muafiyeti de bir asagi (9 -> 8), sinir skor kapisi kapali.
+MIN_QUALITY_SCORE_4H = 6
+CLUSTER_EXEMPT_MIN_SCORE_4H = 8
 # 1W-4H (28.09): 1D bias (+2) ve 1W uyumu (+1) yerine aylik bias (+2); tavan 8, esik 6.
 MIN_QUALITY_SCORE_1W = 6
 MAX_QUALITY_SCORE_1W = 10  # baz tavan 8 + SMT 2
@@ -248,6 +257,11 @@ STRATEGY_CFG = {
         # Bkz. IZLEME.md "Kismi kar - 4H replay".
         "partial_close_fraction": 0.50,
         "trail_arm_tp_fraction": None,
+        # 29.10 yeni skor tablosu: esik 6, kume muafiyeti 8. Sinir skor kapisi (`_score7_strict_ok`, esikte bolge
+        # girisi yok + key level sarti) KAPALI: yeni esikte sinirdaki 79 setupun 59'unu eliyordu, gecen %75 / elenen %76.
+        "min_score": MIN_QUALITY_SCORE_4H,
+        "cluster_exempt_score": CLUSTER_EXEMPT_MIN_SCORE_4H,
+        "score7_requires_cisd_pd": False,
     },
     STRATEGY_1D: {
         "htf": "1d",
@@ -917,6 +931,9 @@ def _rejected_levels(todo, df_htf, df_1d, df_ltf, display_sym, market, htf_bias,
                     note["parts"] = cand.score_parts
                     note["c1"] = _near_c1(cand.direction, cand.key_level_low, cand.key_level_high)
                     preview = _preview_trade_levels(cand, df_ltf, cfg["c2_hours"], cfg)
+                    _apply_cisd_item(cand, (preview.get("features") or {}).get("cisd_disp"), strategy,
+                                     int(cfg.get("max_score", MAX_QUALITY_SCORE)))
+                    note["score"] = cand.bias_score
                     note.update({k: preview[k] for k in ("rr", "entry", "sl", "tp", "model", "entries")
                                  if k in preview})
                     feats = dict(cand.score_features or {})
@@ -1808,6 +1825,13 @@ def _quality_score_asof(
     )
     if setup is None:
         return None
+    if strategy in SCORE_V2_TFS and ltf is not None and not ltf.empty:   # 29.10: CISD mumu guclu kalemi
+        cfg = STRATEGY_CFG.get(strategy) or {}
+        try:
+            cisd = check_cisd_confirmation(ltf, setup, c2_hours=cfg.get("c2_hours", 4.0), **_cisd_opts(cfg))
+            _apply_cisd_item(setup, _cisd_features(cisd, ltf, setup.direction).get("cisd_disp"), strategy, max_score)
+        except Exception:
+            log.debug("as-of CISD hata %s", symbol, exc_info=True)
     score = int(setup.bias_score or 0)
     if corr_ltf is not None and not corr_ltf.empty and ltf is not None and not ltf.empty:
         try:
@@ -2078,6 +2102,30 @@ def _cisd_features(cisd, df_ltf: pd.DataFrame | None, direction: str | None) -> 
     except Exception:
         return out
     return out
+
+
+def _apply_cisd_item(setup: CRTSetup, cisd_disp, strategy: str | None, max_score: int = MAX_QUALITY_SCORE) -> None:
+    """4H yeni tablo (29.10): CISD onay mumu guclu (`cisd_disp` >= CISD_STRONG_DISP) +1, tavan (9) icinde, SMT tavandan
+    sonra. Onay mumu yoksa 0. Idempotent -- ayni setupa ikinci cagri (gercek CISD onizlemeden farkliysa) farki duzeltir.
+    Journal 4H (21.10+ 328 setup): guclu %81 / degil %60 TP once."""
+    parts = setup.score_parts
+    if strategy not in SCORE_V2_TFS or not isinstance(parts, dict):
+        return
+    want = 1 if (isinstance(cisd_disp, (int, float)) and cisd_disp >= CISD_STRONG_DISP) else 0
+    have = int(parts.get("cisd") or 0)
+    if want == have:
+        return
+    raw = int(parts.get("raw") or 0) + want - have
+    smt = int(parts.get("smt") or 0)
+    score = min(max_score, max(0, min(9, raw - smt)) + smt)
+    parts.update(cisd=want, raw=raw, score=score)
+    setup.bias_score = score
+    if score >= _min_score(STRATEGY_CFG.get(strategy)):
+        setup.bias = "BULLISH" if setup.direction == "LONG" else "BEARISH"
+    elif score <= 3:
+        setup.bias = "BEARISH" if setup.direction == "LONG" else "BULLISH"
+    else:
+        setup.bias = "NEUTRAL"
 
 
 def _entry_candidates(setup: CRTSetup, cisd, df_ltf, zone=None, bpr=None) -> dict:
@@ -2506,9 +2554,10 @@ async def _apply_smt_bonus(
     strategy: str | None = None,
 ) -> bool:
     """Korele parite ile LTF SMT divergence varsa setup skorunu +SMT bonusu (max 11; 1W 10) yap.
-    Bonus `smt_bonus_for` (24.10: 4H altcoin +1, digerleri +2).
+    Bonus `smt_bonus_for` (29.10: 4H altcoin 0, digerleri +2).
 
-    SMT bulunursa setup.smt_pair'e korele paritenin gosterim adi yazilir.
+    SMT bulunursa setup.smt_pair'e korele paritenin gosterim adi yazilir -- yalniz puan veriyorsa (29.10: puansiz SMT
+    arayuzde / Telegram'da gorunmez, yalniz `features.smt_div` olcumu kalir).
     """
     corr = correlated_symbol(bingx_symbol)
     if isinstance(setup.score_features, dict):
@@ -2530,15 +2579,21 @@ async def _apply_smt_bonus(
                 df_ltf, corr_ltf, setup.direction, setup.crt_bar_time, setup.purge_time, window_hours))
         except Exception:
             log.debug("smt_level_features hata %s", setup.symbol, exc_info=True)
-    if not await _cpu(
+    found = await _cpu(
         check_smt_divergence,
         df_ltf, corr_ltf, setup.direction, setup.purge_time,
         window_hours=window_hours,
-    ):
+    )
+    if isinstance(setup.score_features, dict):
+        setup.score_features["smt_div"] = int(bool(found))   # 29.10: bugunku tanim, puandan bagimsiz olcum
+    if not found:
+        return False
+    bonus = smt_bonus_for(strategy, bingx_symbol, setup.market_type)
+    if bonus <= 0:
+        log.debug("SMT (puansiz): %s %s (korele %s)", setup.symbol, setup.direction, to_display_symbol(corr))
         return False
 
     setup.smt_pair = to_display_symbol(corr)
-    bonus = smt_bonus_for(strategy, bingx_symbol, setup.market_type)
     new_score = min(max_score, int(setup.bias_score or 0) + bonus)
     setup.bias_score = new_score
     if isinstance(setup.score_parts, dict):
@@ -2546,7 +2601,7 @@ async def _apply_smt_bonus(
         setup.score_parts["smt"] = bonus
         setup.score_parts["raw"] = int(setup.score_parts.get("raw") or 0) + bonus
         setup.score_parts["score"] = new_score
-    if new_score >= 7:
+    if new_score >= _min_score(STRATEGY_CFG.get(strategy or STRATEGY_4H)):
         setup.bias = "BULLISH" if setup.direction == "LONG" else "BEARISH"
     elif new_score <= 3:
         setup.bias = "BEARISH" if setup.direction == "LONG" else "BULLISH"
@@ -2680,6 +2735,10 @@ async def _detect_and_create_waiting_locked(
 
     _radar_base = _radar
     preview = await _cpu(_preview_trade_levels, setup, df_ltf, cfg["c2_hours"], cfg)
+    # 29.10 4H: CISD mumu guclu kalemi onizlemenin CISD'sinden (kapilar skoru bundan sonra okur); likidite supurmesi
+    # CISD'yi tasirsa asagida gercek CISD ile yeniden hesaplanir.
+    _apply_cisd_item(setup, (preview.get("features") or {}).get("cisd_disp"), strategy,
+                     int(cfg.get("max_score", MAX_QUALITY_SCORE)))
 
     def _radar(state: str, **kwargs):
         kwargs.setdefault("c2_closed", bool(setup.c2_closed))
@@ -2896,7 +2955,7 @@ async def _detect_and_create_waiting_locked(
         (setup.market_type or "").lower() == CLUSTER_MARKET
         and existing_pending is None
         and setup.symbol not in CLUSTER_EXEMPT_SYMBOLS
-        and int(setup.bias_score or 0) < CLUSTER_EXEMPT_MIN_SCORE
+        and int(setup.bias_score or 0) < int(cfg.get("cluster_exempt_score", CLUSTER_EXEMPT_MIN_SCORE))
     ):
         cluster_window = float(cfg.get("cluster_window_hours", CLUSTER_WINDOW_HOURS))
         open_n, recent_n = await _count_direction_cluster(
@@ -2958,6 +3017,21 @@ async def _detect_and_create_waiting_locked(
         log.info("SKIPPED (NO LEVELS): %s %s entry/MSS seviyeleri henuz yok.", setup.symbol, setup.direction)
         await _gated("no_cisd")
         return None
+
+    if extend_extreme and cisd.cisd_time != preview.get("cisd_time"):
+        # Likidite supurmesi CISD'yi yeni uca tasidi: CISD kalemi gercek onay mumundan (29.10, 4H).
+        _apply_cisd_item(setup, _cisd_features(cisd, df_ltf, setup.direction).get("cisd_disp"), strategy,
+                         int(cfg.get("max_score", MAX_QUALITY_SCORE)))
+        if int(setup.bias_score or 0) < min_score:
+            if existing_pending is not None:
+                await _delete_pending(session, existing_pending, "low_quality")
+            _radar("low_quality", direction=setup.direction,
+                       score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
+                       smt=setup.smt_pair, pd=setup.pd_array)
+            log.info("SKIPPED (LOW QUALITY): %s %s score=%s (likidite sonrasi CISD)",
+                     setup.symbol, setup.direction, setup.bias_score)
+            await _gated("low_quality")
+            return None
 
     min_rr = _min_rr_for_market(setup.market_type)
     cisd, planned_rr = await _cpu(

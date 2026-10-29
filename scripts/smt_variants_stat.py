@@ -65,7 +65,7 @@ def load(db, strategy, since):
         p, f = analysis_parts(r)   # 03.10: 1D/1W'de skor sinyal / C2 kapanisi anindan
         p, f = p or {}, dict(f or {})
         f2 = _j(r["features"]) or {}
-        for k in ("smt_htf", "smt_lvl", "smt_kind"):   # seviye donduktan sonra eklenen olcum de sayilsin
+        for k in ("smt_htf", "smt_lvl", "smt_kind", "smt_div"):   # seviye donduktan sonra eklenen olcum de sayilsin
             if f.get(k) is None and f2.get(k) is not None:
                 f[k] = f2[k]
         if f.get("smt_htf") is None:
@@ -79,7 +79,7 @@ def load(db, strategy, since):
             o, rr = sh.get("o"), sh.get("rr", rr)
         if o not in ("win", "loss") or rr is None:
             continue
-        smt_now = int((p.get("smt") or 0) > 0)
+        smt_now = int((p.get("smt") or 0) > 0 or f.get("smt_div") == 1)   # 29.10: 4H altcoin SMT puansiz, smt_div
         out.append(dict(t=t, kind=f.get("smt_kind") or "?", win=o == "win", R=rr if o == "win" else -1.0,
                         bugun=smt_now, htf=int(f.get("smt_htf") or 0), lvl=int(f.get("smt_lvl") or 0),
                         wo=(p.get("score") or 0) - (p.get("smt") or 0)))

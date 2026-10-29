@@ -62,7 +62,7 @@ LABELS = {
 }
 # 04.10: hesap `app/score_outcome.py`'de -- /skor-tablosu ayni fonksiyonlari kullanir.
 from app.score_outcome import (  # noqa: E402
-    MIN_FLIP, THR, collect, controlled_diff, flip_diff, stats, verdict,
+    MIN_FLIP, THR, collect, controlled_diff, flip_diff, has_smt, stats, verdict,
 )
 
 
@@ -127,10 +127,11 @@ for strat in ("4h", "1d", "1w"):
         sub = [x for x in rows if x["s"] == strat and x["seg"] == seg and x["smt_ok"] != 0]
         if not sub:
             continue
-        # 24.10: 4H altcoin SMT bonusu +1 (once +2). Eski satirlar bugunku bonusa normalize edilir (SMT haric raw ayni).
+        # 4H altcoin: 24.10 +2 -> +1, 29.10 -> 0 (puansiz). Altcoinde VARSAYIMSAL +1 okunur ("+1 verseydik"); SMT'li =
+        # puan almis ya da `features.smt_div` (29.10+). Eski satirlar bu bonusa normalize edilir (SMT haric raw ayni).
         v = 1 if (strat == "4h" and seg == "alt") else 2
-        sub = [dict(x, pal=dict(x["pal"], smt=v, raw=(x["pal"].get("raw") or 0) - x["pal"]["smt"] + v))
-               if (x["pal"].get("smt") or 0) > 0 else x for x in sub]
+        sub = [dict(x, pal=dict(x["pal"], smt=v, raw=(x["pal"].get("raw") or 0) - (x["pal"].get("smt") or 0) + v))
+               if has_smt(x) else x for x in sub]
         g_all, b_all = stats([x for x in sub if x["pal"].get("smt") == v]), stats([x for x in sub if x["pal"].get("smt") == 0])
         fg, fb, fd, (lo, hi) = flip_diff(sub, "smt", v, THR[strat])
         raw_d = (g_all["rps"] - b_all["rps"]) if g_all["res"] and b_all["res"] else None

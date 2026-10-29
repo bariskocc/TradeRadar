@@ -1236,6 +1236,42 @@ async def _p_score_parts_4h(db: AsyncSession) -> Progress:
                     note=(note + f" · giren {w_in} / düşen {n - w_in}" if n else note))
 
 
+async def _p_score_v2_4h(db: AsyncSession) -> Progress:
+    """29.10 (kullanici karari): 4H yeni skor tablosu canlida tuttu mu? Ayni setuplarda eski tablo da hesaplanir
+    (`features.v1_raw`, eski esik 7). Kume `score_outcome.collect` (yalniz yeni tablo satirlari) + RR >= 2. Tetik: yeni
+    tablonun sectigi (skor >= 6) 60 cozulmus. Kural: kaderi degisen setuplarda yeni tablonun EKLEDIKLERI, CIKARDIKLARINDAN
+    >= 5 puan kotu (WR, TP once mi) ve tek yonlu p < 0.10 -> eski tabloya donus kullaniciya; aksi halde tablo kalir."""
+    from app import score_outcome as so
+    from app import crt_engine as ce
+    t = SetupJournal.__table__
+    res = await db.execute(select(t).where(
+        t.c.strategy == "4h", t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
+        t.c.first_seen >= ce.SCORE_V2_SINCE,
+    ))
+    sub = [x for x in so.collect(res.mappings().all(), strategy="4h") if x["rr"] >= so.CAND_MIN_RR]
+
+    def old_ok(x):
+        v1 = x.get("v1_raw")
+        if not isinstance(v1, (int, float)):
+            return None
+        smt = x["pal"].get("smt") or 0
+        return min(11, max(0, min(9, int(v1))) + smt) >= so.THR_V1_4H
+
+    new = [x for x in sub if (x["pal"].get("score") or 0) >= so.THR["4h"]]
+    added = [x for x in new if old_ok(x) is False]
+    dropped = [x for x in sub if old_ok(x) and (x["pal"].get("score") or 0) < so.THR["4h"]]
+    old = [x for x in sub if old_ok(x)]
+    sn, so_, sa, sd = so.stats(new), so.stats(old), so.stats(added), so.stats(dropped)
+
+    def _t(st):
+        return f"{st['w']} TP / {st['l']} SL · WR %{st['wr']:.0f}" if st["res"] else "çözülmüş yok"
+    note = f"yeni (≥ 6) {_t(sn)} · eski (≥ 7) {_t(so_)} · eklenen {_t(sa)} · çıkarılan {_t(sd)}"
+    if sa["res"] and sd["res"]:
+        d, _p_hi, p_lo = so.wr_test(sa, sd)
+        note += f" · eklenen − çıkarılan {d:+.0f} puan (p kötü {p_lo:.2f})"
+    return Progress(bars=[Bar("yeni tablonun seçtiği 4H setup (RR ≥ 2, çözülmüş)", sn["res"], 60)], note=note)
+
+
 async def _cand_prog(db: AsyncSession, strategy: str) -> list[tuple[str, int]]:
     """Aday basina karar bandinda AZ olan tarafin cozulmusu (`score_outcome.cand_progress`; rapor ile ayni kume)."""
     from app import score_outcome as so
@@ -1429,13 +1465,13 @@ async def _p_smt_segment(db: AsyncSession) -> Progress:
             t.c.strategy == st, t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
             t.c.first_seen >= datetime(2026, 10, 2)))
         sub = [x for x in so.collect(res.mappings().all(), strategy=st) if x["smt_ok"] != 0]
-        for seg in ("alt", "major", "fx"):
-            # 24.10: 4H altcoin SMT bonusu +1 -> karar bandi (SMT haric raw) 6-6; digerleri +2 -> 5-6.
-            v = 1 if (st == "4h" and seg == "alt") else 2
+        # 29.10: 4H altcoin karara baglandi (SMT puani 0) -- sayac yalniz FX ve BTC/ETH; 1D'de altcoin yok.
+        for seg in ("major", "fx"):
+            v = 2
             band = [x for x in sub if x["seg"] == seg
                     and 7 - v <= ((x["pal"].get("raw") or 0) - (x["pal"].get("smt") or 0)) <= 6]
-            g = so.stats([x for x in band if (x["pal"].get("smt") or 0) > 0])
-            b = so.stats([x for x in band if x["pal"].get("smt") == 0])
+            g = so.stats([x for x in band if so.has_smt(x)])
+            b = so.stats([x for x in band if not so.has_smt(x)])
             out[(st, seg)] = min(g["res"], b["res"])
     names = {"alt": "altcoin", "major": "BTC/ETH", "fx": "FX"}
     best = max(out, key=out.get)
@@ -1635,7 +1671,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_rr_cap,
     ),
     WatchItem(
-        key="score_order_4h", status="open", started="03.10", onem=1,
+        key="score_order_4h", status="done", started="03.10", onem=1,
+        result="(29.10) DEVREDİLDİ: eşik 7 eski tabloya aitti; yeni tabloda eşik 6 ve sıralama sorusu \"4H yeni skor "
+               "tablosu canlıda — tuttu mu?\" maddesinde (Score Table'daki toplam skor kutusu da yeni tabloyu okur)",
         title="Toplam skor kazananı sıralıyor mu? (eşik 7 anlamlı mı) — 4H",
         trigger="taze (levels_at ≥ 04.10) temiz 4H setupta (C2 kapalı, RR ≥ 2, kapıda elenenler dahil) skor < 7 ve ≥ 7 "
                 "her biri 60 çözülmüş: S1 skor ≥ 7 − < 7 ≥ +0.15 R/setup + iki yarı → skor çalışıyor, kalem maddelerine "
@@ -2173,7 +2211,21 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_1h,
     ),
     WatchItem(
-        key="score_parts_4h", status="open", started="16.09", onem=1,
+        key="score_v2_4h", status="open", started="29.10", onem=1,
+        title="4H yeni skor tablosu canlıda — tuttu mu?",
+        trigger="yeni tablonun seçtiği (skor ≥ 6) RR ≥ 2 4H setup 60 çözülmüş (TP önce mi SL önce mi). Aynı setuplarda eski "
+                "tablo (features.v1_raw, eşik 7) paralel: yeni tablonun EKLEDİKLERİ çıkardıklarından ≥ 5 puan kötü (WR) ve "
+                "tek yönlü p < 0.10 → eski tabloya dönüş kullanıcıya; aksi halde tablo kalır. Kalem hükümleri /skor-tablosu'nda",
+        measure="/izleme sayacı (not satırı) · /skor-tablosu?tf=4h · python scripts/score_item_outcome_stat.py --strategy 4h",
+        md="4H yeni skor tablosu canlıda — tuttu mu? (29.10.2026)",
+        progress_fn=_p_score_v2_4h,
+    ),
+    WatchItem(
+        key="score_parts_4h", status="done", started="16.09", onem=1,
+        result="(29.10) KARARA BAĞLANDI (kullanıcı): yeni 4H tablosu — C2 doji 0, reversal-at-PD yok, key level teması +1 "
+               "(PD major / PD aylık / FVG-OB yerine), fitil 0/1/2, CISD güçlü +1; 1W uyumu ve C2 kapalı kalktı, eşik 6, "
+               "sınır skor kapısı kapalı. Journal kripto eşik 6: %78 (RR ≥ 2 %67) vs eski %69 (%57). Canlı takip "
+               "\"4H yeni skor tablosu canlıda — tuttu mu?\"",
         title="Skor kalemleri — 4H",
         trigger="paketin kaderini değiştirdiği 150 setup (21.10, kullanıcı; eskiden A kolu 30): paket (PD major/aylık 0 + "
                 "wick 0.30, eşik 6) değişen setuplarda ≥ +0.15 R/setup, iki yarıda aynı yön ve tek yönlü p < 0.10 → tek replay; "
@@ -2194,7 +2246,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_smt_variants,
     ),
     WatchItem(
-        key="score_proposals_4h", status="open", started="03.10", onem=1,
+        key="score_proposals_4h", status="done", started="03.10", onem=1,
+        result="(29.10) DEVREDİLDİ: öneriler eski tabloya göreydi; 4H yeni skor tablosu kuruldu (\"Skor kalemleri — 4H\" "
+               "sonucu), canlı takip \"4H yeni skor tablosu canlıda — tuttu mu?\"",
         title="Skor önerileri — 4H",
         trigger="taze (levels_at ≥ 04.10) A kolu 60 setup: öneri A'ya göre ≥ +3R ve iki yarıda > 0 → tek replay adayı; "
                 "≤ −3R ve iki yarıda < 0 → red. Öneriler: SMT +1 / 0, FVG-OB 0, major +2, C2 doji/dolu yer değiştir, "
@@ -2245,7 +2299,7 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="score_candidates_4h", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 4H",
-        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
+        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte WR farkı ≥ 5 puan (TP önce mi; 29.10'a kadar 0.15 R/setup) + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 5 puan RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
         measure="python scripts/score_candidates_stat.py --strategy 4h · adaylar app/score_outcome.CANDIDATES (seans, CISD "
                 "gücü, likidite, EQ/SSL, MSS, C1 aralığı, key level yok, C1 TP fitili, BPR girişi; IFVG/BPR bölgesi oluşmamış 28.10 RED)",
         md="Skor tablosu yeni adaylar — 4H",
@@ -2255,8 +2309,8 @@ ITEMS: list[WatchItem] = [
         # 28.10 (kullanici): cok yavas biriken aday strateji maddelerinden ayrildi (4H'te 1/30).
         key="score_candidate_eq_ssl", status="open", started="28.10", onem=1,
         title="Skor adayı ayrı — puansız key level (EQ / SSL) +1",
-        trigger="herhangi bir stratejide karar bandında taraf başına 30 çözülmüş: lehte fark ≥ 0.15 R/setup + iki yarıda "
-                "aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada 60'a uzat (aday maddeleriyle aynı kural)",
+        trigger="herhangi bir stratejide karar bandında taraf başına 30 çözülmüş: lehte WR farkı ≥ 5 puan + iki yarıda "
+                "aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 5 puan RED; arada 60'a uzat (aday maddeleriyle aynı kural)",
         measure="python scripts/score_candidates_stat.py --strategy 4h|1d|1w (aday 'Puansız key level')",
         md="Skor adayı ayrı — puansız key level (EQ / SSL) +1 (28.10.2026)",
         progress_fn=_p_cand_separate,
@@ -2264,7 +2318,7 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="score_candidates_1d", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 1D",
-        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
+        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte WR farkı ≥ 5 puan (TP önce mi; 29.10'a kadar 0.15 R/setup) + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 5 puan RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde",
         measure="python scripts/score_candidates_stat.py --strategy 1d · adaylar app/score_outcome.CANDIDATES (seans, CISD "
                 "gücü, likidite, EQ/SSL, MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi)",
         md="Skor tablosu yeni adaylar — 1D",
@@ -2274,7 +2328,7 @@ ITEMS: list[WatchItem] = [
         # 24.10 (kullanici, 1W skor kalemleri incelemesi): 5 yalniz-1W aday eklendi, madde pasiften cikti (onem 3 -> 1).
         key="score_candidates_1w", status="open", started="21.10", onem=1,
         title="Skor tablosu yeni adaylar — 1W",
-        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte fark ≥ 0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 0.15 RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde. "
+        trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte WR farkı ≥ 5 puan (TP önce mi; 29.10'a kadar 0.15 R/setup) + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 5 puan RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde. "
                 "Sonuç = TP önce mi SL önce mi (24.10, giriş dolmadan TP de TP). 1W'de birikme yavaş (haftada ~10 setup)",
         measure="python scripts/score_candidates_stat.py --strategy 1w · ortak adaylar (seans, CISD gücü, likidite, EQ/SSL, "
                 "MSS, C1 aralığı, key level yok, C1 TP fitili, IFVG/BPR bölgesi oluşmamış, BPR girişi) + 24.10 yalnız 1W: haftalık "
@@ -2295,7 +2349,8 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="smt_segment", status="open", started="02.10", onem=1,
         title="SMT +2 — segment bazında (altcoin / BTC-ETH / FX)",
-        trigger="24.10 KARAR (kullanıcı, 60 beklenmeden): 4H altcoin SMT +2 → +1. Sürüyor: FX / BTC-ETH ve altcoinde +1 tuttu mu. "
+        trigger="24.10 KARAR (kullanıcı, 60 beklenmeden): 4H altcoin SMT +2 → +1; 29.10 KARAR: altcoin +1 → 0 (karar bandında "
+                "SMT'li %48 / SMT'siz %69 TP önce, p 0.01, iki yarıda). Sürüyor: FX / BTC-ETH. "
                 "YALNIZ 02.10+ veri: segment × strateji karar bandında (SMT hariç skor 5–6; 4H altcoin 6–6) taraf başına 60 "
                 "çözülmüş + iki zaman yarısı aynı yön + tek yönlü p < 0.10: SMT'li ≥ 0.15 R/setup kötüyse o segmentte "
                 "puanı kaldırma/düşürme önerisi (önce 'SMT doğru tanımla' sonucuna bakılır); |fark| < 0.15 etkisiz",

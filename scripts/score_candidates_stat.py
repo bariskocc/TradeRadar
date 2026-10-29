@@ -8,17 +8,19 @@ Kume: `score_outcome.collect` (motorun CRT saydigi, 4H C2 kapali donmus, 1D/1W s
 sonuc duz TP/SL; sinyalde golge k=1) + RR >= 2. KARAR BANDI: adayin puani sinyali degistirecek setuplar (odulde bugunku
 raw [esik - v, esik - 1], cezada [esik, esik - v - 1]); ayni bantta aday var / yok.
 
-KARAR KURALI (21.10, veri gorulmeden; IZLEME.md "Skor tablosu yeni adaylar — 4H / 1D / 1W"):
+KARAR KURALI (21.10 veri gorulmeden; 29.10 olcu WR'ye gecti, kullanici -- hicbir aday tetige varmadan;
+IZLEME.md "Skor tablosu yeni adaylar — 4H / 1D / 1W"):
   tetik     : karar bandinda taraf basina 30 cozulmus
-  PUAN ADAYI: lehte fark >= 0.15 R/setup + iki zaman yarisinda ayni yon + tek yonlu bootstrap p < 0.10 -> tek replay
-  RED       : lehte fark < 0.15 (ters dahil) -> aday o stratejide kapanir
-  UZAT      : fark >= 0.15 ama yari / p tutmuyor -> taraf basina 60; 60'ta da tutmuyorsa RED
-"Lehte": odulde aday VAR olan daha iyi, cezada aday var olan daha KOTU.
+  PUAN ADAYI: lehte WR farki >= 5 puan + iki zaman yarisinda ayni yon + tek yonlu iki oran z-testi p < 0.10 -> tek replay
+  RED       : lehte fark < 5 puan (ters dahil) -> aday o stratejide kapanir
+  UZAT      : fark >= 5 puan ama yari / p tutmuyor -> taraf basina 60; 60'ta da tutmuyorsa RED
+"Lehte": odulde aday VAR olan daha iyi, cezada aday var olan daha KOTU. WR = TP once mi SL once mi (giristen bagimsiz).
+Neden WR: R/setup dolmadan TP'yi tam RR'yle sayiyor (TP'lerin ~%60'i), RR'si yuksek grup kendiliginden iyi gorunuyordu;
+eski kuralin p'si ise dolum bazli R'dendi (iki ayri olcu). R (TP once / dolum bazli) yalniz bilgi olarak basilir.
 
 Kullanim: python scripts/score_candidates_stat.py [--strategy 4h|1d|1w] [--since 2026-09-29] [--db traderadar.db]
 """
 import argparse
-import random
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,40 +29,30 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from app.score_outcome import (  # noqa: E402
-    BAND, BANDS, CAND_DECIDED, CAND_MIN_RR, FILTER_GAP, FILTER_HERE, CAND_MIN_SIDE, CANDIDATES, THR, cand_flip, candidates_for, collect, stats,
+    BANDS, CAND_DECIDED, CAND_MIN_RR, FILTER_GAP_WR, FILTER_HERE, CAND_MIN_SIDE, CANDIDATES, P_MAX, THR, WR_BAND, cand_flip,
+    candidates_for, collect, stats, wr_test,
 )
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--db", default=str(REPO / "traderadar.db"))
 ap.add_argument("--strategy", choices=("4h", "1d", "1w"), default="4h")
 ap.add_argument("--since", default="2026-09-29", help="key level / C1 / likidite olcumleri 29.09'dan beri")
-ap.add_argument("--seed", type=int, default=0)
 A = ap.parse_args()
-random.seed(A.seed)
 
 
-def _R(x):
-    return x["rr"] if x["o"] == "win" else -1.0
-
-
-def _p_one_sided(good, bad, sign, it=4000):
-    """Tek yonlu bootstrap: lehte farkin <= 0 olma olasiligi (sign: odul +1, ceza -1)."""
-    g = [_R(x) for x in good if x["o"] in ("win", "loss")]
-    b = [_R(x) for x in bad if x["o"] in ("win", "loss")]
-    if not g or not b:
-        return None
-    n = 0
-    for _ in range(it):
-        mg = sum(random.choice(g) for _ in g) / len(g)
-        mb = sum(random.choice(b) for _ in b) / len(b)
-        n += sign * (mg - mb) <= 0
-    return n / it
+def _fill_r(sub_) -> str:
+    """Bilgi: dolum bazli R/islem (dolmadan TP haric)."""
+    f = [x for x in sub_ if x["o"] in ("win", "loss")]
+    if not f:
+        return "-"
+    r = (sum(x["rr"] for x in f if x["o"] == "win") - sum(x["o"] == "loss" for x in f)) / len(f)
+    return f"{r:+.2f} (n {len(f)})"
 
 
 def _fmt(st):
     if not st["res"]:
         return f"n{st['n']:4d} çözülmüş 0"
-    return f"n{st['n']:4d} TP {st['w']:3d} SL {st['l']:3d} WR %{st['wr']:4.1f} {st['rps']:+.2f}"
+    return f"n{st['n']:4d} TP {st['w']:3d} SL {st['l']:3d} WR %{st['wr']:4.1f}"
 
 
 con = sqlite3.connect(f"file:{A.db}?mode=ro", uri=True)
@@ -72,7 +64,7 @@ ts = sorted(str(x["first_seen"]) for x in sub)
 mid = ts[len(ts) // 2] if ts else ""
 print(f"Strateji {A.strategy} · eşik {thr} · küme {len(sub)} setup (RR ≥ {CAND_MIN_RR:g} karar bandında) · "
       f"{A.since} → {ts[-1][:10] if ts else '-'} · yarı sınırı {mid[:10]}")
-print(f"Tetik: karar bandında taraf başına {CAND_MIN_SIDE} çözülmüş · bant ±{BAND}\n")
+print(f"Tetik: karar bandında taraf başına {CAND_MIN_SIDE} çözülmüş · hüküm WR farkı ≥ {WR_BAND:g} puan + iki yarı + p < {P_MAX:g}\n")
 
 for key, label, v, src, filt in candidates_for(A.strategy):   # 24.10: 1W-only adaylar (CAND_ONLY)
     g, b, d, (lo, hi), band = cand_flip(sub, key, thr)
@@ -90,32 +82,34 @@ for key, label, v, src, filt in candidates_for(A.strategy):   # 24.10: 1W-only a
         bg = stats([x for x in bb if x["cand"][key] == 1])
         bn = stats([x for x in bb if x["cand"][key] == 0])
         if bg["res"] and bn["res"]:
-            num += bg["res"] * (bg["rps"] - bn["rps"])
+            num += bg["res"] * (bg["wr"] - bn["wr"])
             wt += bg["res"]
     if wt:
-        print(f"   bilgi — tüm bantlar (0–4 / 5–6 / 7+), lehte fark {(1 if v > 0 else -1) * num / wt:+.2f} "
+        print(f"   bilgi — tüm bantlar (0–4 / 5–6 / 7+), lehte WR farkı {(1 if v > 0 else -1) * num / wt:+.1f} puan "
               f"(aday çözülmüş {int(wt)}) — karar değil")
-    if d is None:
+    wd, p_hi, p_lo = wr_test(g, b)
+    if wd is None:
         print("   HÜKÜM: veri yok\n")
         continue
-    good = sign * d
+    good, p = sign * wd, (p_hi if v > 0 else p_lo)
     halves = []
     for part in ([x for x in band if str(x["first_seen"]) < mid], [x for x in band if str(x["first_seen"]) >= mid]):
         pg = stats([x for x in part if x["cand"][key] == 1])
         pb = stats([x for x in part if x["cand"][key] == 0])
-        halves.append(sign * (pg["rps"] - pb["rps"]) if pg["res"] and pb["res"] else None)
-    p = _p_one_sided([x for x in band if x["cand"][key] == 1], [x for x in band if x["cand"][key] == 0], sign)
-    h = " / ".join("—" if x is None else f"{x:+.2f}" for x in halves)
-    print(f"   lehte fark {good:+.2f} R/setup · yarılar {h} · p {p:.3f}" if p is not None else f"   lehte fark {good:+.2f}")
+        halves.append(sign * (pg["wr"] - pb["wr"]) if pg["res"] and pb["res"] else None)
+    h = " / ".join("—" if x is None else f"{x:+.1f}" for x in halves)
+    print(f"   lehte WR farkı {good:+.1f} puan · yarılar {h} · p {p:.3f}")
+    print(f"   bilgi (karar değil) — TP önce R/setup farkı {d:+.2f} · dolum bazlı R/işlem: var "
+          f"{_fill_r([x for x in band if x['cand'][key] == 1])} | yok {_fill_r([x for x in band if x['cand'][key] == 0])}")
     side = min(g["res"], b["res"])
     if side < CAND_MIN_SIDE:
         verdict = f"veri birikiyor ({side}/{CAND_MIN_SIDE})"
-    elif good < BAND:
+    elif good < WR_BAND:
         verdict = "RED — puan hak etmiyor (bu stratejide kapanır)"
-    elif all(x is not None and x > 0 for x in halves) and p is not None and p < 0.10:
+    elif all(x is not None and x > 0 for x in halves) and p < P_MAX:
         verdict = "PUAN ADAYI — önce tek replay"
-        if key in FILTER_HERE and good >= FILTER_GAP:
-            verdict += f" · fark ≥ {FILTER_GAP:g}: FİLTRE seçeneği de kullanıcıya (bölge şartı)"
+        if key in FILTER_HERE and good >= FILTER_GAP_WR:
+            verdict += f" · fark ≥ {FILTER_GAP_WR:g} puan: FİLTRE seçeneği de kullanıcıya (bölge şartı)"
     elif side >= 2 * CAND_MIN_SIDE:
         verdict = f"RED — {2 * CAND_MIN_SIDE}'ta da yarı / p tutmuyor"
     else:
