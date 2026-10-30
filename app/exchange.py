@@ -86,6 +86,12 @@ SYMBOLS_BY_MARKET: dict[str, list[str]] = {
         "NCFXGBP2AUD-USDT",        # GBPAUD
         "NCFXGBP2CHF-USDT",        # GBPCHF
         "NCFXNZD2CAD-USDT",        # NZDCAD
+        # 30.10 eklendi (kullanici): BingX'te olup izlenmeyen kroslar.
+        # AUDCAD/AUDNZD/AUDCHF/EURAUD/NZDCHF BingX'te yok.
+        "NCFXGBP2CAD-USDT",        # GBPCAD
+        "NCFXGBP2NZD-USDT",        # GBPNZD
+        "NCFXEUR2NZD-USDT",        # EURNZD
+        "NCFXCHF2JPY-USDT",        # CHFJPY
     ],
 }
 _CRYPTO_SYMBOL_SET = set(_CRYPTO)
@@ -124,6 +130,10 @@ DISPLAY_NAMES: dict[str, str] = {
     "NCFXGBP2AUD-USDT": "GBPAUD",
     "NCFXGBP2CHF-USDT": "GBPCHF",
     "NCFXNZD2CAD-USDT": "NZDCAD",
+    "NCFXGBP2CAD-USDT": "GBPCAD",
+    "NCFXGBP2NZD-USDT": "GBPNZD",
+    "NCFXEUR2NZD-USDT": "EURNZD",
+    "NCFXCHF2JPY-USDT": "CHFJPY",
 }
 
 # Her sembolun ait oldugu market
@@ -152,6 +162,8 @@ _SMT_PAIRS: list[tuple[str, str]] = [
     ("NCFXAUD2JPY-USDT", "NCFXNZD2JPY-USDT"),              # AUDJPY <-> NZDJPY (risk-on JPY)
     ("NCFXUSD2JPY-USDT", "NCFXUSD2CHF-USDT"),              # USDJPY <-> USDCHF (USD gucu)
     ("NCFXEUR2CHF-USDT", "NCFXGBP2CHF-USDT"),              # EURCHF <-> GBPCHF (CHF quote)
+    ("NCFXEUR2NZD-USDT", "NCFXGBP2NZD-USDT"),              # EURNZD <-> GBPNZD (NZD quote, 30.10)
+    ("NCFXEUR2CAD-USDT", "NCFXGBP2CAD-USDT"),              # EURCAD <-> GBPCAD (CAD quote, 30.10)
 ]
 
 SMT_CORRELATION: dict[str, str] = {}
