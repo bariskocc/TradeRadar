@@ -56,6 +56,14 @@ RESULT_META = {
     "filled": ("Filled · open", "blue"),
     "open": ("Open", "gray"),
 }
+# Filtre secenekleri (01.11, kullanici istegi). Kripto disi hepsi FX (Radar ile ayni).
+MARKET_FILTERS = (("all", "All"), ("crypto", "Crypto"), ("fx", "FX"))
+DIRECTION_FILTERS = (("all", "All"), ("long", "LONG"), ("short", "SHORT"))
+RESULT_FILTERS = (("all", "All"), ("tp", "TP"), ("sl", "SL"), ("filled", "Filled · open"), ("open", "Open"))
+
+
+def _is_crypto(symbol: str) -> bool:
+    return (symbol or "").upper().endswith("USDT.P")
 
 
 def week_start_tsi(now: datetime | None = None) -> str:
@@ -117,10 +125,13 @@ def _signal_status(sig) -> str:
 
 async def build_potential_signals(
     db: AsyncSession, *, tf: str = "all", date_from: str = "", date_to: str = "", status: str = "all",
-    page: int = 1,
+    market: str = "all", direction: str = "all", result: str = "all", page: int = 1,
 ) -> dict:
     tf = tf if tf in ("all", "1d", "1w") else "all"
     status = status if status in dict(STATUS_FILTERS) else "all"
+    market = market if market in dict(MARKET_FILTERS) else "all"
+    direction = direction if direction in dict(DIRECTION_FILTERS) else "all"
+    result = result if result in dict(RESULT_FILTERS) else "all"
     q = select(PotentialNotice)
     if tf != "all":
         q = q.where(PotentialNotice.strategy == tf)
@@ -190,15 +201,25 @@ async def build_potential_signals(
     def _group(st: str) -> str:
         return "cancelled" if st in ("cancelled", "signal_cancelled") else ("signal" if st.startswith("signal") else "watch")
 
-    counts = {"all": len(rows)}
+    # Market / yon her seye uyar; durum sekmesi sayaclari sonuc filtresine, sonuc ozeti durum sekmesine uyar.
+    if market != "all":
+        rows = [r for r in rows if _is_crypto(r["symbol"]) == (market == "crypto")]
+    if direction != "all":
+        rows = [r for r in rows if (r["direction"] or "").lower() == direction]
+    by_result = rows if result == "all" else [r for r in rows if r["result"] == result]
+    by_status = rows if status == "all" else [r for r in rows if _group(r["status"]) == status]
+    counts = {"all": len(by_result)}
     for key, _ in STATUS_FILTERS[1:]:
-        counts[key] = sum(1 for r in rows if _group(r["status"]) == key)
-    results = {k: sum(1 for r in rows if r["result"] == k) for k in RESULT_META}
-    shown = rows if status == "all" else [r for r in rows if _group(r["status"]) == status]
+        counts[key] = sum(1 for r in by_result if _group(r["status"]) == key)
+    results = {k: sum(1 for r in by_status if r["result"] == k) for k in RESULT_META}
+    shown = [r for r in by_status if result == "all" or r["result"] == result]
+    # En yuksek skor ustte (01.11, kullanici); skorsuz en altta, esitlikte en yeni bildirim (sorgu sirasi korunur).
+    shown.sort(key=lambda r: -(r["score"] if r["score"] is not None else -1))
     pages = max(1, (len(shown) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = min(max(1, page), pages)
     return dict(
         rows=shown[(page - 1) * PAGE_SIZE: page * PAGE_SIZE], total=len(shown), page=page, pages=pages,
         counts=counts, results=results, tf=tf, status=status, date_from=date_from, date_to=date_to,
-        status_filters=STATUS_FILTERS, error=error,
+        market=market, direction=direction, result=result, status_filters=STATUS_FILTERS,
+        market_filters=MARKET_FILTERS, direction_filters=DIRECTION_FILTERS, result_filters=RESULT_FILTERS, error=error,
     )

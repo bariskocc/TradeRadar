@@ -1380,6 +1380,9 @@ async def potential_signals_page(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     status: str = Query(default="all"),
+    market: str = Query(default="all"),
+    direction: str = Query(default="all"),
+    result: str = Query(default="all"),
     page: int = Query(default=1),
 ):
     """Kapida elenip POTANSIYEL bildirilen 1D/1W setuplar (24.10). Veri app/potential_signals.py.
@@ -1390,12 +1393,15 @@ async def potential_signals_page(
     from app.potential_signals import build_potential_signals, week_start_tsi
     if "date_from" not in request.query_params:
         date_from = week_start_tsi()
-    data = await build_potential_signals(db, tf=tf, date_from=date_from, date_to=date_to, status=status, page=page)
-    base_qs = urlencode({"tf": data["tf"], "date_from": data["date_from"], "date_to": data["date_to"]})
+    data = await build_potential_signals(db, tf=tf, date_from=date_from, date_to=date_to, status=status,
+                                         market=market, direction=direction, result=result, page=page)
+    base_qs = urlencode({"tf": data["tf"], "date_from": data["date_from"], "date_to": data["date_to"],
+                         "market": data["market"], "direction": data["direction"], "result": data["result"]})
     return templates.TemplateResponse(request=request, name="potential_signals.html", context={
         "user": user,
         "active_page": "potential_signals",
         "base_qs": base_qs,
+        "week_start": week_start_tsi(),
         **data,
     })
 
@@ -1762,7 +1768,21 @@ async def radar_page(request: Request):
         "active_page": "radar",
         "tf": tf,
         "tf_label": _tf_label(tf),
+        **_radar_filters(request),
     })
+
+
+def _radar_filters(request: Request) -> dict:
+    """Radar filtreleri (01.11, kullanici): market (all|crypto|fx — kripto disi hepsi FX),
+    yon (all|long|short), yalniz setup'lar (no_setup / no_data gizli)."""
+    q = request.query_params
+    market = (q.get("market") or "").lower()
+    direction = (q.get("dir") or "").lower()
+    return {
+        "market": market if market in ("crypto", "fx") else "all",
+        "direction": direction if direction in ("long", "short") else "all",
+        "setups_only": q.get("setups") == "1",
+    }
 
 
 @app.get("/api/radar")
@@ -1776,11 +1796,22 @@ async def api_radar(request: Request):
     from app.scanner import get_radar_snapshot
 
     tf = _parse_tf(request.query_params.get("tf"))
+    flt = _radar_filters(request)
     snap = get_radar_snapshot(strategy=tf)
     ws = market_data.status()
 
     symbols = []
     for e in snap["symbols"]:
+        # Filtre ozet kartlarina da uysun diye sayimdan once uygulanir.
+        is_crypto = (e.get("market") or "").lower() == "crypto"
+        if flt["market"] == "crypto" and not is_crypto:
+            continue
+        if flt["market"] == "fx" and is_crypto:
+            continue
+        if flt["direction"] != "all" and (e.get("direction") or "").lower() != flt["direction"]:
+            continue
+        if flt["setups_only"] and e["state"] in ("no_setup", "no_data"):
+            continue
         meta = dict(RADAR_STATE_META.get(e["state"], {"label": e["state"], "color": "gray", "rank": 9}))
         if e["state"] == "bias_mismatch":
             meta["label"] = "1D bias opposite (structure/ICT)"
