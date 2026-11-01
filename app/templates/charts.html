@@ -24,6 +24,13 @@
     .ch-cd { position: absolute; right: 0; z-index: 3; display: none; pointer-events: none; text-align: center;
              font-size: 11px; line-height: 16px; color: #fff; font-variant-numeric: tabular-nums; border-radius: 0 0 2px 2px; }
     .ch-legend { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 11px; color: rgb(var(--tr-g500)); pointer-events: none; font-variant-numeric: tabular-nums; }
+    /* Cizim araclari (01.11): yalniz masaustu, cizimler tarayicida (localStorage) */
+    .ch-draw { display: none; align-items: center; gap: 4px; }
+    @media (min-width: 768px) { .ch-draw { display: flex; } }
+    .ch-sw { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; }
+    .ch-sw.on { border-color: rgb(var(--tr-fg)); }
+    .ch-clr { font-size: 10px; color: rgb(var(--tr-g500)); padding: 1px 5px; border-radius: 5px; display: none; white-space: nowrap; }
+    .ch-clr:hover { color: #ef4444; background: rgb(var(--tr-g500) / 0.12); }
     @media (max-width: 767px) {
         .ch-grid { grid-template-columns: 1fr !important; }
         /* sidebar.html telefonda butun main tablolarina dolgu + yapiskan ilk sutun veriyor; grafik
@@ -55,6 +62,14 @@
                     <span id="sig-switch" class="ch-switch" role="switch" aria-checked="false" tabindex="0"></span>
                     <span class="text-xs text-gray-400">Signals</span>
                 </label>
+                <div class="ch-draw" id="draw-bar">
+                    <button type="button" class="ch-lay" data-tool="cursor" title="Select / move (Esc)">Cursor</button>
+                    <button type="button" class="ch-lay" data-tool="h" title="Horizontal line: click once">H-Line</button>
+                    <button type="button" class="ch-lay" data-tool="t" title="Trend line: click two points (or drag)">Trend</button>
+                    <button type="button" class="ch-lay" data-tool="r" title="Box: click two corners (or drag)">Box</button>
+                    <span class="mx-1 flex items-center gap-1" id="draw-colors"></span>
+                    <button type="button" class="ch-lay" id="draw-del" title="Delete selected drawing (Del)">Delete</button>
+                </div>
                 <span class="text-[11px] text-gray-500">Candles in TSİ · live from the bot's feed</span>
             </div>
 
@@ -80,7 +95,10 @@
                 <button type="button" class="ch-tf" data-tf="1d">1D</button>
                 <button type="button" class="ch-tf" data-tf="1w">1W</button>
             </div>
-            <span class="ch-info ml-auto text-[10px] text-gray-500 truncate"></span>
+            <div class="ml-auto flex items-center gap-2 min-w-0">
+                <button type="button" class="ch-clr" title="Delete all drawings on this symbol"></button>
+                <span class="ch-info text-[10px] text-gray-500 truncate"></span>
+            </div>
         </div>
         <div class="ch-body">
             <div class="ch-legend"></div>
@@ -170,7 +188,7 @@
 
         chart.timeScale().subscribeVisibleLogicalRangeChange(() => tickCell(cell));
 
-        sel.addEventListener('change', () => { conf.symbol = sel.value; save(); load(cell, true); });
+        sel.addEventListener('change', () => { conf.symbol = sel.value; save(); refreshClr(cell); load(cell, true); });
         el.querySelectorAll('.ch-tf').forEach(b => {
             b.classList.toggle('on', b.dataset.tf === conf.tf);
             b.addEventListener('click', () => {
@@ -180,6 +198,7 @@
             });
         });
         cell.conf = conf;
+        attachDrawing(cell);
         return cell;
     }
 
@@ -212,6 +231,7 @@
             cell.series.applyOptions({ priceFormat: { type: 'price', precision: data.precision, minMove: Math.pow(10, -data.precision) } });
             cell.series.setData(data.candles);
             cell.times = data.candles.map(c => c.time);
+            cell.layer.update();
             const n = cell.times.length;
             if (full && n) cell.chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 150), to: n + 5 });
         }
@@ -326,6 +346,314 @@
         cell.series.setMarkers(markers);
     }
 
+    // ── cizimler (01.11): yatay cizgi / trend / kutu; sembole bagli, TF'den bagimsiz (zaman + fiyat) ──
+    // Yalniz masaustu; kayit tarayicida. Nokta = {t: unix sn, p: fiyat}; TF degisince zaman mum
+    // indeksine (kesirli) cevrilir, boylece 15m'de cizilen kutu 4H'te de ayni yerde durur.
+    const DRAW_KEY = 'tr-charts-draw';
+    const DCOLORS = ['#3b82f6', '#f59e0b', '#a855f7', '#ef4444', '#22c55e', '#9ca3af'];
+    const BAR_SEC = { '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800 };
+    const HIT_PX = 6;
+    let drawings = {};
+    try {
+        const d = JSON.parse(localStorage.getItem(DRAW_KEY) || 'null');
+        if (d && typeof d === 'object') drawings = d;
+    } catch (e) { /* yok say */ }
+    const draw = { tool: 'cursor', color: DCOLORS[0], selected: null, pending: null, drag: null };
+    function saveDrawings() { try { localStorage.setItem(DRAW_KEY, JSON.stringify(drawings)); } catch (e) { /* yok say */ } }
+    function listFor(sym) { return drawings[sym] || []; }
+    function redrawSymbol(sym) {
+        cells.forEach(c => { if (c.conf.symbol === sym) { c.layer.update(); refreshClr(c); } });
+    }
+
+    // zaman <-> mantiksal indeks (bosluklu seride mum suresiyle sinirli ara deger)
+    function timeToLogical(cell, t) {
+        const ts = cell.times, n = ts.length, bs = BAR_SEC[cell.conf.tf] || 3600;
+        if (!n) return null;
+        if (t <= ts[0]) return (t - ts[0]) / bs;
+        if (t >= ts[n - 1]) return n - 1 + (t - ts[n - 1]) / bs;
+        let lo = 0, hi = n - 1;
+        while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (ts[mid] <= t) lo = mid; else hi = mid - 1; }
+        return lo + Math.min(1, (t - ts[lo]) / Math.min(bs, ts[lo + 1] - ts[lo]));
+    }
+    function logicalToTime(cell, l) {
+        const ts = cell.times, n = ts.length, bs = BAR_SEC[cell.conf.tf] || 3600;
+        if (!n || l == null) return null;
+        const i = Math.floor(l);
+        if (i < 0) return ts[0] + l * bs;
+        if (i >= n - 1) return ts[n - 1] + (l - (n - 1)) * bs;
+        return ts[i] + (l - i) * Math.min(bs, ts[i + 1] - ts[i]);
+    }
+    function toXY(cell, pt) {
+        const l = timeToLogical(cell, pt.t);
+        const x = l == null ? null : cell.chart.timeScale().logicalToCoordinate(l);
+        const y = cell.series.priceToCoordinate(pt.p);
+        return x == null || y == null ? null : { x, y };
+    }
+    // fare olayindan grafik alani koordinati; fiyat ekseni / zaman ekseni uzerindeyse inside=false
+    function paneXY(cell, e) {
+        const r = cell.canvasEl.getBoundingClientRect();
+        const x = e.clientX - r.left, y = e.clientY - r.top;
+        const w = r.width - cell.chart.priceScale('right').width(), h = r.height - cell.chart.timeScale().height();
+        return { x, y, inside: x >= 0 && y >= 0 && x < w && y < h };
+    }
+    function pointAt(cell, x, y) {
+        const l = cell.chart.timeScale().coordinateToLogical(x);
+        const t = logicalToTime(cell, l), p = cell.series.coordinateToPrice(y);
+        return t == null || p == null ? null : { t, p };
+    }
+
+    function geom(cell, d) {
+        if (d.type === 'h') {
+            const y = cell.series.priceToCoordinate(d.a.p);
+            return y == null ? null : { y };
+        }
+        const a = toXY(cell, d.a), b = toXY(cell, d.b);
+        return a && b ? { x1: a.x, y1: a.y, x2: b.x, y2: b.y } : null;
+    }
+    function segDist(px, py, g) {
+        const dx = g.x2 - g.x1, dy = g.y2 - g.y1, len2 = dx * dx + dy * dy;
+        const k = len2 ? Math.max(0, Math.min(1, ((px - g.x1) * dx + (py - g.y1) * dy) / len2)) : 0;
+        return Math.hypot(px - (g.x1 + k * dx), py - (g.y1 + k * dy));
+    }
+    // ustteki cizimden baslayarak: {d, part}; part = body | a | b | ab (kutu: t a'dan, p b'den) | ba
+    function hitTest(cell, x, y) {
+        const list = listFor(cell.conf.symbol);
+        for (let i = list.length - 1; i >= 0; i--) {
+            const d = list[i], g = geom(cell, d);
+            if (!g) continue;
+            if (d.type === 'h') { if (Math.abs(y - g.y) <= HIT_PX) return { d, part: 'body' }; continue; }
+            const near = (px, py) => Math.hypot(x - px, y - py) <= HIT_PX + 1;
+            if (near(g.x1, g.y1)) return { d, part: 'a' };
+            if (near(g.x2, g.y2)) return { d, part: 'b' };
+            if (d.type === 't') { if (segDist(x, y, g) <= HIT_PX) return { d, part: 'body' }; continue; }
+            if (near(g.x1, g.y2)) return { d, part: 'ab' };
+            if (near(g.x2, g.y1)) return { d, part: 'ba' };
+            const l = Math.min(g.x1, g.x2), r = Math.max(g.x1, g.x2), t = Math.min(g.y1, g.y2), b = Math.max(g.y1, g.y2);
+            if (x >= l - HIT_PX && x <= r + HIT_PX && y >= t - HIT_PX && y <= b + HIT_PX) return { d, part: 'body' };
+        }
+        return null;
+    }
+
+    function hexA(hex, a) {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+    }
+    function paintCell(cell, ctx, size) {
+        const list = listFor(cell.conf.symbol).slice();
+        const pend = draw.pending;
+        if (pend && pend.sym === cell.conf.symbol) list.push(pend.d);
+        const sel = draw.selected;
+        for (const d of list) {
+            const g = geom(cell, d);
+            if (!g) continue;
+            const isSel = sel && sel.d === d;
+            ctx.strokeStyle = d.c; ctx.lineWidth = isSel ? 2 : 1.5;
+            ctx.beginPath();
+            if (d.type === 'h') {
+                ctx.moveTo(0, g.y); ctx.lineTo(size.width, g.y); ctx.stroke();
+                continue;
+            }
+            if (d.type === 't') {
+                ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke();
+            } else {
+                const x = Math.min(g.x1, g.x2), y = Math.min(g.y1, g.y2), w = Math.abs(g.x2 - g.x1), h = Math.abs(g.y2 - g.y1);
+                ctx.fillStyle = hexA(d.c, 0.13); ctx.fillRect(x, y, w, h);
+                ctx.rect(x, y, w, h); ctx.stroke();
+            }
+            if (isSel || d === (pend && pend.d)) {
+                const pts = d.type === 'r' ? [[g.x1, g.y1], [g.x2, g.y2], [g.x1, g.y2], [g.x2, g.y1]] : [[g.x1, g.y1], [g.x2, g.y2]];
+                ctx.fillStyle = trDark() ? '#111827' : '#fff'; ctx.lineWidth = 1.5;
+                for (const [px, py] of pts) { ctx.beginPath(); ctx.rect(px - 3.5, py - 3.5, 7, 7); ctx.fill(); ctx.stroke(); }
+            }
+        }
+    }
+
+    // Lightweight Charts seri primitifi: grafik her boyandiginda (kaydirma, olcek) cizimleri yeniden cizer
+    function DrawLayer(cell) {
+        this.cell = cell;
+        this.req = null;
+        this.axis = [];
+        const self = this;
+        this.views = [{ zOrder: () => 'top', renderer: () => ({
+            draw: target => target.useMediaCoordinateSpace(({ context, mediaSize }) => paintCell(self.cell, context, mediaSize)),
+        }) }];
+    }
+    DrawLayer.prototype.attached = function (p) { this.req = p.requestUpdate; };
+    DrawLayer.prototype.detached = function () { this.req = null; };
+    DrawLayer.prototype.paneViews = function () { return this.views; };
+    DrawLayer.prototype.priceAxisViews = function () { return this.axis; };
+    DrawLayer.prototype.updateAllViews = function () {
+        // yatay cizgilerin fiyat ekseni etiketi
+        const cell = this.cell;
+        this.axis = listFor(cell.conf.symbol).filter(d => d.type === 'h').map(d => ({
+            coordinate: () => { const y = cell.series.priceToCoordinate(d.a.p); return y == null ? -100 : y; },
+            text: () => Number(d.a.p).toFixed(cell.precision),
+            textColor: () => '#fff', backColor: () => d.c,
+        }));
+    };
+    DrawLayer.prototype.hitTest = function (x, y) {
+        if (draw.tool !== 'cursor') return null;
+        const h = hitTest(this.cell, x, y);
+        if (!h) return null;
+        const cur = h.part === 'body' ? 'move' : h.part === 'a' || h.part === 'b' ? (h.d.type === 't' ? 'pointer' : 'nwse-resize') : 'nesw-resize';
+        return { cursorStyle: cur, externalId: 'drawing', zOrder: 'top' };
+    };
+    DrawLayer.prototype.update = function () { this.updateAllViews(); if (this.req) this.req(); };
+
+    function refreshClr(cell) {
+        const n = listFor(cell.conf.symbol).length;
+        cell.clr.textContent = `${n} drawing${n === 1 ? '' : 's'} ✕`;
+        cell.clr.style.display = n && window.innerWidth >= 768 ? 'inline-block' : 'none';
+    }
+
+    function finishPending() {
+        const pend = draw.pending;
+        draw.pending = null;
+        if (!pend) return;
+        const d = pend.d;
+        if (d.type !== 'h' && Math.abs(d.a.t - d.b.t) < 1 && Math.abs(d.a.p - d.b.p) < 1e-12) { redrawSymbol(pend.sym); return; }   // bos cizim
+        (drawings[pend.sym] = drawings[pend.sym] || []).push(d);
+        saveDrawings();
+        draw.selected = { sym: pend.sym, d };
+        setTool('cursor');
+        redrawSymbol(pend.sym);
+    }
+
+    function onDown(cell, e) {
+        if (e.button !== 0 || window.innerWidth < 768) return;
+        const pos = paneXY(cell, e);
+        if (!pos.inside) return;
+        const sym = cell.conf.symbol;
+        if (draw.tool === 'cursor') {
+            const h = hitTest(cell, pos.x, pos.y);
+            const prev = draw.selected;
+            if (!h) {
+                if (prev) { draw.selected = null; redrawSymbol(prev.sym); }
+                return;   // grafik kaydirma normal calissin
+            }
+            e.stopPropagation(); e.preventDefault();
+            draw.selected = { sym, d: h.d };
+            if (prev && prev.sym !== sym) redrawSymbol(prev.sym);
+            const l0 = cell.chart.timeScale().coordinateToLogical(pos.x), p0 = cell.series.coordinateToPrice(pos.y);
+            draw.drag = { cell, d: h.d, part: h.part, l0, p0, orig: JSON.parse(JSON.stringify(h.d)), moved: false };
+            redrawSymbol(sym);
+            return;
+        }
+        e.stopPropagation(); e.preventDefault();
+        const pt = pointAt(cell, pos.x, pos.y);
+        if (!pt) return;
+        if (draw.tool === 'h') {
+            draw.pending = { sym, cell, d: { id: Date.now(), type: 'h', a: pt, c: draw.color } };
+            draw.pending.d.b = pt;
+            finishPending();
+            return;
+        }
+        if (draw.pending && draw.pending.sym !== sym) { const s = draw.pending.sym; draw.pending = null; redrawSymbol(s); }
+        if (draw.pending) { draw.pending.d.b = pt; finishPending(); return; }
+        draw.pending = { sym, cell, x0: e.clientX, y0: e.clientY, down: true,
+                         d: { id: Date.now(), type: draw.tool, a: pt, b: { t: pt.t, p: pt.p }, c: draw.color } };
+        redrawSymbol(sym);
+    }
+
+    window.addEventListener('mousemove', e => {
+        const pend = draw.pending, drag = draw.drag;
+        if (pend) {
+            const pos = paneXY(pend.cell, e);
+            const pt = pointAt(pend.cell, pos.x, pos.y);
+            if (pt) { pend.d.b = pt; redrawSymbol(pend.sym); }
+            return;
+        }
+        if (!drag) return;
+        const cell = drag.cell, pos = paneXY(cell, e);
+        const l = cell.chart.timeScale().coordinateToLogical(pos.x), p = cell.series.coordinateToPrice(pos.y);
+        if (l == null || p == null || drag.l0 == null || drag.p0 == null) return;
+        const d = drag.d, o = drag.orig, dl = l - drag.l0, dp = p - drag.p0;
+        const shift = pt => ({ t: logicalToTime(cell, timeToLogical(cell, pt.t) + dl), p: pt.p + dp });
+        const at = { t: logicalToTime(cell, l), p };
+        if (drag.part === 'body') {
+            if (d.type === 'h') { d.a.p = o.a.p + dp; d.b = d.a; }
+            else { d.a = shift(o.a); d.b = shift(o.b); }
+        } else if (drag.part === 'a') d.a = at;
+        else if (drag.part === 'b') d.b = at;
+        else if (drag.part === 'ab') { d.a = { t: at.t, p: o.a.p }; d.b = { t: o.b.t, p: at.p }; }
+        else if (drag.part === 'ba') { d.b = { t: at.t, p: o.b.p }; d.a = { t: o.a.t, p: at.p }; }
+        drag.moved = true;
+        redrawSymbol(cell.conf.symbol);
+    });
+    window.addEventListener('mouseup', e => {
+        const pend = draw.pending;
+        // surukleyerek cizim: birakinca biter; yerinde tiklama ise ikinci tiklamayi bekler
+        if (pend && pend.down) {
+            pend.down = false;
+            if (Math.hypot(e.clientX - pend.x0, e.clientY - pend.y0) > 5) finishPending();
+        }
+        if (draw.drag) {
+            if (draw.drag.moved) saveDrawings();
+            draw.drag = null;
+        }
+    });
+
+    function deleteSelected() {
+        const s = draw.selected;
+        if (!s) return;
+        drawings[s.sym] = listFor(s.sym).filter(d => d !== s.d);
+        if (!drawings[s.sym].length) delete drawings[s.sym];
+        draw.selected = null;
+        saveDrawings();
+        redrawSymbol(s.sym);
+    }
+    document.addEventListener('keydown', e => {
+        const tag = (e.target && e.target.tagName) || '';
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+        if (e.key === 'Escape') {
+            const syms = new Set([draw.pending && draw.pending.sym, draw.selected && draw.selected.sym]);
+            draw.pending = null; draw.selected = null; setTool('cursor');
+            syms.forEach(s => s && redrawSymbol(s));
+        } else if ((e.key === 'Delete' || e.key === 'Backspace') && draw.selected) {
+            e.preventDefault(); deleteSelected();
+        }
+    });
+
+    const drawBar = document.getElementById('draw-bar');
+    function setTool(t) {
+        draw.tool = t;
+        if (t !== 'cursor' && draw.pending && draw.pending.d.type !== t) { const s = draw.pending.sym; draw.pending = null; redrawSymbol(s); }
+        drawBar.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
+    }
+    drawBar.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => setTool(b.dataset.tool)));
+    document.getElementById('draw-del').addEventListener('click', deleteSelected);
+    const colorBox = document.getElementById('draw-colors');
+    DCOLORS.forEach(c => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'ch-sw'; b.style.background = c; b.title = 'Drawing color';
+        b.addEventListener('click', () => {
+            draw.color = c;
+            colorBox.querySelectorAll('.ch-sw').forEach(x => x.classList.toggle('on', x === b));
+            if (draw.selected) { draw.selected.d.c = c; saveDrawings(); redrawSymbol(draw.selected.sym); }
+        });
+        colorBox.appendChild(b);
+    });
+    colorBox.firstElementChild.classList.add('on');
+    setTool('cursor');
+
+    function attachDrawing(cell) {
+        cell.canvasEl = cell.el.querySelector('.ch-canvas');
+        cell.clr = cell.el.querySelector('.ch-clr');
+        cell.layer = new DrawLayer(cell);
+        cell.series.attachPrimitive(cell.layer);
+        // yakalama asamasinda: cizime/cizim aracina denk gelen tiklama grafigin kaydirmasina gitmesin
+        cell.canvasEl.addEventListener('mousedown', e => onDown(cell, e), true);
+        cell.clr.addEventListener('click', () => {
+            const sym = cell.conf.symbol, n = listFor(sym).length;
+            if (!n || !confirm(`Delete all ${n} drawing(s) on ${sym}?`)) return;
+            delete drawings[sym];
+            if (draw.selected && draw.selected.sym === sym) draw.selected = null;
+            saveDrawings();
+            redrawSymbol(sym);
+        });
+        refreshClr(cell);
+    }
+
     // ── yerlesim ──
     function cellHeight(n) {
         if (window.innerWidth < 768) return 380;   // telefon: tek sutun, alt alta
@@ -335,6 +663,7 @@
     function build() {
         cells.forEach(c => c.chart.remove());
         cells = [];
+        draw.pending = null; draw.drag = null;
         grid.innerHTML = '';
         const n = state.layout in COLS ? state.layout : 4;
         grid.style.gridTemplateColumns = `repeat(${COLS[n]}, minmax(0, 1fr))`;
@@ -344,7 +673,7 @@
             cells.push(cell);
             load(cell, true);
         }
-        document.querySelectorAll('.ch-lay').forEach(b => b.classList.toggle('on', +b.dataset.n === n));
+        document.querySelectorAll('#layouts .ch-lay').forEach(b => b.classList.toggle('on', +b.dataset.n === n));
         requestAnimationFrame(fitAll);
     }
 
@@ -356,7 +685,7 @@
         });
     }
 
-    document.querySelectorAll('.ch-lay').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('#layouts .ch-lay').forEach(b => b.addEventListener('click', () => {
         state.layout = +b.dataset.n; save(); build();
     }));
 
