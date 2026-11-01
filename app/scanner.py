@@ -384,6 +384,14 @@ TRAIL_RANGE_MULT = 1.3
 TRAIL_RANGE_LOOKBACK = 20
 MIN_STOP_RANGE_MULT = 1.0  # stop mesafesi < 1x ort. LTF range -> tight_stop
 
+# Gercekci olmayan bolge girisi (01.11, kullanici karari): secilen IFVG/BPR'nin RR'si ZONE_HIGH_RR'nin ustunde VE stopu
+# CISD/MSS girisinin stopunun ZONE_TIGHT_STOP_FRAC'inden kisaysa, CISD/MSS RR'si min RR'yi geciyorsa giris CISD/MSS olur
+# (`_maybe_ifvg_entry`). Kayan ortalama yok: iki stop ayni SL'den olculur. Vaka NEAR 4H #189: BPR 4.529 RR 6.39, stop
+# CISD'ninkinin %44'u -> CISD 4.489 RR 2.23 (fiyat 4.492'de dondu, BPR dolmadi). Journal 81 bolge girisli setupta 1'ini
+# degistirirdi; RR > 3 esigi (stop sartsiz) -0.27 R/setup kaybettiriyordu.
+ZONE_HIGH_RR = 4.0
+ZONE_TIGHT_STOP_FRAC = 0.5
+
 WAITING_STATUS = "waiting_entry"
 PENDING_STATUS = "pending_cisd"
 OPEN_STATUSES = (PENDING_STATUS, WAITING_STATUS, "active")
@@ -1996,11 +2004,32 @@ def _maybe_ifvg_entry(
     if pick is None:
         return cisd, planned
     cand, model, zone, cand_entry, cand_rr = pick
+    if _zone_unrealistic(cand_entry, cand_rr, cisd, planned, min_rr):
+        return cisd, planned              # 01.11: yuksek RR + cok dar stop -> CISD/MSS (bolge rozeti yine gorunur)
     _show(zone)
     cisd.entry_price = cand_entry
     cisd.entry_model = model
     cisd.zone_ready_time = _zone_ready_time(df_ltf, zone, cand if model == "bpr" else None)
     return cisd, cand_rr
+
+
+def _zone_unrealistic(zone_entry, zone_rr, cisd, cisd_rr, min_rr) -> bool:
+    """Bolge girisi gercekci degil mi (01.11): RR > ZONE_HIGH_RR, stop < ZONE_TIGHT_STOP_FRAC x CISD/MSS stopu
+    ve CISD/MSS girisi min RR'yi geciyor. CISD RR'si min RR'nin altindaysa bolge kalir."""
+    if zone_rr is None or zone_rr <= ZONE_HIGH_RR or cisd_rr is None or cisd_rr < min_rr:
+        return False
+    if cisd.entry_price is None or cisd.stop_loss is None:
+        return False
+    zone_stop = abs(float(zone_entry) - float(cisd.stop_loss))
+    cisd_stop = abs(float(cisd.entry_price) - float(cisd.stop_loss))
+    return cisd_stop > 0 and zone_stop < ZONE_TIGHT_STOP_FRAC * cisd_stop
+
+
+def _entry_deeper(direction: str, new_entry, old_entry) -> bool:
+    """Yeni giris eskisinden SL'ye daha mi yakin (LONG'da asagi, SHORT'ta yukari)?"""
+    if new_entry is None or old_entry is None:
+        return False
+    return float(new_entry) < float(old_entry) if direction == "LONG" else float(new_entry) > float(old_entry)
 
 
 def _zone_ready_time(df_ltf: pd.DataFrame | None, zone, bpr=None) -> datetime | None:
@@ -3061,6 +3090,30 @@ async def _detect_and_create_waiting_locked(
             cisd.entry_price, getattr(cisd, "entry_model", "cisd"),
         )
         cisd = _keep_resting_entry(cisd, existing_pending)
+        planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
+    # Duyurulmus emir derinlesmez (01.11, kullanici karari): WAITING mesaji gitmis sinyalin girisi SL'ye dogru
+    # tasinmaz -- SL ve TP ayniyken yeni tespit daha derin giris onerirse emir yerinde kalir. NEAR 4H #189: giris
+    # 00:00 TSI'de IFVG 4.488 -> BPR 4.529'a sessizce kaydi, fiyat 4.492'de dondu. Fiyata yaklasan tasima serbest;
+    # SL/TP degistiyse (or. LIQ SWEPT yeni uc) setup'in yapisi degismistir, yeni giris gecerli.
+    if (
+        existing_pending is not None
+        and existing_pending.status == WAITING_STATUS
+        and existing_pending.direction == setup.direction
+        and existing_pending.stop_loss is not None
+        and existing_pending.take_profit is not None
+        and float(existing_pending.stop_loss) == float(cisd.stop_loss)
+        and float(existing_pending.take_profit) == float(cisd.take_profit)
+        and _entry_deeper(setup.direction, cisd.entry_price, existing_pending.entry_price)
+    ):
+        log.info(
+            "KEEP ENTRY: %s %s emir %s (%s) yerinde; tespit daha derin %s (%s) onerdi.",
+            setup.symbol, setup.direction,
+            existing_pending.entry_price, existing_pending.entry_model or "cisd",
+            cisd.entry_price, getattr(cisd, "entry_model", "cisd"),
+        )
+        cisd = _keep_resting_entry(cisd, existing_pending)
+        # Eski emre kayittan once dokunan mum dolum sayilmasin (kayittan sonraki dolumu RESTING ENTRY yakalar).
+        cisd.zone_ready_time = _as_utc(existing_pending.created_at)
         planned_rr = _calc_planned_rr(cisd.entry_price, cisd.stop_loss, cisd.take_profit)
     if planned_rr is None or planned_rr < min_rr:
         if existing_pending is not None:

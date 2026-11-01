@@ -256,6 +256,10 @@ def _trade_plan(strategy: str) -> dict:
         zones = "BPR → IFVG"
     struct = "yalnız CISD" if cfg.get("entry_cisd_only") else "CISD / MSS (daha iyi RR)"
     entry = f"{zones} → {struct}" if zones else struct[0].upper() + struct[1:]
+    if zones:   # 01.11: gercekci olmayan bolge -> CISD/MSS (scanner._zone_unrealistic)
+        entry += (f" · bölge RR > {sc.ZONE_HIGH_RR:g} ve stopu CISD stopunun %{sc.ZONE_TIGHT_STOP_FRAC * 100:g}'sinden"
+                  f" kısaysa CISD / MSS (CISD RR ≥ {sc._min_rr_for_market('crypto'):g} ise)")
+    entry += " · bekleyen emir duyurulduktan sonra derine taşınmaz"
     frac = float(cfg.get("stop_frac") or 1.0)
     stop = "Purge ucu (%100)" if frac >= 1.0 else f"Girişten purge ucuna mesafenin %{frac * 100:.0f}'i"
     return {"code": strategy, "label": dict(TABS).get(strategy, strategy), "order": "Limit",
