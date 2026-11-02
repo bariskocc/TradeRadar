@@ -45,6 +45,11 @@ C2_COLOR_HARD_FILTER_TFS = frozenset({"4h", "1h"})
 # (29.09+) 4H: govde < 0.30 -0.70 R/setup, >= 0.30 -0.25. Yalniz 4H: 1D/1W'de olcum yok denecek kadar az.
 C1_MIN_BODY_FRAC = 0.30
 C1_BODY_FILTER_TFS = frozenset({"4h"})
+# C2 doji filtresi (02.11, kullanici karari -- TRX 4H #190, C2 govdesi araligin %1.8'i): KAPANMIS C2 doji ise
+# (govde <= DOJI_BODY_RATIO_MAX x C2 araligi) CRT sayilmaz -> `c2_doji`. Journal 4H kripto (RR >= 2, -4 cezasiz) TP once
+# %42.5 (40) vs %58.6 (382), iki yarida ayni yonde; gercek 4H sinyaller 3 TP / 10 SL, -0.15 vs +0.02 R/islem.
+# Kapanmamis C2'ye bakilmaz (govde fiyatla oynar); 4H zaten C2 kapanisini bekliyor.
+C2_DOJI_FILTER_TFS = frozenset({"4h"})
 # 1W-4H stratejisi (28.09, kullanici karari; 1H-5M'in yerine). HTF haftalik mum, 1D'den
 # sentezlenir (`daily_to_weekly_bars`). Skor tablosu farkli (`_calc_live_setup_bias`):
 #   - 1D bias kalemi (htf, +2/-2) yerine AYLIK bias (`compute_monthly_bias`); hard filtre degil.
@@ -2385,6 +2390,8 @@ def detect_crt_setup(
     C1 govdesi (30.09): C1_BODY_FILTER_TFS'te (4H) govdesi araligin C1_MIN_BODY_FRAC'indan (0.30)
     kucuk C1 elenir (`c1_weak`).
 
+    C2 doji (02.11): C2_DOJI_FILTER_TFS'te (4H) KAPANMIS C2 doji ise elenir (`c2_doji`).
+
     Purge mum rengi (reversal, A kurali):
       - Sweep + iceri kapanis zorunlu.
       - C2 dogru renk (LONG yesil / SHORT kirmizi) VEYA doji (govde/range <= %10).
@@ -2416,7 +2423,7 @@ def detect_crt_setup(
     radar/Journal nedeni gosterir.
     `rejected` (liste verilirse): setup'a cevrilmeden elenen adaylar -- yalniz KAPANMIS C2 ve
     C1 ucu gercekten delinmisse -- {reason, direction, crt_bar_time, purge_time, setup} olarak
-    eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small / c1_weak /
+    eklenir. reason: c2_wrong_color / c2_breakout / c1_stale / range_atr / sweep_small / c1_weak / c2_doji /
     c2_second_sweep (C2 once oteki ucu supurdu) / not_selected (gecerliydi, baska aday secildi; `setup` dolu). Motor karari DEGISMEZ; Setup
     Journal bu adaylarin sonrasini izler (14.09).
     """
@@ -2437,6 +2444,7 @@ def detect_crt_setup(
     # 1D'de C2 rengi hard filtre degil (25.09); yanlis renk skorda base 0 alir.
     color_hard = (timeframe or "4h").lower() in C2_COLOR_HARD_FILTER_TFS
     c1_body_hard = (timeframe or "4h").lower() in C1_BODY_FILTER_TFS
+    c2_doji_hard = (timeframe or "4h").lower() in C2_DOJI_FILTER_TFS
 
     def _reject(reason: str, direction: str, c1_i: int, c2_i: int) -> None:
         # Yalniz KAPANMIS C2: forming mumun rengi/kapanisi fiyatla degisir (gurultu).
@@ -2559,6 +2567,11 @@ def detect_crt_setup(
 
         if c1_weak:
             _reject("c1_weak", direction, live_i, purge_j)
+            continue
+
+        # Kapanmis C2 doji ise CRT sayilmaz (02.11); forming C2'nin govdesi fiyatla degisir.
+        if c2_doji_hard and purge_j < n - 1 and _candle_state(df_4h.iloc[purge_j]) == "doji":
+            _reject("c2_doji", direction, live_i, purge_j)
             continue
 
         candidates.append((live_range, crt_vol, live_i, _build_crt_setup(

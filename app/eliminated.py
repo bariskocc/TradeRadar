@@ -35,6 +35,7 @@ _GATES = [
     ("c2_breakout", "C2, C1 dışında kapandı", "C2 süpürdüğü ucun ötesinde kapandı — dönüş olmadı"),
     ("c2_wrong_color", "C2 yanlış renk", "C2 ters renkte kapandı (LONG'da kırmızı, SHORT'ta yeşil) — 4H'te kesin filtre"),
     ("c1_weak", "C1 gövdesi küçük", "C1 gövdesi aralığının %30'undan küçük (yalnız 4H)"),
+    ("c2_doji", "C2 doji", "C2 gövdesi aralığının %10'undan küçük — kararsız mum (yalnız 4H, 02.11)"),
     ("c2_second_sweep", "C2 önce öbür ucu süpürdü", "C2 iki ucu da süpürdü; yön ilk süpürülen uçtan, bu yön sonra süpürülen (24.10)"),
     ("not_selected", "Başka CRT adayı seçildi", "Aynı anda birden çok CRT vardı, motor diğerini seçti"),
     ("bias_mismatch", "1D bias ters", "Günlük bias işlem yönünün tersine"),
@@ -145,6 +146,9 @@ def why_text(row: SetupJournal) -> str:
     elif code == "c1_weak":
         b = _pct(f.get("c1_body_frac"))
         parts.append(f"C1 gövde oranı {b} (en az %30)" if b else "C1 gövdesi küçük")
+    elif code == "c2_doji":
+        b = _pct(f.get("c2_body_frac"))
+        parts.append(f"C2 gövde oranı {b} (doji, en az %10)" if b else "C2 doji")
     elif code == "c2_second_sweep":
         parts.append("C2 önce C1 " + ("tepesini" if row.direction == "LONG" else "dibini")
                      + " süpürdü — setup ters yönde, bu uç onun hedefi")

@@ -45,7 +45,7 @@ ap.add_argument("--since", default="2026-09-16", help="kalem kirilimi 16.09'dan 
 ap.add_argument("--all-levels", action="store_true", help="1D/1W: C2 acikken donmus (yanli) eski satirlar da")
 A = ap.parse_args()
 
-PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected"}
+PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_doji", "c2_second_sweep", "not_selected"}
 KEYS = [k for k in SCORE_PART_KEYS if k not in ("raw", "score")]
 LABELS = {
     "base": "C2 rengi (dogru +2 / doji +1 / yanlis 0)",

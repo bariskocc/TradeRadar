@@ -1111,7 +1111,7 @@ async def _p_bias_1h(db: AsyncSession) -> Progress:
     # H2 kovalari (htf +2 / 0) -- kalem karari icin kova basina 25 gerekiyor.
     # Kume raporunkiyle AYNI olmali (scripts/bias_1h_stat.py): seviyesi olan ve motorun CRT
     # saydigi setuplar. On-eleme adaylari sayilirsa sayac esigi rapordan once doldurur.
-    pre = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep", "not_selected")
+    pre = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_doji", "c2_second_sweep", "not_selected")
     htf = func.json_extract(t.c.score_parts, "$.htf")
     buckets = await db.execute(
         select(htf, func.count()).where(t.c.strategy == "1h",
@@ -1480,7 +1480,7 @@ async def _p_smt_segment(db: AsyncSession) -> Progress:
                     note=(note or "taze veride karar bandı boş") + " — 02.10+ yalnız")
 
 
-_RFVG_QUAL_FAIL = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_second_sweep",
+_RFVG_QUAL_FAIL = ("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_doji", "c2_second_sweep",
                    "not_selected", "bias_mismatch", "target_taken", "low_quality", "no_cisd", "score7", "tight_stop")
 
 
@@ -2553,6 +2553,14 @@ ITEMS: list[WatchItem] = [
         trigger="Log'da aynı saniyede FILLED + CLOSED görülürse",
         md="0d. Hayalet işlemler — tespit ve düzeltme (10.09)",
         result="Üç koruma eklendi (kayıt zamanı / C2 zamanı / STALE FILL); izole DB'de 11/11 test geçti.",
+    ),
+    WatchItem(
+        key="c2_doji_4h", status="done", started="02.11",
+        title="4H C2 doji filtresi",
+        trigger="/eliminated c2_doji satırı ≥ 30 çözülmüşte 'Kazanç kesiyor' derse geri aç",
+        md="4H C2 doji filtresi (02.11.2026 — kullanıcı kararı, restart bekliyor)", measure="/eliminated (c2_doji)",
+        result="(02.11) 4H'te kapanmış doji C2 CRT sayılmaz — Journal TP önce %42.5 vs %58.6, gerçek sinyaller 3 TP / 10 SL.",
+        onem=1,
     ),
     WatchItem(
         key="ifvg_fallback", status="done", started="09.09",

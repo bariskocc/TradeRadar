@@ -157,6 +157,7 @@ RADAR_STATE_META = {
     # detect_crt_setup'in setup'a cevirmeden eledigi CRT (setup yoksa en guncel adayin nedeni).
     "c2_wrong_color": {"label": "CRT rejected: C2 wrong color",    "color": "dim", "rank": 11},
     "c1_weak":        {"label": "CRT rejected: C1 body too small", "color": "dim", "rank": 11},
+    "c2_doji":        {"label": "CRT rejected: C2 is a doji", "color": "dim", "rank": 11},
     "c2_second_sweep": {"label": "CRT rejected: C2 swept other side first", "color": "dim", "rank": 11},
     "c2_breakout":    {"label": "CRT rejected: C2 closed outside", "color": "dim", "rank": 11},
     "c1_stale":       {"label": "CRT rejected: C1 extreme taken",  "color": "dim", "rank": 11},

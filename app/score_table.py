@@ -297,6 +297,9 @@ def _filter_rows(strategy: str) -> list[dict]:
         {"group": "CRT yapısı",
          "label": f"C1 gövdesi ≥ aralığın %{ce.C1_MIN_BODY_FRAC * 100:g}'u (doji / kararsız C1 CRT sayılmaz)",
          "stage": "c1_weak", "on": strategy in ce.C1_BODY_FILTER_TFS, "off_note": "Yok — C1 şekline bakılmaz"},
+        {"group": "CRT yapısı",
+         "label": f"C2 doji değil (gövde > aralığın %{ce.DOJI_BODY_RATIO_MAX * 100:g}'u, kapanmış C2)",
+         "stage": "c2_doji", "on": strategy in ce.C2_DOJI_FILTER_TFS, "off_note": "Yalnız skorda (doji puanı)"},
         {"group": "CRT yapısı", "label": "C2 iki ucu da süpürdüyse yön ilk süpürülen uçtan (öbür yön CRT değil)",
          "stage": "c2_second_sweep", "on": True},
         # --- Kapilar (scanner.detect_and_create_waiting sirasi) ---
