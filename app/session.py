@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 NY = ZoneInfo("America/New_York")
@@ -177,18 +178,27 @@ def _as_utc_index(idx) -> pd.DatetimeIndex:
     return idx.tz_convert("UTC")
 
 
+def _local_anchor(local, timeframe: str, open_hour: int):
+    """NY DUVAR SAATINDE (tz'siz) kova basi -> UTC. 02.11 duzeltmesi: eskiden saat kaydirmasi tz'li NY zamaninda
+    yapiliyordu, yani MUTLAK sureydi; DST gecis Pazarinda (02:00 NY) acilis kovasindan 17/18 saat geri gitmek gecisi
+    asiyordu ve kova 1 saat erken (NY 16:00 / CME 17:00) etiketleniyordu (01.11.2026: AUDJPY Pazartesi ilk 4H/1D
+    mumu 21:00 UTC, dogrusu 22:00). Gecis hep olu seansta (Pazar 02:00) oldugu icin hafta ici duvar saati = mutlak sure;
+    yalniz gecis Pazarinin acilis kovasi degisir. Olu seansta belirsiz / olmayan yerel saat icin ambiguous/nonexistent."""
+    shifted = local - pd.Timedelta(hours=open_hour)
+    anchor = shifted.normalize() if timeframe == "1d" else shifted.floor(timeframe)
+    anchor = anchor + pd.Timedelta(hours=open_hour)
+    if isinstance(anchor, pd.DatetimeIndex):
+        amb = np.ones(len(anchor), dtype=bool)
+        return anchor.tz_localize(NY, ambiguous=amb, nonexistent="shift_forward").tz_convert("UTC")
+    return anchor.tz_localize(NY, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
+
+
 def bucket_start(ts, timeframe: str, symbol: str | None = None) -> pd.Timestamp:
     """Verilen anin ait oldugu seans-hizali kovanin baslangici (UTC)."""
     t = pd.Timestamp(ts)
     if t.tzinfo is None:
         t = t.tz_localize("UTC")
-    open_hour = session_hour(symbol)
-    shifted = t.tz_convert(NY) - pd.Timedelta(hours=open_hour)
-    if timeframe == "1d":
-        anchor = shifted.normalize()
-    else:
-        anchor = shifted.floor(timeframe)
-    return (anchor + pd.Timedelta(hours=open_hour)).tz_convert("UTC")
+    return _local_anchor(t.tz_convert(NY).tz_localize(None), timeframe, session_hour(symbol))
 
 
 def resample_from_1h(df1h: pd.DataFrame, timeframe: str,
@@ -208,14 +218,8 @@ def resample_from_1h(df1h: pd.DataFrame, timeframe: str,
     if work.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
-    # NY'ye cevir, anchor saatini gun basi yapacak sekilde kaydir, kovala.
-    shifted = work.index.tz_convert(NY) - pd.Timedelta(hours=open_hour)
-    if timeframe == "1d":
-        anchors = shifted.normalize()
-    else:
-        anchors = shifted.floor(timeframe)
-
-    work["_bucket"] = (anchors + pd.Timedelta(hours=open_hour)).tz_convert("UTC")
+    # NY duvar saatine cevir, anchor saatini gun basi yapacak sekilde kaydir, kovala (02.11: duvar saatinde, DST).
+    work["_bucket"] = _local_anchor(work.index.tz_convert(NY).tz_localize(None), timeframe, open_hour)
     out = work.groupby("_bucket", sort=True).agg(_OHLC_AGG)
     out.index.name = None
     return out
