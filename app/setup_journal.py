@@ -52,6 +52,7 @@ STAGES: list[tuple[str, str]] = [
     ("no_cisd", "No entry levels / MSS"),
     ("low_rr", "RR < 2"),
     ("score7", "Score-7 gate"),
+    ("no_confirm", "No key level / strong CISD"),
     ("tight_stop", "Stop too tight"),
     ("past_tp", "TP before entry"),
     ("near_tp", "Ran 80% to TP before entry"),

@@ -154,6 +154,7 @@ RADAR_STATE_META = {
     "duplicate":      {"label": "Setup already saved",        "color": "purple", "rank": 9},
     "deleted_before": {"label": "Deleted once (not reopened)", "color": "purple", "rank": 9},
     "low_quality":    {"label": "Low quality (score<7)",      "color": "gray",   "rank": 10},
+    "no_confirm":     {"label": "No key level / strong CISD", "color": "gray",   "rank": 10},
     # detect_crt_setup'in setup'a cevirmeden eledigi CRT (setup yoksa en guncel adayin nedeni).
     "c2_wrong_color": {"label": "CRT rejected: C2 wrong color",    "color": "dim", "rank": 11},
     "c1_weak":        {"label": "CRT rejected: C1 body too small", "color": "dim", "rank": 11},
@@ -1858,14 +1859,14 @@ async def api_radar(request: Request):
             + cnt.get("tight_stop", 0) + cnt.get("bias_mismatch", 0)
             + cnt.get("cluster_limit", 0) + cnt.get("same_setup", 0) + cnt.get("liq_unswept", 0)
             + cnt.get("stale", 0) + cnt.get("same_bar_sl", 0) + cnt.get("week_gap", 0)
-            + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0)
+            + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0) + cnt.get("no_confirm", 0)
         ),
         "setups": sum(cnt.get(k, 0) for k in (
             "waiting", "c2_open", "no_cisd", "low_rr", "missed", "stopped", "invalidated",
             # "same_color",  # eski hard filter
             "tight_stop", "bias_mismatch", "cluster_limit", "same_setup", "liq_unswept", "low_quality",
             "has_open", "duplicate", "deleted_before", "corr_open", "stale", "same_bar_sl", "week_gap",
-            "past_sl", "missed_quality",
+            "past_sl", "missed_quality", "no_confirm",
         )),
         "idle": cnt.get("no_setup", 0) + cnt.get("no_data", 0),
     }

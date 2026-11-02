@@ -262,6 +262,9 @@ STRATEGY_CFG = {
         "min_score": MIN_QUALITY_SCORE_4H,
         "cluster_exempt_score": CLUSTER_EXEMPT_MIN_SCORE_4H,
         "score7_requires_cisd_pd": False,
+        # 02.11 (kullanici karari -- AUDJPY 4H #191): key level temasi ya da guclu CISD'den en az biri olmadan sinyal
+        # yok (`no_confirm`), yalniz bu marketlerde. FX ayri izleniyor (IZLEME "4H FX: key level temasi ve guclu CISD").
+        "confirm_required_markets": ("crypto",),
     },
     STRATEGY_1D: {
         "htf": "1d",
@@ -2088,6 +2091,22 @@ def _score7_strict_ok(setup: CRTSetup, cisd, cfg: dict | None) -> bool:
     return c2_ok and model not in ("ifvg", "bpr") and bool(setup.pd_array)
 
 
+def _confirm_ok(setup: CRTSetup, cfg: dict | None) -> bool:
+    """4H yeni tablo (02.11): key level temasi (`key_level`) ya da guclu CISD (`cisd`) kaleminden en az biri olmali.
+
+    Yalniz `confirm_required_markets` marketlerinde (4H kripto). Ikisi de skor kalemi; kapi ayrica "teyitsiz" setupu
+    eler -- skor 6'ya yalniz C2 rengi + 1D bias + fitil + IFVG ile ulasan setup. Journal 4H (21.10+, RR >= 2) kripto
+    teyitsiz %54 / teyitli %76 TP once (81 / 92), iki yarida ayni yonde; FX'te fark yok (%48 / %52, 31 / 31).
+    Kirilimi olmayan (eski tablo) setup gecer."""
+    markets = (cfg or {}).get("confirm_required_markets")
+    parts = setup.score_parts
+    if not markets or (setup.market_type or "").lower() not in markets or not isinstance(parts, dict):
+        return True
+    if "key_level" not in parts:
+        return True
+    return bool(int(parts.get("key_level") or 0) or int(parts.get("cisd") or 0))
+
+
 def _level_features(entry: float, stop_loss: float, df_ltf: pd.DataFrame | None) -> dict:
     """Seviyeye bagli olcumler (yalniz Setup Journal icin; kapi karari bunlari kullanmaz).
 
@@ -3139,6 +3158,22 @@ async def _detect_and_create_waiting_locked(
             getattr(cisd, "entry_model", "cisd"), setup.pd_array,
         )
         await _gated("score7_gate")
+        return None
+
+    # Teyit kapisi (02.11, 4H kripto): key level temasi ya da guclu CISD yoksa sinyal yok.
+    if not _confirm_ok(setup, cfg):
+        if existing_pending is not None:
+            await _delete_pending(session, existing_pending, "no_confirm")
+        _radar("no_confirm", direction=setup.direction,
+                   score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias, rr=planned_rr,
+                   entry=cisd.entry_price, sl=cisd.stop_loss, tp=cisd.take_profit,
+                   smt=setup.smt_pair, pd=setup.pd_array)
+        ck = ("no_confirm",) + _sticky_key(strategy, setup.symbol, setup.direction, setup.purge_time)
+        if ck not in _STICKY_LOGGED:   # her LTF kapanisinda yeniden degerlendiriliyor; satir anahtar basina bir kez
+            _STICKY_LOGGED.add(ck)
+            log.info("SKIPPED (NO CONFIRM): %s %s score=%s key level temasi da guclu CISD de yok.",
+                     setup.symbol, setup.direction, setup.bias_score)
+        await _gated("no_confirm")
         return None
 
     ts_info = _tight_stop_info(cisd.entry_price, cisd.stop_loss, df_ltf, cfg, setup.market_type)

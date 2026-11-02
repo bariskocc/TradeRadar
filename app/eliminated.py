@@ -54,6 +54,7 @@ _GATES = [
     ("week_gap", "CISD hafta kapanışından önce", "Seanslı sembolde CISD hafta sonundan önceydi, Pazartesi diriltilmedi"),
     ("cluster_limit", "Kripto küme limiti", "Aynı yönde çok sayıda kripto işlemi vardı"),
     ("liq_unswept", "Yakın asıl likidite alınmadı", "C2 ucunun hemen ötesindeki (≤ 0.1 ATR) alınmamış swing / eşit dip-tepe süpürülmeden giriş yok (28.10); süpürülmediyse elendi"),
+    ("no_confirm", "Teyit yok", "Key level teması da güçlü CISD de yok — skor yalnız C2 rengi, bias, fitil, IFVG'den (4H kripto, 02.11)"),
     ("same_setup", "Aynı setup başka coinde", "Aynı C1/C2 mumundan aynı yönde başka kripto sembolde sinyal vardı (28.10)"),
     ("corr_open", "Korele paritede açık işlem", "Bağlantılı paritede zaten açık işlem vardı"),
     ("has_open", "Sembolde açık sinyal", "Aynı sembol ve stratejide açık sinyal vardı"),
@@ -164,6 +165,9 @@ def why_text(row: SetupJournal) -> str:
         parts.append(f"RR {row.rr:.2f} < 2")
     elif code in ("low_quality", "score7", "missed_quality") and row.score is not None:
         parts.append(f"skor {row.score:.0f}")
+    elif code == "no_confirm":
+        d = f.get("cisd_disp")
+        parts.append("key level teması yok, CISD " + (f"{float(d):.2f}× ort. mum (< 1)" if d is not None else "zayıf"))
     elif code == "tight_stop" and f.get("stop_range_mult") is not None:
         parts.append(f"stop {float(f['stop_range_mult']):.2f}× LTF mum boyu")
     elif row.deleted_reason:

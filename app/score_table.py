@@ -330,6 +330,11 @@ def _filter_rows(strategy: str) -> list[dict]:
          "label": f"Skor tam {lim['min']} ise: CISD/MSS girişi + key level" + (" + kapalı C2" if c2_wait else ""),
          "stage": "score7", "on": bool(cfg.get("score7_requires_cisd_pd")),
          "off_note": "Kapalı (29.10) — sınırdaki setupları kalite farkı olmadan eliyordu"},
+        {"group": "Kapı",
+         "label": "Key level teması ya da güçlü CISD'den en az biri olmalı (yalnız "
+                  + "/".join(m.upper() if m == "fx" else m for m in (cfg.get("confirm_required_markets") or ())) + ") — 02.11",
+         "stage": "no_confirm", "on": bool(cfg.get("confirm_required_markets")),
+         "off_note": "Yok — iki kalem yalnız skorda"},
         {"group": "Kapı", "label": f"Stop ≥ {stop_mult:g} × ort. LTF mumu", "stage": "tight_stop", "on": True},
         {"group": "Kapı", "label": "CISD hafta kapanışından önce olmamalı (yalnız FX/metal/endeks/petrol)",
          "stage": "week_gap", "on": True},

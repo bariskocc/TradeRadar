@@ -1272,6 +1272,85 @@ async def _p_score_v2_4h(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("yeni tablonun seçtiği 4H setup (RR ≥ 2, çözülmüş)", sn["res"], 60)], note=note)
 
 
+async def _fx4h_rows(db: AsyncSession) -> list[dict]:
+    """02.11: 4H FX yeni tablo satirlari (`score_outcome.collect`), RR >= 2, -4 cezasiz; sembol + yon + levels_at ekli."""
+    from app import score_outcome as so
+    from app import crt_engine as ce
+    t = SetupJournal.__table__
+    res = await db.execute(select(t).where(
+        t.c.strategy == "4h", t.c.market_type != "crypto", t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
+        t.c.first_seen >= ce.SCORE_V2_SINCE,
+    ))
+    out = []
+    for r in res.mappings().all():
+        for x in so.collect([r], strategy="4h"):
+            if x["rr"] >= so.CAND_MIN_RR and int(x["pal"].get("reclaim") or 0) >= 0:
+                out.append(dict(x, sym=r["symbol"], dir=r["direction"], levels_at=r["levels_at"]))
+    return out
+
+
+def _fx_split_progress(yes: list, no: list, yes_lbl: str, no_lbl: str) -> Progress:
+    """Iki grup, taraf basina 30 cozulmus; not satirinda WR farki + tek yonlu p (score_outcome.wr_test)."""
+    from app import score_outcome as so
+    sy, sn = so.stats(yes), so.stats(no)
+
+    def _t(st):
+        return f"{st['w']} TP / {st['l']} SL · WR %{st['wr']:.0f}" if st["res"] else "çözülmüş yok"
+    note = f"{yes_lbl}: {_t(sy)} · {no_lbl}: {_t(sn)}"
+    if sy["res"] and sn["res"]:
+        d, _p_hi, p_lo = so.wr_test(sy, sn)
+        note += f" · fark {d:+.0f} puan (p kötü {p_lo:.2f})"
+    return Progress(bars=[Bar(yes_lbl, sy["res"], 30), Bar(no_lbl, sn["res"], 30)], note=note)
+
+
+async def _p_d1_no_confirm(db: AsyncSession) -> Progress:
+    """02.11 (kullanici): 4H kriptodaki teyit kapisinin 1D karsiligi. 1D eski tabloda: key level = PWH/PWL, PMH/PML,
+    1D FVG/OB kalemi ya da puansiz EQ/SSL (`features.key_level_n` > 0); CISD gucu yalniz olcum (`features.cisd_disp`
+    >= CISD_STRONG_DISP). Kume `score_outcome.collect("1d")` (levels_final) + RR >= 2, -4 cezasiz, cisd_disp olan satir."""
+    from app import score_outcome as so
+    from app import crt_engine as ce
+    from app.setup_journal import analysis_parts
+    t = SetupJournal.__table__
+    res = await db.execute(select(t).where(
+        t.c.strategy == "1d", t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
+    ))
+    none_, some = [], []
+    for r in res.mappings().all():
+        _pal, fe = analysis_parts(r)
+        fe = fe or {}
+        if fe.get("cisd_disp") is None or fe.get("key_level_n") is None:
+            continue
+        for x in so.collect([r], strategy="1d"):
+            if x["rr"] < so.CAND_MIN_RR or int(x["pal"].get("reclaim") or 0) < 0:
+                continue
+            ok = int(fe["key_level_n"]) > 0 or float(fe["cisd_disp"]) >= ce.CISD_STRONG_DISP
+            (some if ok else none_).append(x)
+    return _fx_split_progress(none_, some, "ikisi de yok", "en az biri var")
+
+
+async def _p_fx4h_no_confirm(db: AsyncSession) -> Progress:
+    """02.11 (kullanici, AUDJPY 4H #191): 4H FX'te key level temasi (`key_level`) da guclu CISD (`cisd`) de olmayan
+    setup, en az birini tasiyandan kotu mu? Kriptoda kapi acildi (`no_confirm`), FX'te 21.10+ veri farksizdi (%48 / %52)."""
+    rows = await _fx4h_rows(db)
+    none_ = [x for x in rows if not (int(x["pal"].get("key_level") or 0) or int(x["pal"].get("cisd") or 0))]
+    some = [x for x in rows if int(x["pal"].get("key_level") or 0) or int(x["pal"].get("cisd") or 0)]
+    return _fx_split_progress(none_, some, "ikisi de yok", "en az biri var")
+
+
+async def _p_fx4h_w1_against(db: AsyncSession) -> Progress:
+    """02.11 (kullanici, AUDJPY 4H #191 LONG / 1W BEARISH): 4H FX'te seviye anindaki haftalik bias islem yonune
+    tersken setup daha mi kotu? 1W bias 4H yeni tabloda kalem degil (29.10'da altcoinde ters cikip kalkti)."""
+    from app import score_outcome as so
+    rows = await _fx4h_rows(db)
+    against, other = [], []
+    for x in rows:
+        wb = so.weekly_bias_at(x["sym"], x["levels_at"])
+        if wb is None:
+            continue
+        (against if (x["dir"], wb) in (("LONG", "BEARISH"), ("SHORT", "BULLISH")) else other).append(x)
+    return _fx_split_progress(against, other, "1W ters", "1W ters değil")
+
+
 async def _cand_prog(db: AsyncSession, strategy: str) -> list[tuple[str, int]]:
     """Aday basina karar bandinda AZ olan tarafin cozulmusu (`score_outcome.cand_progress`; rapor ile ayni kume)."""
     from app import score_outcome as so
@@ -2219,6 +2298,36 @@ ITEMS: list[WatchItem] = [
         measure="/izleme sayacı (not satırı) · /skor-tablosu?tf=4h · python scripts/score_item_outcome_stat.py --strategy 4h",
         md="4H yeni skor tablosu canlıda — tuttu mu? (29.10.2026)",
         progress_fn=_p_score_v2_4h,
+    ),
+    WatchItem(
+        key="fx4h_no_confirm", status="open", started="02.11", onem=1,
+        title="4H FX: key level teması da güçlü CISD de olmayan setup daha mı kötü? — kripto filtresi FX'e açılsın mı",
+        trigger="4H FX yeni tablo, RR ≥ 2, −4 cezasız: 'ikisi de yok' ve 'en az biri var' gruplarında 30'ar çözülmüş (TP önce "
+                "mi SL önce mi). Kural: 'ikisi de yok' ≥ 5 puan kötü + iki yarıda aynı yön + tek yönlü p < 0.10 → kriptodaki "
+                "no_confirm kapısını FX'e de aç (kullanıcıya); aksi halde FX'te kapı yok",
+        measure="/izleme sayacı (not satırı) · /eliminated (no_confirm, kripto)",
+        md="4H FX: key level teması da güçlü CISD de olmayan setup daha mı kötü? — kripto filtresi FX'e açılsın mı (02.11.2026)",
+        progress_fn=_p_fx4h_no_confirm,
+    ),
+    WatchItem(
+        key="d1_no_confirm", status="open", started="02.11", onem=2,
+        title="1D: key level da güçlü CISD de olmayan setup daha mı kötü? — 4H kripto teyit kapısı 1D'ye gelsin mi",
+        trigger="1D (levels_final), RR ≥ 2, −4 cezasız: 'ikisi de yok' (key_level_n = 0 ve cisd_disp < 1.0) ve 'en az biri var' "
+                "gruplarında 30'ar çözülmüş (TP önce mi). Kural: 'ikisi de yok' ≥ 5 puan kötü + iki yarıda aynı yön + tek yönlü "
+                "p < 0.10 → 1D'ye teyit kapısı önerisi kullanıcıya; aksi halde değişiklik yok. 1D'de haftada ~1 setup — aylar sürer",
+        measure="/izleme sayacı (not satırı)",
+        md="1D: key level da güçlü CISD de olmayan setup daha mı kötü? — 4H kripto teyit kapısı 1D'ye gelsin mi (02.11.2026)",
+        progress_fn=_p_d1_no_confirm,
+    ),
+    WatchItem(
+        key="fx4h_w1_against", status="open", started="02.11", onem=1,
+        title="4H FX: 1W bias işlem yönüne tersken setup daha mı kötü?",
+        trigger="4H FX yeni tablo, RR ≥ 2, −4 cezasız, haftalık bias seviye anında (bias karnesi): '1W ters' ve '1W ters değil' "
+                "gruplarında 30'ar çözülmüş. Kural: '1W ters' ≥ 5 puan kötü + iki yarıda aynı yön + tek yönlü p < 0.10 → "
+                "FX'e özel 1W kalemi (−1 / −2) ya da filtre önerisi kullanıcıya; aksi halde değişiklik yok",
+        measure="/izleme sayacı (not satırı)",
+        md="4H FX: 1W bias işlem yönüne tersken setup daha mı kötü? (02.11.2026)",
+        progress_fn=_p_fx4h_w1_against,
     ),
     WatchItem(
         key="score_parts_4h", status="done", started="16.09", onem=1,
