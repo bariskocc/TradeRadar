@@ -42,7 +42,10 @@ HTF_DELTA = timedelta(hours=4)
 
 ATR_PERIOD = 14
 BASE_MAX_BARS = 4
-BASE_MAX_RANGE_ATR = 0.8
+# Base mumu = KARARSIZ mum: govde <= BASE_MAX_BODY_ATR x ATR (03.11 kullanici vakasi ETH 15m 03.11 15:00 TSI: govde 0.48 ATR ama
+# fitilli aralik 1.32 ATR, eski 'aralik <= 0.8' kurali bolgeyi kaciriyordu); aralik tavani yalniz asiri fitilli mumu elemek icin.
+BASE_MAX_BODY_ATR = 0.5
+BASE_MAX_RANGE_ATR = 1.5
 LEG_OUT_MIN_ATR = 2.0
 LEG_OUT_BARS = 3
 LEG_BODY_MIN_ATR = 1.0
@@ -174,10 +177,12 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             continue
         up = body > 0
         # base: j-1'den geriye kucuk mumlar
+        def _is_base(i: int) -> bool:
+            return abs(c[i] - o[i]) <= BASE_MAX_BODY_ATR * a and (h[i] - l[i]) <= BASE_MAX_RANGE_ATR * a
         bs = j - 1
-        while bs > 0 and (j - bs) < BASE_MAX_BARS and (h[bs - 1] - l[bs - 1]) <= BASE_MAX_RANGE_ATR * a:
+        while bs > 0 and (j - bs) < BASE_MAX_BARS and _is_base(bs - 1):
             bs -= 1
-        if (h[j - 1] - l[j - 1]) > BASE_MAX_RANGE_ATR * a:
+        if not _is_base(j - 1):
             j += 1
             continue
         base_hi = h[bs:j].max()
