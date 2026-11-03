@@ -1388,6 +1388,11 @@ def _resume_tracking(rec: dict, now) -> None:
     rec["tracked_until"] = now
 
 
+def has_record(strategy: str, symbol: str, direction: str, purge_time) -> bool:
+    """Bu anahtar bellekte var mi (S/D ilk gorus geri doldurmasi icin)."""
+    return _key(strategy, symbol, direction, purge_time) in _CACHE
+
+
 def has_levels(strategy: str, symbol: str, direction: str, purge_time) -> bool:
     """Bu anahtarin (bellekte) dondurulmus seviyeleri var mi? Elenen aday icin tekrar hesaplamamak."""
     try:
