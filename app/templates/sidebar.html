@@ -54,6 +54,14 @@
     @media (min-width: 768px) {
         body.tr-nav-collapsed #tr-sidebar { display: none; }
         body.tr-nav-collapsed main { padding-left: 2.5rem; }
+        /* Masaustunde de liste kutuya sigmayinca TASIYORDU (03.11, kullanici: "alt kisim gri, kesik"): aside = ekran
+           yuksekligi, nav flex item'i icerigin altina kuculmez (min-height: auto) -> nav + kullanici satiri beyaz kutunun
+           disina, gri zemine ciziliyordu. Mobil kuralinin aynisi: nav kucul-kaydir, logo ve kullanici satiri sabit. */
+        #tr-sidebar { height: 100vh; }
+        #tr-sidebar > div { flex-shrink: 0; }
+        #tr-sidebar nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+        #tr-sidebar nav > a { padding-top: .4rem; padding-bottom: .4rem; }
+        #tr-sidebar nav > p { margin-top: .75rem; }
     }
 </style>
 <button id="tr-nav-toggle" type="button" aria-label="Toggle menu" aria-controls="tr-sidebar">
@@ -91,7 +99,7 @@
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/></svg>
             Charts
         </a>
-        <p class="px-3 py-1.5 mt-4 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Signals</p>
+        <p class="px-3 py-1.5 mt-4 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">CRT</p>
         <a href="/open-signals" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
             {% if active_page == 'open_signals' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
@@ -113,7 +121,7 @@
             FX Signals
         </a>
 
-        <p class="px-3 py-1.5 mt-4 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Bot</p>
+        {# "Bot" basligi kaldirildi (03.11, kullanici): Radar / Journal / Eliminated / Score Table / Watchlist CRT altinda #}
         <a href="/radar" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
             {% if active_page == 'radar' and tf not in ('sd', 'sd1h') %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -141,31 +149,28 @@
         </a>
         {# Supply / Demand (03.11, kullanici: "CRT ile karismasin") -- ayni sayfalar, ayri strateji sekmesi. #}
         <p class="px-3 py-1.5 mt-4 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Supply / Demand</p>
-        <a href="/sd-signals" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
-            {% if active_page == 'sd_signals' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+        <a href="/sd?view=signals" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
+            {% if active_page == 'sd' and sd_view == 'signals' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
             S/D Signals
         </a>
-        <a href="/radar?tf=sd" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
-            {% if active_page == 'radar' and tf == 'sd' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
-            S/D 4H Radar
+        <a href="/sd?view=radar" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
+            {% if active_page == 'sd' and sd_view == 'radar' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            S/D Radar
         </a>
-        <a href="/setup-journal?tf=sd" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
-            {% if active_page == 'setup_journal' and tf == 'sd' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+        <a href="/sd?view=journal" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
+            {% if active_page == 'sd' and sd_view == 'journal' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
-            S/D 4H Journal
+            S/D Journal
         </a>
-        <a href="/radar?tf=sd1h" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
-            {% if active_page == 'radar' and tf == 'sd1h' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
-            S/D 1H Radar
+        <a href="/sd-izleme" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
+            {% if active_page == 'sd_watchlist' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+            S/D Watchlist
         </a>
-        <a href="/setup-journal?tf=sd1h" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
-            {% if active_page == 'setup_journal' and tf == 'sd1h' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
-            S/D 1H Journal
-        </a>
+        {# Analytics ve Logs menuden kaldirildi (03.11, kullanici: "hic kullanmiyorum, gerekirse acariz"); /analytics ve /logs route'lari duruyor. #}
+        {% if false %}
         <a href="/analytics" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
             {% if active_page == 'analytics' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
@@ -177,6 +182,7 @@
             Logs
         </a>
 
+        {% endif %}
         <p class="px-3 py-1.5 mt-4 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Trading</p>
         <a href="/paper-trades" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
             {% if active_page == 'paper_trades' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">

@@ -103,7 +103,7 @@ scan_state: dict = {"running": False, "last_run": None, "last_result": None}
 
 def _parse_tf(raw: str | None) -> str:
     v = (raw or "").strip().lower()
-    if v in ("1d", "1h", "1w", "sd", "sd1h"):
+    if v in ("1d", "1h", "1w", "sd", "sd1h", "sd15m"):
         return v
     return "4h"
 
@@ -113,6 +113,8 @@ def _tf_label(tf: str) -> str:
         return "Supply/Demand 4H"
     if tf == "sd1h":
         return "Supply/Demand 1H"
+    if tf == "sd15m":
+        return "Supply/Demand 15m"
     if tf == "1d":
         return "1D-1H"
     if tf == "1h":
@@ -1299,6 +1301,24 @@ async def watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
     return templates.TemplateResponse(request=request, name="watchlist.html", context={
         "user": user,
         "active_page": "watchlist",
+        "page_path": "/izleme", "page_title": "İzleme",
+        "page_sub": "Canlıya alınmış ama etkisi ölçülen konular — tetikleyicisi, ne kadar kaldığı ve sonucu",
+        **data,
+    })
+
+
+@app.get("/sd-izleme", response_class=HTMLResponse)
+async def sd_watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
+    """S/D izleme (03.11, kullanici: "ayri sayfa, karismasin"): yalniz `group="sd"` maddeleri, ayni sablon."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    data = await build_watchlist(db, show_done=request.query_params.get("done") == "1", group="sd")
+    return templates.TemplateResponse(request=request, name="watchlist.html", context={
+        "user": user,
+        "active_page": "sd_watchlist",
+        "page_path": "/sd-izleme", "page_title": "S/D İzleme",
+        "page_sub": "Supply / Demand ölçüm maddeleri — ölçüm modu, sinyal yok; karar bu sayfadan",
         **data,
     })
 
@@ -1484,10 +1504,21 @@ async def setup_journal_page(
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
+    ctx = await _journal_context(db, tf, stage, symbol, days, page, rows_open, min_score)
+    return templates.TemplateResponse(request=request, name="setup_journal.html", context={
+        "user": user,
+        "active_page": "setup_journal",
+        **ctx,
+    })
+
+
+async def _journal_context(db: AsyncSession, tf: str, stage: str, symbol: str, days: int, page: int, rows_open: int,
+                           min_score: str) -> dict:
+    """Setup Journal sayfasinin verisi; /setup-journal ve S/D hub'i (/sd?view=journal) ortak kullanir (03.11)."""
     from app import setup_journal as journal
     from app.models import SetupJournal
 
-    tf = tf if tf in ("all", "4h", "1d", "1w", "1h", "sd", "sd1h") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1w", "1h", "sd", "sd1h", "sd15m") else "all"
     stage = stage if stage in journal.STAGE_LABELS else "all"
     days = days if days in (1, 3, 7, 30, 90) else 7
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
@@ -1496,7 +1527,7 @@ async def setup_journal_page(
         filters.append(SetupJournal.strategy == tf)
     else:
         # Supply / Demand (03.11) CRT'yle karismasin: "All" = uc CRT stratejisi, S/D kendi sekmesinde.
-        filters.append(SetupJournal.strategy.notin_(("sd", "sd1h")))
+        filters.append(SetupJournal.strategy.notin_(("sd", "sd1h", "sd15m")))
     if symbol:
         filters.append(SetupJournal.symbol.ilike(f"%{symbol}%"))
     # Min skor (04.10, kullanici istegi): DETAIL sutununda GORUNEN skor ("score N · ..."). `score`
@@ -1574,9 +1605,7 @@ async def setup_journal_page(
         )).scalars().all()
     filter_qs = urlencode({"tf": tf, "stage": stage, "symbol": symbol, "days": days,
                            "min_score": "" if min_score_i is None else min_score_i, "rows_open": 1})
-    return templates.TemplateResponse(request=request, name="setup_journal.html", context={
-        "user": user,
-        "active_page": "setup_journal",
+    return {
         "rows": rows,
         "show_rows": show_rows,
         "page": page,
@@ -1595,6 +1624,44 @@ async def setup_journal_page(
         "stages": journal.STAGES,
         "stage_labels": journal.STAGE_LABELS,
         "outcome_labels": journal.OUTCOME_LABELS,
+    }
+
+
+@app.get("/sd", response_class=HTMLResponse)
+async def sd_hub_page(request: Request, db: AsyncSession = Depends(get_db)):
+    """S/D tek sayfa (03.11, kullanici): ?view=radar|journal|signals, ?tf=sd|sd1h|sd15m (signals: all). Ayni sablonlar,
+    `sd_hub=True` ile kendi basliklarini/CRT sekmelerini gizleyip `_sd_tabs.html`'i basar."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    q = request.query_params
+    view = q.get("view") or "radar"
+    view = view if view in ("radar", "journal", "signals") else "radar"
+    tf = q.get("tf") or "sd"
+    if view == "signals":
+        tf = tf if tf in ("all", "sd", "sd1h", "sd15m") else "all"
+        from app.sd_signals import build_sd_signals, week_start_tsi
+        date_from = q.get("date_from") if "date_from" in q else week_start_tsi()
+        data = await build_sd_signals(db, tf=tf, status=q.get("status") or "all", market=q.get("market") or "all",
+                                      direction=q.get("direction") or "all", date_from=date_from or "",
+                                      date_to=q.get("date_to") or "", page=int(q.get("page") or 1))
+        base_qs = urlencode({"tf": data["tf"], "market": data["market"], "direction": data["direction"],
+                             "date_from": data["date_from"], "date_to": data["date_to"]})
+        return templates.TemplateResponse(request=request, name="sd_signals.html", context={
+            "user": user, "active_page": "sd", "sd_hub": True, "sd_view": "signals", "base_qs": base_qs,
+            "week_start": week_start_tsi(), **data,
+        })
+    tf = tf if tf in ("sd", "sd1h", "sd15m") else "sd"
+    if view == "journal":
+        ctx = await _journal_context(db, tf, q.get("stage") or "all", q.get("symbol") or "",
+                                     int(q.get("days") or 7), int(q.get("page") or 1), int(q.get("rows_open") or 0),
+                                     q.get("min_score") or "")
+        return templates.TemplateResponse(request=request, name="setup_journal.html", context={
+            "user": user, "active_page": "sd", "sd_hub": True, "sd_view": "journal", **ctx,
+        })
+    return templates.TemplateResponse(request=request, name="radar.html", context={
+        "user": user, "active_page": "sd", "sd_hub": True, "sd_view": "radar",
+        "tf": tf, "tf_label": _tf_label(tf), **_radar_filters(request),
     })
 
 
@@ -1905,7 +1972,7 @@ async def api_radar(request: Request):
     symbols.sort(key=lambda x: (x["score"] is None, -(x["score"] or 0), x["rank"], x["symbol"]))
 
     cnt = _Counter(s["state"] for s in symbols)
-    if tf in ("sd", "sd1h"):
+    if tf.startswith("sd"):
         # S/D sekmesi: canli bolge (olu haric) = setup, kapiyi gecen = "waiting" karsiligi.
         live = sum(n for k, n in cnt.items() if k.startswith("sd_") and k != "sd_dead")
         summary = {

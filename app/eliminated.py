@@ -203,7 +203,7 @@ def _base_filters(tf: str, market: str, days: int, symbol: str) -> list:
     if tf != "all":
         flt.append(t.strategy == tf)
     else:
-        flt.append(t.strategy.notin_(("sd", "sd1h")))   # S/D (03.11) kendi sekmesinde okunur, CRT ozetine karismaz
+        flt.append(t.strategy.notin_(("sd", "sd1h", "sd15m")))   # S/D (03.11) kendi sekmesinde okunur, CRT ozetine karismaz
     if market == "crypto":
         flt.append(t.market_type == "crypto")
     elif market == "fx":

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import httpx
 import pandas as pd
 
-from app.config import BINGX_REST_BASE, H1_5M_ENABLED
+from app.config import BINGX_REST_BASE, H1_5M_ENABLED, SD_5M_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -344,9 +344,12 @@ def get_h1_symbols_flat() -> list[str]:
 
 
 def get_h1_5m_symbols() -> list[str]:
-    """5M WS/bootstrap: CRT + SMT esleri. Hafta sonu BTC+ETH. Strateji kapaliyken bos."""
+    """5M WS/bootstrap: CRT + SMT esleri. Hafta sonu BTC+ETH. Strateji kapaliyken bos.
+
+    03.11: 1H CRT kapaliyken S/D 1H olcumu icin 1D evreni (SD_5M_ENABLED) -- liste 1h ile ayni, olu seans / hafta sonu
+    kurallari `get_d1h_markets`'ten gelir (spot FX'e olu seansta istek atilmaz)."""
     if not H1_5M_ENABLED:
-        return []
+        return list(get_d1h_symbols_flat()) if SD_5M_ENABLED else []
     out: list[str] = []
     seen: set[str] = set()
     for s in _H1_CRT + _H1_SMT_EXTRA:

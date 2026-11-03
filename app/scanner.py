@@ -4518,6 +4518,20 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
         strategies.append(STRATEGY_1W)
     if timeframe in ("1h", "5m") and bingx_symbol in get_h1_symbols_flat():
         strategies.append(STRATEGY_1H)
+    if timeframe == "5m" and not strategies:
+        # S/D 1H olcumu 5m ile (03.11, SD_5M_ENABLED): yalniz Journal izleme (limit + CHOCH kollari); tespit 1h kapanisinda.
+        try:
+            df5 = store.get_df(bingx_symbol, "5m")
+            if df5 is not None and len(df5) >= 2:
+                jb = df5.iloc[-2]
+                for sd_strategy in ("sd1h", "sd15m"):
+                    journal.track_bar(sd_strategy, to_display_symbol(bingx_symbol), jb.name, float(jb["high"]),
+                                      float(jb["low"]), float(jb["close"]))
+                async with async_session() as session:
+                    await _flush_journal_and_potential(session)
+        except Exception:
+            log.exception("sd1h 5m track failed for %s", bingx_symbol)
+        return
     if not strategies:
         return
     try:
@@ -4544,6 +4558,9 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
             if timeframe == "1h":   # 1H bolge (altcoinsiz: 1h akisi yalniz 1D evreninde)
                 from app import sd_scanner
                 sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd1h")
+            if timeframe == "15m" and is_w1_symbol(bingx_symbol):   # 15m bolge (03.11): 1D evreni, 5m izleme
+                from app import sd_scanner
+                sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd15m")
             if ltf_strategy and has_open_symbol(display_symbol, timeframe=ltf_strategy):
                 df_ltf = store.get_df(bingx_symbol, timeframe)
                 if df_ltf is not None and len(df_ltf) >= 2:
@@ -4570,7 +4587,10 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                     journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]),
                                       float(jb["close"]))
                     if timeframe == "15m":
-                        for sd_strategy in ("sd", "sd1h"):
+                        # sd1h: sembolun 5m serisi varsa 15m ile IKINCI kez izlenmez (5m kapanisi yukarida).
+                        df5 = store.get_df(bingx_symbol, "5m")
+                        sd_list = ["sd"] if df5 is not None and len(df5) else ["sd", "sd1h", "sd15m"]
+                        for sd_strategy in sd_list:
                             journal.track_bar(sd_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]),
                                               float(jb["close"]))
             await _flush_journal_and_potential(session)
@@ -4700,6 +4720,7 @@ async def run_scan(
                         elif strategy == STRATEGY_1D:
                             from app import sd_scanner
                             sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd1h")
+                            sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd15m")
 
                         df_ltf = frames.get(cfg["ltf"])
                         display_symbol = to_display_symbol(bingx_symbol)

@@ -72,6 +72,9 @@ W1_SESSION_1H_BARS = int(os.getenv("W1_SESSION_1H_BARS", "4400"))
 # 5m aboneliklerini, bootstrap'i ve 1H tespitini geri acar (scanner.STRATEGY_CFG'deki yorumlu
 # 1H blogu da acilmali).
 H1_5M_ENABLED = False
+# S/D 1H olcumu icin 5m veri (03.11, kullanici): 1D evreni (BTC/ETH + FX/metal/endeks/petrol, 30 sembol) 5m abonelik +
+# bootstrap. 1H CRT stratejisini ACMAZ (get_h1_symbols_flat bos kalir); 5m kapanisi yalniz Journal `sd1h` izlemesine gider.
+SD_5M_ENABLED = os.getenv("SD_5M_ENABLED", "1") == "1"
 
 # Bakim dongusu araligi (saniye): aktif sembol seti degisim kontrolu + gunluk
 # 1D yenileme burada yapilir. Periyodik REST TARAMA YOKTUR; tespit tamamen WS

@@ -124,6 +124,7 @@ class WatchItem:
     pinned: bool = False        # kullanici "en uste" dedi (29.09): kumesinin basinda, onemden bile once
     pin_order: int = 9          # 03.10: sabitlenenler arasi sira (kucuk once); bias en onemli konu -> 0
     continuous: bool = False    # 22.10: tetigi yok, kapanmaz (sistem takibi) -- kartta "%" yerine "sürekli"
+    group: str = "crt"          # 03.11 (kullanici): S/D maddeleri ayri sayfada (/sd-izleme), CRT'yle karismasin
     progress_fn: Optional[Callable[[AsyncSession], Awaitable[Progress]]] = None
 
 
@@ -829,7 +830,7 @@ async def _p_nonsignal_outcomes(db: AsyncSession) -> Progress:
         _n(t.c.outcome == "tp_before_entry"), _n(t.c.outcome == "ambiguous"),
         _n(and_(t.c.outcome == "win", t.c.first_seen >= week_ago)),
         _n(and_(t.c.outcome == "loss", t.c.first_seen >= week_ago)),
-    ).where(or_(t.c.outcome.is_(None), t.c.outcome != "signal"), t.c.strategy.notin_(("sd", "sd1h")),
+    ).where(or_(t.c.outcome.is_(None), t.c.outcome != "signal"), t.c.strategy.notin_(("sd", "sd1h", "sd15m")),
             ).group_by(t.c.strategy, pre))).all()
     agg = {(r[0], bool(r[1])): [int(x or 0) for x in r[2:]] for r in rows}
 
@@ -1734,6 +1735,45 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
 
 async def _p_sd1h_outcomes(db: AsyncSession) -> Progress:
     return await _p_sd_outcomes(db, "sd1h")
+
+
+async def _p_sd_entry_model(db: AsyncSession) -> Progress:
+    """03.11 (kullanici): S/D girisi limit (bugunku) mi, 15m CHOCH + retest (`app/sd_confirm`, entries["sdc"]) mi?
+    Ayni bolge, iki kol. Tablo: strateji x kol -> TP / SL / R/islem; onay kolunda kacirilan / basarisiz sayisi. Tetik: iki kolu da
+    cozulmus (limit win|loss VE onay win|loss|missed|failed) 60 bolge."""
+    from app import sd_confirm
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(t.c.strategy.in_(("sd", "sd1h")), t.c.entry_touched_at.is_not(None)))).mappings().all()
+    acc: dict[tuple, list] = {}
+    pairs = 0
+    for r in rows:
+        try:
+            st = (json.loads(r["entries"] or "{}")).get(sd_confirm.SDC_KEY) or {}
+        except Exception:
+            st = {}
+        lo, co = r["outcome"], st.get("o")
+        if lo in ("win", "loss"):
+            g = acc.setdefault((r["strategy"], "limit"), [0, 0, 0.0, 0])
+            g[0 if lo == "win" else 1] += 1
+            g[2] += float(r["rr"] or 0) if lo == "win" else -1.0
+        if co in ("win", "loss", "missed", "failed"):
+            g = acc.setdefault((r["strategy"], "onay+retest"), [0, 0, 0.0, 0])
+            if co == "win":
+                g[0] += 1
+                g[2] += float(st.get("rr") or 0)
+            elif co == "loss":
+                g[1] += 1
+                g[2] -= 1.0
+            else:
+                g[3] += 1
+        if lo in ("win", "loss") and co in ("win", "loss", "missed", "failed"):
+            pairs += 1
+    table = [["Strateji · giriş", "TP", "SL", "R/işlem", "kaçan/başarısız"]]
+    for (st_, label), (w, l, rs, m) in sorted(acc.items()):
+        n = w + l
+        table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H'}.get(st_, st_) } · {label}", str(w), str(l), f"{rs / n:+.2f}" if n else "-", str(m)])
+    return Progress(bars=[Bar("iki kolu da çözülmüş bölge", pairs, 60)], table=table,
+                    note="aynı bölge: limit = proximal'de dolum; onay = 15m CHOCH sonrası kırılan seviyenin retesti, dar stop (kaçan = retest gelmedi)")
 
 
 async def _p_sd_stop_width(db: AsyncSession) -> Progress:
@@ -2759,7 +2799,7 @@ ITEMS: list[WatchItem] = [
         result="Yapılmadı; gerekçe ölçüme dayanıyor. IFVG-RR koruması sorunun çoğunu zaten çözdü.",
     ),
     WatchItem(
-        key="sd_measure", status="open", started="03.11", onem=1,
+        key="sd_measure", status="open", started="03.11", onem=1, group="sd",
         title="Supply/Demand 4H — ölçüm modu: hangi bölge kazanıyor?",
         trigger="kapıyı geçen (sd_ready) 100 çözülmüş bölge (TP önce mi): WR ≥ %50 ve taze/test edilmiş, devam/dönüş "
                 "dilimlerinde fark ≥ 5 puan okunur → canlı sinyal (hangi dilimle, hangi evrende) kararı kullanıcıya; "
@@ -2769,7 +2809,7 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_outcomes,
     ),
     WatchItem(
-        key="sd1h_measure", status="open", started="03.11", onem=1,
+        key="sd1h_measure", status="open", started="03.11", onem=1, group="sd",
         title="Supply/Demand 1H — ölçüm modu: hangi bölge kazanıyor?",
         trigger="kapıyı geçen (sd_ready) 100 çözülmüş 1H bölgesi (TP önce mi); kural 4H maddesiyle aynı — 4H ile kıyas "
                 "(WR, dilimler) canlıya hangisinin alınacağını söyler",
@@ -2778,7 +2818,16 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd1h_outcomes,
     ),
     WatchItem(
-        key="sd_stop_width", status="open", started="03.11", onem=1,
+        key="sd_entry_model", status="open", started="03.11", onem=1, group="sd",
+        title="S/D giriş: limit mi, 15m CHOCH + retest mi?",
+        trigger="iki kolu da çözülmüş 60 bölge: onay kolu R/işlemde ≥ +0,15 ileride VE kaçırdığı (retest gelmeyen) bölgeler "
+                "hesaba katılınca toplam R de ileride VE iki yarıda aynı yön → canlıda onaylı giriş; aksi halde limit",
+        measure="/sd-signals CONFIRM sütunu · /izleme tablosu (Journal entries.sdc)",
+        md="S/D giriş: limit mi, 15m CHOCH + retest mi? (03.11.2026)",
+        progress_fn=_p_sd_entry_model,
+    ),
+    WatchItem(
+        key="sd_stop_width", status="open", started="03.11", onem=1, group="sd",
         title="S/D stop genişliği — 1,5 ATR taban mı, 1,0 / 2,0 ATR mı?",
         trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR ya da 2,0 ATR gölgesi R/işlemde ≥ +0,15 ileride VE "
                 "iki yarıda aynı yönde → taban o değere; aksi halde 1,5 kalır",
@@ -3012,7 +3061,7 @@ def _group_families(rows: list[dict]) -> list[dict]:
     return out
 
 
-async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
+async def build_watchlist(db: AsyncSession, show_done: bool = False, group: str = "crt") -> dict:
     """Dort kume: aksiyon bekleyen / acik (oncelige gore) / pasif / tamamlanan.
 
     Tamamlananlar 28.09'dan beri HER ZAMAN doner ve sayfanin en altinda KATLANMIS bir baslikta durur
@@ -3021,6 +3070,8 @@ async def build_watchlist(db: AsyncSession, show_done: bool = False) -> dict:
     """
     action, open_items, passive, done_items = [], [], [], []
     for item in ITEMS:
+        if item.group != group:
+            continue
         prog: Optional[Progress] = None
         if item.status == "open" and item.progress_fn is not None:
             try:

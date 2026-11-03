@@ -67,9 +67,9 @@
         <div class="p-3 md:p-6">
 
             <div class="mb-5">
-                <h1 class="text-xl font-bold text-white">İzleme</h1>
+                <h1 class="text-xl font-bold text-white">{{ page_title or 'İzleme' }}</h1>
                 <p class="text-sm text-gray-500 mt-0.5">
-                    Canlıya alınmış ama etkisi ölçülen konular — tetikleyicisi, ne kadar kaldığı ve sonucu
+                    {{ page_sub or 'Canlıya alınmış ama etkisi ölçülen konular — tetikleyicisi, ne kadar kaldığı ve sonucu' }}
                 </p>
             </div>
 
@@ -84,7 +84,7 @@
                 <span class="px-3 py-1.5 rounded-lg text-xs bg-dark-700 text-gray-400 border border-dark-600">
                     Pasif: <strong>{{ counts.passive }}</strong>
                 </span>
-                <a href="/izleme?done=1#tamamlanan" class="px-3 py-1.5 rounded-lg text-xs bg-accent-green/10 text-accent-green border border-accent-green/20 hover:text-white">
+                <a href="{{ page_path or '/izleme' }}?done=1#tamamlanan" class="px-3 py-1.5 rounded-lg text-xs bg-accent-green/10 text-accent-green border border-accent-green/20 hover:text-white">
                     Tamamlanan: <strong>{{ counts.done }}</strong>
                 </a>
             </div>

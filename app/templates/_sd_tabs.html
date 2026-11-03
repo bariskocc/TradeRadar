@@ -1,0 +1,18 @@
+{# S/D sayfalari (03.11, kullanici): menude ayri sayfalar (S/D Signals / Radar / Journal / Watchlist), her sayfanin icinde
+   yalniz TF sekmeleri 4H / 1H / 15m (Signals'ta All da var). Baglam: sd_view, tf. #}
+{% set on_cls = 'bg-accent-blue text-white' %}
+{% set off_cls = 'bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white' %}
+{% set titles = {'radar': ('S/D Radar', 'Live supply / demand zones per symbol — measurement mode, no real orders'),
+                 'journal': ('S/D Journal', 'Every zone the engine saw: gates, levels and what price did afterwards'),
+                 'signals': ('S/D Signals', 'Zones that passed every gate — waiting / filled / closed, flat TP/SL; no real orders, no Telegram')} %}
+<div class="mb-5">
+    <h1 class="text-xl font-bold text-white">{{ titles[sd_view][0] }}</h1>
+    <p class="text-sm text-gray-500 mt-0.5">{{ titles[sd_view][1] }}</p>
+    <div class="flex items-center gap-1 mt-3">
+        {% set tfs = [('sd', '4H'), ('sd1h', '1H'), ('sd15m', '15m')] %}
+        {% if sd_view == 'signals' %}{% set tfs = tfs + [('all', 'All')] %}{% endif %}
+        {% for key, lbl in tfs %}
+        <a href="/sd?view={{ sd_view }}&tf={{ key }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == key else off_cls }}">{{ lbl }}</a>
+        {% endfor %}
+    </div>
+</div>

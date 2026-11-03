@@ -15,20 +15,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import SetupJournal
+from app import sd_confirm
 
 log = logging.getLogger(__name__)
 
 TSI = timezone(timedelta(hours=3))
 PAGE_SIZE = 50
-STRATEGIES = ("sd", "sd1h")
-TF_LABELS = {"sd": "4H", "sd1h": "1H"}          # 03.11 (kullanici): sutunda yalniz TF
+STRATEGIES = ("sd", "sd1h", "sd15m")
+TF_LABELS = {"sd": "4H", "sd1h": "1H", "sd15m": "15m"}   # 03.11 (kullanici): sutunda yalniz TF
 # Bolge tipi acik adiyla (kullanici: "DBD'nin ne oldugunu anlamiyorum"): leg-in · Base · leg-out, devam / donus.
 ZONE_NAMES = {
     "RBR": "Rally · Base · Rally (continuation)", "DBR": "Drop · Base · Rally (reversal)",
     "DBD": "Drop · Base · Drop (continuation)", "RBD": "Rally · Base · Drop (reversal)",
     "?BR": "Base · Rally (weak leg-in)", "?BD": "Base · Drop (weak leg-in)",
 }
-TF_FILTERS = [("all", "All"), ("sd", "S/D 4H"), ("sd1h", "S/D 1H")]
+TF_FILTERS = [("all", "All"), ("sd", "S/D 4H"), ("sd1h", "S/D 1H"), ("sd15m", "S/D 15m")]
 MARKET_FILTERS = [("all", "All"), ("crypto", "Crypto"), ("fx", "FX")]
 DIRECTION_FILTERS = [("all", "All"), ("long", "Long"), ("short", "Short")]
 STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), ("closed", "Closed")]
@@ -127,11 +128,25 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
         final_r = 0.0
     touches = f.get("touches")
     zt = r.model or f.get("zone_type") or "?"
+    try:
+        sdc = (json.loads(r.entries) if r.entries else {}).get(sd_confirm.SDC_KEY) or {}
+    except Exception:
+        sdc = {}
+    c_o = sdc.get("o")
+    c_live = None
+    if c_o == "filled" and price is not None and sdc.get("e") and sdc.get("sl"):
+        c_risk = abs(float(sdc["e"]) - float(sdc["sl"]))
+        if c_risk > 0:
+            c_live = round(((price - float(sdc["e"])) if long else (float(sdc["e"]) - price)) / c_risk, 2)
     return {
         "symbol": r.symbol, "market": r.market_type, "tf": r.strategy, "tf_label": TF_LABELS.get(r.strategy, r.strategy),
         "direction": r.direction, "zone_type": zt,
         "zone_label": ("Demand" if long else "Supply") + " · " + ZONE_NAMES.get(zt, zt),
         "entry_s": _fmt_p(entry), "sl_s": _fmt_p(sl), "tp_s": _fmt_p(tp),
+        "confirm_o": c_o, "confirm_label": sd_confirm.LABELS.get(c_o, "—") if c_o else None,
+        "confirm_e": _fmt_p(sdc.get("e")) if sdc.get("e") else None, "confirm_sl": _fmt_p(sdc.get("sl")) if sdc.get("sl") else None,
+        "confirm_rr": sdc.get("rr"), "confirm_r": sd_confirm.final_r(sdc) if c_o else None, "confirm_live": c_live,
+        "confirm_at": _fmt_tsi(datetime.fromisoformat(sdc["ct"])) if sdc.get("ct") else None,
         "setup_at": _fmt_tsi(r.purge_time), "retest_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
         "_sort": (-(int(r.score) if r.score is not None else -1), -(r.best_stage_at.timestamp() if r.best_stage_at else 0)),
         "fresh": None if touches is None else int(touches) == 0,
@@ -191,8 +206,17 @@ async def build_sd_signals(
     for v in views:
         counts["all"] += 1
         counts[v["tab"]] += 1
-        s = summary.setdefault(v["tf"], {"label": v["tf_label"], "n": 0, "tp": 0, "sl": 0, "r": 0.0, "open": 0})
+        s = summary.setdefault(v["tf"], {"label": v["tf_label"], "n": 0, "tp": 0, "sl": 0, "r": 0.0, "open": 0,
+                                         "c_tp": 0, "c_sl": 0, "c_r": 0.0, "c_missed": 0})
         s["n"] += 1
+        if v["confirm_o"] == "win":
+            s["c_tp"] += 1
+            s["c_r"] += float(v["confirm_rr"] or 0)
+        elif v["confirm_o"] == "loss":
+            s["c_sl"] += 1
+            s["c_r"] -= 1.0
+        elif v["confirm_o"] in ("missed", "failed"):
+            s["c_missed"] += 1
         if v["outcome"] == "win":
             s["tp"] += 1
             s["r"] += float(v["rr"] or 0)
@@ -205,6 +229,7 @@ async def build_sd_signals(
         n = s["tp"] + s["sl"]
         s["wr"] = round(100 * s["tp"] / n) if n else None
         s["r"] = round(s["r"], 2)
+        s["c_r"] = round(s["c_r"], 2)
     if status != "all":
         views = [v for v in views if v["tab"] == status]
     pages = max(1, (len(views) + PAGE_SIZE - 1) // PAGE_SIZE)

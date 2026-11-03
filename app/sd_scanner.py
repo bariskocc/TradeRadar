@@ -28,9 +28,12 @@ MEASURE_ONLY = True   # sinyal acilmaz; canliya gecis ayri karar (kullanici)
 # Iki olcum stratejisi (03.11, kullanici): 4H bolge (tum 4H evreni) ve 1H bolge (altcoin yok -- 1h akisi yalniz BTC/ETH +
 # FX/metal/endeks/petrol'de var). Ikisi de 15m ile izlenir: 5m akisi 28.09'dan beri kapali, olcum icin 15m yeterli.
 SD_CFG = {
-    "sd":   {"htf": "4h", "delta": sde.HTF_DELTA},
-    "sd1h": {"htf": "1h", "delta": timedelta(hours=1)},
+    "sd":    {"htf": "4h", "delta": sde.HTF_DELTA},
+    "sd1h":  {"htf": "1h", "delta": timedelta(hours=1)},
+    # 03.11 (kullanici): 15m bolgeleri, yalniz set-and-forget (CHOCH kolu yok, izleme maddesi yok), 1D evreni, 5m izleme.
+    "sd15m": {"htf": "15m", "delta": timedelta(minutes=15)},
 }
+ALL = tuple(SD_CFG)
 
 # Radar siralamasi icin kapi onceligi (yuksek = daha ileri).
 _STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_ready": 5}
@@ -43,7 +46,7 @@ def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
         return "sd_bias"
     if plan.tp is None:
         return "sd_no_target"
-    if plan.dist_r is not None and plan.dist_r > sde.MAX_RR:
+    if plan.dist_r is not None and plan.dist_r > sde.MAX_DIST_R:
         # 03.11 (kullanici: "fresh bolgeye TP yazmis"): giris fiyattan MAX_RR x risk'ten uzaksa 4R'lik TP fiyatin bu
         # tarafinda kalir -- Journal ilk mumda "TP before entry" sayiyordu (BTC 1H SHORT 8 ATR ustte, stop 0.3 ATR).
         # Boyle bolgeye emir de konmaz; seviye yazilmaz, izlenmez.
@@ -100,13 +103,15 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
             # bolge olusumundan sonra goruluyor; Journal yalniz donmadan SONRA kapanan 15m mumlarini izledigi icin aradaki
             # dolum/TP kayboluyordu. Yeni satirda seviyeler olusum anina (formed mumunun kapanisi) tarihlenir ve store'daki
             # kapanmis 15m mumlari o andan bugune yeniden oynatilir -- 15m gecmisi olusumu kapsiyorsa.
-            df15 = frames.get("15m")
+            # Izleme serisi: sd1h'te 5m varsa 5m (SD_5M_ENABLED), yoksa 15m.
+            df5 = frames.get("5m") if strategy in ("sd1h", "sd15m") else None
+            df15, ltf_delta = (df5, timedelta(minutes=5)) if df5 is not None and len(df5) else (frames.get("15m"), timedelta(minutes=15))
             if has_levels and not journal.has_record(strategy, display, z.direction, z.base_start) \
                     and df15 is not None and len(df15) and df15.index[0] <= z.formed_time + cfg["delta"]:
                 # Ilk gorus geri doldurmasi: olusumdan bugune HTF mumu mumu (o anki engeller / bias / uzaklik) yuruyup
                 # kapanmis 15m mumlarini oynat -- motor surekli calissaydi ne gorecekse o. Bugunku degerlendirme en sonda.
                 _backfill_zone(strategy, display, market, z, closed, df15, d1 if (d1 := frames.get("1d")) is not None else None,
-                               cfg["delta"], now, weekly)
+                               cfg["delta"], now, weekly, ltf_delta)
             journal.note(
                 strategy, display, market, stage,
                 direction=z.direction, purge_time=z.base_start, crt_bar_time=z.base_start,
@@ -148,7 +153,8 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
         return None
 
 
-def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now, weekly) -> None:
+def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now, weekly,
+                   ltf_delta=timedelta(minutes=15)) -> None:
     """Yeni gorulen bolge icin gecmisi yeniden oynat: her HTF kapanisinda o anki plan/kapi ile `journal.note` (dolum oncesi
     TP guncellemesi dahil), aradaki kapanmis 15m mumlariyla `track_bar`. Bugunun kapanisi dahil degil (cagiran yazar)."""
     now_ts = _ts(now, closed.index[0])
@@ -179,7 +185,7 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
             model=twin.zone_type, parts=parts_at, features=feats_at, now=t_close,
         )
         lo = prev_close if prev_close is not None else t
-        bars = df15[(df15.index + timedelta(minutes=15) > lo) & (df15.index + timedelta(minutes=15) <= t + delta)]
+        bars = df15[(df15.index + ltf_delta > lo) & (df15.index + ltf_delta <= t + delta)]
         for ts, b in bars.iterrows():
             journal.track_bar(strategy, display, ts, float(b["high"]), float(b["low"]), float(b["close"]))
         prev_close = t + delta

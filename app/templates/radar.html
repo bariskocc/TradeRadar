@@ -5,23 +5,27 @@
 {% block body %}
 <div class="flex h-full">
 
-    {% set active_page = 'radar' %}
+    {% set active_page = 'sd' if sd_hub else 'radar' %}
     {% include 'sidebar.html' %}
 
     <!-- Main Content -->
     <main class="flex-1 overflow-auto">
         <div class="p-3 md:p-6 max-w-none">
             <!-- Header -->
+            {% if sd_hub %}{% include '_sd_tabs.html' %}{% endif %}
             <div class="mb-6 flex items-start justify-between">
                 <div>
+                    {% if not sd_hub %}
                     <h1 class="text-xl font-bold text-white">Radar</h1>
                     <p class="text-sm text-gray-500 mt-0.5">Live view of what the system sees per symbol — {{ tf_label }}</p>
+                    {% endif %}
 {# Filtre linkleri (01.11): her link diger secimleri tasir; sayfa URL'si paylasilabilir. #}
 {% macro rq(tf_=tf, market_=market, dir_=direction, setups_=setups_only) -%}
-/radar?tf={{ tf_ }}{% if market_ != 'all' %}&market={{ market_ }}{% endif %}{% if dir_ != 'all' %}&dir={{ dir_ }}{% endif %}{% if setups_ %}&setups=1{% endif %}
+{{ '/sd?view=radar&' if sd_hub else '/radar?' }}tf={{ tf_ }}{% if market_ != 'all' %}&market={{ market_ }}{% endif %}{% if dir_ != 'all' %}&dir={{ dir_ }}{% endif %}{% if setups_ %}&setups=1{% endif %}
 {%- endmacro %}
 {% set on_cls = 'bg-accent-blue text-white' %}
 {% set off_cls = 'bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white' %}
+                    {% if not sd_hub %}
                     <div class="flex items-center gap-1 mt-3">
                         <a href="{{ rq(tf_='4h') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '4h' else off_cls }}">4H-15M</a>
                         <a href="{{ rq(tf_='1d') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '1d' else off_cls }}">1D-1H</a>
@@ -29,8 +33,10 @@
                         {# Supply / Demand (03.11): CRT'den ayri strateji, kendi sekmesi; olcum modu (sinyal acmaz). #}
                         <span class="w-px h-5 bg-dark-600 mx-1"></span>
                         <a href="{{ rq(tf_='sd') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd' else off_cls }}" title="Supply / Demand zones on 4H — measurement mode, no signals yet">S/D 4H</a>
-                        <a href="{{ rq(tf_='sd1h') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd1h' else off_cls }}" title="Supply / Demand zones on 1H (no altcoins) — measurement mode, tracked on 15m">S/D 1H</a>
+                        <a href="{{ rq(tf_='sd1h') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd1h' else off_cls }}" title="Supply / Demand zones on 1H (no altcoins) — measurement mode, tracked on 5m">S/D 1H</a>
+                        <a href="{{ rq(tf_='sd15m') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd15m' else off_cls }}" title="Supply / Demand zones on 15m (no altcoins) — set-and-forget only, tracked on 5m">S/D 15m</a>
                     </div>
+                    {% endif %}
                     <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
                         <div class="flex items-center gap-1">
                             <span class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mr-1">Market</span>

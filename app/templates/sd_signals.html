@@ -20,7 +20,10 @@
 
     <main class="flex-1 overflow-auto">
         <div class="p-3 md:p-6">
-            <div class="mb-5">
+            {% set sb = '/sd' if sd_hub else '/sd-signals' %}
+            {% set sq = 'view=signals&' if sd_hub else '' %}
+            {% if sd_hub %}{% include '_sd_tabs.html' %}{% endif %}
+            <div class="mb-5 {% if sd_hub %}hidden{% endif %}">
                 <h1 class="text-xl font-bold text-white">S/D Signals</h1>
                 <p class="text-sm text-gray-500 mt-0.5">Supply / Demand zones that passed every gate — measurement mode: no real order, no Telegram. Entry = proximal edge, flat TP/SL tracked on 15m.</p>
             </div>
@@ -40,6 +43,10 @@
                         <span class="text-xs"><span class="text-green-400 font-semibold">{{ s.tp }} TP</span> · <span class="text-red-400 font-semibold">{{ s.sl }} SL</span>{% if s.wr is not none %} · WR {{ s.wr }}%{% endif %}</span>
                         <span class="text-xs text-gray-500">{{ s.open }} open</span>
                     </div>
+                    <div class="mt-1 text-xs text-gray-400" title="Same zones, entry after a 15m CHOCH and retest of the broken level (measurement only)">
+                        Confirm variant: <span class="font-semibold {% if s.c_r > 0 %}text-green-400{% elif s.c_r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ '%+.2f'|format(s.c_r) }}R</span>
+                        · {{ s.c_tp }} TP · {{ s.c_sl }} SL · {{ s.c_missed }} missed/failed
+                    </div>
                 </div>
                 {% else %}
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-4 text-sm text-gray-500 md:col-span-2">No S/D signal in this period yet — zones appear after the first 4H / 1H close that passes every gate.</div>
@@ -48,7 +55,7 @@
 
             <!-- Filtreler -->
             {% set n_filters = (1 if tf != 'all' else 0) + (1 if market != 'all' else 0) + (1 if direction != 'all' else 0) + (1 if date_to else 0) %}
-            <form method="GET" action="/sd-signals" class="mb-5 p-3 md:p-4 bg-dark-800 rounded-xl border border-dark-600">
+            <form method="GET" action="{{ sb }}" class="mb-5 p-3 md:p-4 bg-dark-800 rounded-xl border border-dark-600">
                 <button type="button" id="sd-filters-toggle" aria-expanded="false" aria-controls="sd-filters-body"
                     class="md:hidden w-full flex items-center justify-between gap-2 text-sm text-gray-300">
                     <span class="flex items-center gap-2">
@@ -60,7 +67,8 @@
                 </button>
                 <div id="sd-filters-body" class="hidden md:block mt-3 md:mt-0">
                 <div class="flex flex-wrap items-end gap-3">
-                    <div>
+                    {% if sd_hub %}<input type="hidden" name="view" value="signals">{% endif %}
+                    <div {% if sd_hub %}class="hidden"{% endif %}>
                         <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
                         <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
                             {% for key, label in tf_filters %}<option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
@@ -88,8 +96,8 @@
                     </div>
                     <input type="hidden" name="status" value="{{ status }}">
                     <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-accent-blue/80 text-white text-sm font-medium rounded-lg transition">Filter</button>
-                    <a href="/sd-signals?tf={{ tf }}&market={{ market }}&direction={{ direction }}&status={{ status }}&date_from=" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">All dates</a>
-                    <a href="/sd-signals" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Reset</a>
+                    <a href="{{ sb }}?{{ sq }}tf={{ tf }}&market={{ market }}&direction={{ direction }}&status={{ status }}&date_from=" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">All dates</a>
+                    <a href="{{ sb }}{% if sd_hub %}?view=signals&tf={{ tf }}{% endif %}" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Reset</a>
                 </div>
                 </div>
             </form>
@@ -109,7 +117,7 @@
             <!-- Durum sekmeleri -->
             <div class="mb-4 flex flex-wrap items-center gap-2">
                 {% for key, label in status_filters %}
-                <a href="/sd-signals?{{ base_qs }}&status={{ key }}"
+                <a href="{{ sb }}?{{ sq }}{{ base_qs }}&status={{ key }}"
                    class="px-3 py-1.5 rounded-lg text-sm transition {% if status == key %}bg-accent-blue/15 text-accent-blue font-medium{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600{% endif %}">
                     {{ label }} <span class="text-xs text-gray-500">{{ counts[key] }}</span>
                 </a>
@@ -133,6 +141,7 @@
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first">RESULT</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Alternative entry (measured in parallel): after the zone is touched, wait for a 15m CHOCH (close beyond the last lower-high / higher-low), enter on the retest of that level, SL just beyond the pullback low/high">CONFIRM (15m)</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Open time of the first base candle of the zone (TF candle, TSİ)">SETUP</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="The 15m candle that touched the entry (TSİ)">RETEST</th>
                         </tr>
@@ -174,11 +183,19 @@
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ COLOR[r.result_color] }}">{{ r.result_label }}</span>
                                 {% if r.closed_at %}<div class="text-[10px] text-gray-500 mt-0.5">{{ r.closed_at }}{% if r.hours is not none %} · {{ r.hours }}h{% endif %}</div>{% endif %}
                             </td>
+                            <td class="px-2 py-2 text-xs whitespace-nowrap">
+                                {% if r.confirm_o %}
+                                <span class="{% if r.confirm_o == 'win' %}text-green-400 font-bold{% elif r.confirm_o == 'loss' %}text-red-400 font-bold{% elif r.confirm_o in ('filled', 'wait_retest') %}text-accent-blue{% else %}text-gray-400{% endif %}">{{ r.confirm_label }}</span>
+                                {% if r.confirm_live is not none %}<span class="ml-1 font-mono {% if r.confirm_live > 0 %}text-green-400{% elif r.confirm_live < 0 %}text-red-400{% endif %}">{{ '%+.2f'|format(r.confirm_live) }}R</span>
+                                {% elif r.confirm_r is not none and r.confirm_o in ('win', 'loss') %}<span class="ml-1 font-mono">{{ '%+.2f'|format(r.confirm_r) }}R</span>{% endif %}
+                                {% if r.confirm_e %}<div class="text-[10px] text-gray-500 mt-0.5 font-mono" title="Confirm entry / SL · RR">{{ r.confirm_e }} / {{ r.confirm_sl }}{% if r.confirm_rr %} · {{ '%.2f'|format(r.confirm_rr) }}{% endif %}{% if r.confirm_at %} · {{ r.confirm_at }}{% endif %}</div>{% endif %}
+                                {% else %}<span class="text-gray-600">—</span>{% endif %}
+                            </td>
                             <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="Zone qualified {{ r.ready_at }}">{{ r.setup_at }}</td>
                             <td class="px-2 py-2 text-xs whitespace-nowrap">{% if r.retest_at %}<span class="text-gray-300">{{ r.retest_at }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="13" class="px-3 py-8 text-center text-sm text-gray-600">No S/D signals match these filters</td></tr>
+                        <tr><td colspan="14" class="px-3 py-8 text-center text-sm text-gray-600">No S/D signals match these filters</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -186,9 +203,9 @@
                 {% if pages > 1 %}
                 <div class="px-4 py-3 border-t border-dark-600 flex items-center justify-between text-sm">
                     {% set qs = base_qs ~ '&status=' ~ status %}
-                    {% if page > 1 %}<a href="/sd-signals?{{ qs }}&page={{ page - 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">← Previous</a>{% else %}<span></span>{% endif %}
+                    {% if page > 1 %}<a href="{{ sb }}?{{ sq }}{{ qs }}&page={{ page - 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">← Previous</a>{% else %}<span></span>{% endif %}
                     <span class="text-gray-500 text-xs">page {{ page }} / {{ pages }}</span>
-                    {% if page < pages %}<a href="/sd-signals?{{ qs }}&page={{ page + 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">Next →</a>{% else %}<span></span>{% endif %}
+                    {% if page < pages %}<a href="{{ sb }}?{{ sq }}{{ qs }}&page={{ page + 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">Next →</a>{% else %}<span></span>{% endif %}
                 </div>
                 {% endif %}
             </div>
@@ -200,6 +217,9 @@
                 profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days). Entry and SL are frozen when the zone first
                 qualifies; the target follows the nearest obstacle until the fill. <b>Setup</b> = open time of the zone's first base candle
                 (4H or 1H candle); <b>Retest</b> = the 15m candle that touched the entry. Rows are sorted by score.
+                <b>Confirm (15m)</b> is the alternative entry measured on the same zone: after the touch, wait for a 15m CHOCH (close beyond the
+                last lower-high / higher-low of the move into the zone), enter on the retest of that level with the stop just beyond the
+                pullback extreme — "Missed" = price left without a retest, "Zone failed" = the zone's stop was hit before any CHOCH.
             </p>
         </div>
     </main>

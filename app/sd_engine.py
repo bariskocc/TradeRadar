@@ -53,12 +53,14 @@ MIN_RISK_ATR = 1.5           # stop mesafesi en az bu kadar ATR (bolge dar olsa 
 TOUCH_EXIT_ATR = 0.5         # dokunus kosusu: fiyat proximal'den bu kadar uzaklasinca biter
 MAX_TOUCHES = 1              # bu kadar dokunusa kadar canli; fazlasi olu
 LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
-MAX_AGE_BARS = 120           # daha eski base'ler Journal'a yazilmaz (ilk calismada eski bolge seli olmasin)
+MAX_AGE_BARS = 60            # daha eski base'ler Journal'a yazilmaz (03.11 kullanici: 120 FX'te ~4 hafta, 12.10'lu bolgeler listedeydi -> 60)
 TARGET_SWING_K = 2           # hedef swing: 5'li fraktal
 MIN_RR = 2.0
 # 03.11 (kullanici: "40R sacma, 3-4R'den fazlasi olmasin"): yapisal hedef (en yakin karsi bolge YA DA swing) MAX_RR'yi asarsa
 # TP = giris + MAX_RR x risk (`target_kind` "cap"); yapisal RR `features.rr_struct`'ta olculmeye devam eder.
 MAX_RR = 4.0
+# Girise uzaklik kapisi (`sd_far`): 03.11 kullanici -- 4R, 1.5 ATR stopla 6 ATR uzagi kabul ediyordu; fiyat oraya gunlerce donmuyor.
+MAX_DIST_R = 3.0
 # Hedef fiyatin hemen dibindeki swing olmasin (03.11 canli: BTC 1H SHORT hedefi son kapanisin %0.04 altindaki swing low'du, ilk
 # 15m mumunda 'TP before entry' yazildi): aday engel son kapanistan en az bu kadar ATR otede olmali.
 TARGET_MIN_BEYOND_ATR = 0.5

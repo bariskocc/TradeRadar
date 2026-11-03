@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
+
+from app.config import SD_5M_ENABLED
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -101,8 +103,10 @@ TRACKING = ("pending", "filled")
 HORIZON = {"4h": timedelta(hours=48), "1d": timedelta(hours=120), "1h": timedelta(hours=12),
            "1w": timedelta(days=9),
            # S/D (03.11): bolge gunlerce bekler; KEEP'in altinda kalsin (restart'ta yuklenen pencere).
-           "sd": timedelta(days=9), "sd1h": timedelta(days=4)}
-LTF_OF = {"4h": "15m", "1d": "1h", "1h": "5m", "1w": "4h", "sd": "15m", "sd1h": "15m"}
+           "sd": timedelta(days=9), "sd1h": timedelta(days=4), "sd15m": timedelta(days=1)}
+# sd1h (03.11): 5m akisi acikken 5m ile izlenir (restart telafisi de 5m serisinden), yoksa 15m.
+LTF_OF = {"4h": "15m", "1d": "1h", "1h": "5m", "1w": "4h", "sd": "15m", "sd1h": "5m" if SD_5M_ENABLED else "15m",
+          "sd15m": "5m" if SD_5M_ENABLED else "15m"}
 KEEP = timedelta(days=10)
 # Yalnizca last_seen ilerlediyse bu kadar bekleyip yaz (her 15 dk'da her satiri yazmamak icin).
 _TOUCH_EVERY = timedelta(minutes=30)
@@ -115,7 +119,7 @@ _TOUCH_EVERY = timedelta(minutes=30)
 SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5),
              "1w": (1.0, 0.75, 0.5),
              # S/D (03.11, kullanici): ana stop 1.5 ATR taban; k=0.667 ~ 1.0 ATR, k=1.333 ~ 2.0 ATR (taban bagladiginda)
-             "sd": (1.0, 0.667, 1.333), "sd1h": (1.0, 0.667, 1.333)}
+             "sd": (1.0, 0.667, 1.333), "sd1h": (1.0, 0.667, 1.333), "sd15m": (1.0, 0.667, 1.333)}
 # JSON'a yazilirken/okunurken datetime'a cevrilecek alanlar. Golgede "e" dolum ani; entry
 # varyantlarinda "e" ENTRY FIYATI olduğu icin dolum ani ayri alanda ("t") tutulur.
 _SHADOW_TS = ("e", "at", "until", "pa")
@@ -190,7 +194,7 @@ BREAK_SEED = "_brk"
 # siklikta olusmadigi da olcumun parcasi. Motor KULLANMAZ. Rapor `scripts/retest_ifvg_stat.py`.
 RFVG_STATE = "_rfvg"
 RFVG_VARIANTS = ("rfvg_near", "rfvg_mid", "rfvg_far")
-_STATE_KEYS = (CFVG_STATE, RFVG_STATE)
+_STATE_KEYS = (CFVG_STATE, RFVG_STATE, "sdc")   # "sdc": S/D LTF onay varyanti (app/sd_confirm.py)
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -264,7 +268,9 @@ def _entries_init(rec: dict) -> dict | None:
 
 
 _LTF_DELTA = {"4h": timedelta(minutes=15), "1d": timedelta(hours=1), "1h": timedelta(minutes=5),
-              "1w": timedelta(hours=4), "sd": timedelta(minutes=15), "sd1h": timedelta(minutes=15)}
+              "1w": timedelta(hours=4), "sd": timedelta(minutes=15),
+              "sd1h": timedelta(minutes=5) if SD_5M_ENABLED else timedelta(minutes=15),
+              "sd15m": timedelta(minutes=5) if SD_5M_ENABLED else timedelta(minutes=15)}
 
 
 def _bar_before_levels(rec: dict, bar_ts) -> bool:
@@ -933,7 +939,7 @@ C2_REFREEZE_STRATEGIES = frozenset({"4h"})
 FINAL_REFREEZE_STRATEGIES = frozenset({"1d", "1w"})
 # S/D (03.11, kullanici: XAUUSD hedefi): bekleyen (dolmamis) bolgenin TP'si her HTF kapanisinda "fiyatin otesindeki en yakin
 # engel"e guncellenir; giris/SL donuk kalir, dolumda TP de donar. Golge RR'leri ve dolum oncesi kosu yolu TP ile birlikte yenilenir.
-SD_TP_UPDATE_STRATEGIES = frozenset({"sd", "sd1h"})
+SD_TP_UPDATE_STRATEGIES = frozenset({"sd", "sd1h", "sd15m"})
 # S/D sonucu DOLUM ister (03.11, kullanici: "entry'e gelmeden TP olduysa win sayilmaz" -- CRT'deki 24.10 kuralindan FARKLI):
 # fiyat girise dokunmadan TP'ye giderse satir kapanmaz, bolge beklemeye devam eder (TP bir sonraki HTF kapanisinda yenilenir);
 # sonuc yalniz win / loss (dolumdan sonra) ya da ufukta no_touch.
@@ -1503,6 +1509,12 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float, close
             if _pre_c2_active(rec, bar_ts):
                 _apply_pre_c2(rec, bar_ts, float(high), float(low))
                 touched = True
+            if strategy in SD_FILL_REQUIRED_STRATEGIES and rec.get("entry_touched_at") is not None:
+                # S/D LTF onay + retest varyanti (03.11): dokunustan sonra 15m CHOCH, kirilan seviyenin retesti.
+                from app import sd_confirm
+                if sd_confirm.step(rec, bar_ts, float(high), float(low),
+                                   float(close) if close is not None else float(high), _horizon(rec)):
+                    touched = True
             if touched:
                 _DIRTY.add(key)
     except Exception:
