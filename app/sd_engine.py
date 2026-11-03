@@ -6,17 +6,21 @@ Journal'la olcmek, canli sinyale veriyle gecmek.
 
 Bolge tanimi (uc parca):
   leg-in  -> base'e gelen hamle (LEG_IN_BARS mumda >= LEG_IN_MIN_ATR; yoksa yon "?")
-  base    -> 1..BASE_MAX_BARS kucuk mum (araligi <= BASE_MAX_RANGE_ATR x ATR)
+  base    -> 1..BASE_MAX_BARS kucuk mum (araligi <= BASE_MAX_RANGE_ATR x ATR; 03.11 kullanici: 3 mum / 0.6 ATR XAUUSD 1H
+             02.11 15:00 TSI demand'ini 0.03 ATR'yle kaciriyordu -> 4 mum / 0.8 ATR)
   leg-out -> base'den sert cikis: ilk mumun govdesi >= LEG_BODY_MIN_ATR x ATR, base disinda kapanis,
              LEG_OUT_BARS icinde proximal'den >= LEG_OUT_MIN_ATR x ATR yol
 Demand (cikis yukari): distal = base'in en dusuk low'u, proximal = base govdelerinin en yukseği.
 Supply (cikis asagi): distal = base'in en yuksek high'i, proximal = base govdelerinin en dusugu.
 Tip: leg-in harfi + B + leg-out harfi -> RBR / DBD (devam), DBR / RBD (donus), ?BR / ?BD (leg-in zayif).
 
-Tazelik: olusumdan sonra proximal'e dokunan her ayri mum kosusu bir "dokunus"; 0 taze, 1 test edilmis,
->= 2 ya da distal'in otesine fitil (SL_BUFFER_ATR) -> olu (islem aranmaz, hedef de olmaz).
+Tazelik: olusumdan sonra proximal'e dokunan her ayri mum kosusu bir "dokunus" (kosu ancak fiyat proximal'den
+TOUCH_EXIT_ATR x ATR uzaklasinca biter -- 03.11: XAUUSD'de ayni tepkinin iki dalisi 2 dokunus sayilip bolgeyi olduruyordu);
+0 taze, 1 test edilmis, >= 2 ya da distal'in otesine fitil (SL_BUFFER_ATR) -> olu (islem aranmaz, hedef de olmaz).
 
-Plan: giris proximal, SL distal + SL_BUFFER_ATR x ATR, TP karsi taraftaki ilk canli bolgenin proximal'i,
+Plan: giris proximal, SL distal + SL_BUFFER_ATR x ATR ama risk en az MIN_RISK_ATR x ATR (03.11 kullanici: base dar olunca
+8 puanlik stop + her hedef 4R tavaninda; 1.0 ATR bile dar bulundu -> 1.5; Journal golgesi 1.0 / 2.0 ATR'yi olcer),
+TP karsi taraftaki ilk canli bolgenin proximal'i,
 yoksa fiyatin otesindeki ilk fraktal swing (TARGET_SWING_K). RR < MIN_RR -> `sd_low_rr`.
 
 Her sey durumsuz: `detect_zones` kapanmis 4H serisinden bolgeleri, dokunuslari ve kirilmayi her cagrida
@@ -37,14 +41,16 @@ STRATEGY_SD = "sd"
 HTF_DELTA = timedelta(hours=4)
 
 ATR_PERIOD = 14
-BASE_MAX_BARS = 3
-BASE_MAX_RANGE_ATR = 0.6
+BASE_MAX_BARS = 4
+BASE_MAX_RANGE_ATR = 0.8
 LEG_OUT_MIN_ATR = 2.0
 LEG_OUT_BARS = 3
 LEG_BODY_MIN_ATR = 1.0
 LEG_IN_BARS = 3
 LEG_IN_MIN_ATR = 1.0
 SL_BUFFER_ATR = 0.1
+MIN_RISK_ATR = 1.5           # stop mesafesi en az bu kadar ATR (bolge dar olsa da)
+TOUCH_EXIT_ATR = 0.5         # dokunus kosusu: fiyat proximal'den bu kadar uzaklasinca biter
 MAX_TOUCHES = 1              # bu kadar dokunusa kadar canli; fazlasi olu
 LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
 MAX_AGE_BARS = 120           # daha eski base'ler Journal'a yazilmaz (ilk calismada eski bolge seli olmasin)
@@ -113,6 +119,7 @@ class SDPlan:
     rr: Optional[float]
     target_kind: Optional[str]   # zone | swing | cap | None
     tp_struct: Optional[float] = None   # tavan uygulanmadan onceki yapisal hedef
+    sl_zone: Optional[float] = None     # taban uygulanmadan onceki bolge stopu (distal + tampon)
     rr_struct: Optional[float] = None
     dist_r: Optional[float] = None      # son kapanisin girise uzakligi, R cinsinden (pozitif = giris henuz dolmadi)
 
@@ -252,7 +259,12 @@ def _walk_after(z: SDZone, h: np.ndarray, l: np.ndarray, idx) -> None:
         if touching and not in_run:
             z.touches += 1
             z.last_touch = idx[i]
-        in_run = touching
+            in_run = True
+        elif in_run:
+            left = (l[i] > z.proximal + TOUCH_EXIT_ATR * z.atr) if z.side == "demand" \
+                else (h[i] < z.proximal - TOUCH_EXIT_ATR * z.atr)
+            if left:
+                in_run = False
         if beyond:
             z.broken_at = idx[i]
             break
@@ -289,7 +301,9 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     buf = SL_BUFFER_ATR * z.atr
     entry = z.proximal
     long = z.direction == "LONG"
-    sl = z.distal - buf if long else z.distal + buf
+    sl_zone = z.distal - buf if long else z.distal + buf
+    floor = MIN_RISK_ATR * z.atr
+    sl = min(sl_zone, entry - floor) if long else max(sl_zone, entry + floor)
     if last_close is None:
         last_close = float(df["close"].iloc[-1])
     ref = max(entry, last_close) if long else min(entry, last_close)
@@ -311,7 +325,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
             kind = "cap"
         rr = round(abs(tp - entry) / risk, 2)
     return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind,
-                  tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r)
+                  tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r, sl_zone=float(sl_zone))
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -355,6 +369,8 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         out["target_kind"] = plan.target_kind
         out["rr_struct"] = plan.rr_struct
         out["dist_r"] = plan.dist_r
+        out["risk_atr"] = round(abs(plan.entry - plan.sl) / z.atr, 2) if z.atr else None
+        out["sl_zone"] = plan.sl_zone
     return out
 
 

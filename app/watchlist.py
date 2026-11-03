@@ -1736,6 +1736,39 @@ async def _p_sd1h_outcomes(db: AsyncSession) -> Progress:
     return await _p_sd_outcomes(db, "sd1h")
 
 
+async def _p_sd_stop_width(db: AsyncSession) -> Progress:
+    """03.11 (kullanici): S/D ana stop 1.5 ATR taban; Journal golgesi ayni setupta k=0.667 (~1.0 ATR) ve k=1.333 (~2.0 ATR)
+    stoplarini izler (`shadow` JSON, duz TP/SL). Tablo: strateji x stop -> TP / SL / WR / R. Tetik: k=1 kolunda 60 cozulmus."""
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(t.c.strategy.in_(("sd", "sd1h")), t.c.shadow.is_not(None)))).mappings().all()
+    acc: dict[tuple, list] = {}
+    base_n = 0
+    for r in rows:
+        try:
+            sh = json.loads(r["shadow"] or "{}")
+        except Exception:
+            continue
+        for k, label in (("1", "1.5 ATR (ana)"), ("0.667", "~1.0 ATR"), ("1.333", "~2.0 ATR")):
+            v = sh.get(k) or {}
+            if v.get("o") not in ("win", "loss"):
+                continue
+            g = acc.setdefault((r["strategy"], label), [0, 0, 0.0])
+            if v["o"] == "win":
+                g[0] += 1
+                g[2] += float(v.get("rr") or 0)
+            else:
+                g[1] += 1
+                g[2] -= 1.0
+            if k == "1":
+                base_n += 1
+    table = [["Strateji · stop", "TP", "SL", "WR", "R/işlem"]]
+    for (st, label), (w, l, rs) in sorted(acc.items()):
+        n = w + l
+        table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H'}.get(st, st) } · {label}", str(w), str(l), f"%{100 * w / n:.0f}", f"{rs / n:+.2f}"])
+    return Progress(bars=[Bar("S/D ana stop (1.5 ATR) — çözülmüş", base_n, 60)], table=table,
+                    note="aynı setup, aynı giriş/TP; yalnız stop farklı — düz TP/SL (Journal gölgesi)")
+
+
 ITEMS: list[WatchItem] = [
     WatchItem(
         key="session_anchor", status="done", started="18.09",
@@ -2743,6 +2776,15 @@ ITEMS: list[WatchItem] = [
         measure="/setup-journal?tf=sd1h · /radar?tf=sd1h · python tmp/tmp_sd_check.py",
         md="Supply/Demand 1H — ölçüm modu (03.11.2026)",
         progress_fn=_p_sd1h_outcomes,
+    ),
+    WatchItem(
+        key="sd_stop_width", status="open", started="03.11", onem=1,
+        title="S/D stop genişliği — 1,5 ATR taban mı, 1,0 / 2,0 ATR mı?",
+        trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR ya da 2,0 ATR gölgesi R/işlemde ≥ +0,15 ileride VE "
+                "iki yarıda aynı yönde → taban o değere; aksi halde 1,5 kalır",
+        measure="/izleme tablosu (Journal shadow k=1 / 0.667 / 1.333) · python tmp/tmp_sd_check.py",
+        md="S/D stop genişliği — 1,5 ATR taban mı, 1,0 / 2,0 ATR mı? (03.11.2026)",
+        progress_fn=_p_sd_stop_width,
     ),
 ]
 

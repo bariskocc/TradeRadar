@@ -113,7 +113,9 @@ _TOUCH_EVERY = timedelta(minutes=30)
 # burada tutulur). Duz TP/SL: 4H/1D'deki kismi kar + BE yok. Degerlendirme ve karar kurali:
 # IZLEME.md "Dar stop — golge izleme".
 SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5),
-             "1w": (1.0, 0.75, 0.5)}
+             "1w": (1.0, 0.75, 0.5),
+             # S/D (03.11, kullanici): ana stop 1.5 ATR taban; k=0.667 ~ 1.0 ATR, k=1.333 ~ 2.0 ATR (taban bagladiginda)
+             "sd": (1.0, 0.667, 1.333), "sd1h": (1.0, 0.667, 1.333)}
 # JSON'a yazilirken/okunurken datetime'a cevrilecek alanlar. Golgede "e" dolum ani; entry
 # varyantlarinda "e" ENTRY FIYATI olduğu icin dolum ani ayri alanda ("t") tutulur.
 _SHADOW_TS = ("e", "at", "until", "pa")
