@@ -53,6 +53,9 @@ MIN_RR = 2.0
 # 03.11 (kullanici: "40R sacma, 3-4R'den fazlasi olmasin"): yapisal hedef (en yakin karsi bolge YA DA swing) MAX_RR'yi asarsa
 # TP = giris + MAX_RR x risk (`target_kind` "cap"); yapisal RR `features.rr_struct`'ta olculmeye devam eder.
 MAX_RR = 4.0
+# Hedef fiyatin hemen dibindeki swing olmasin (03.11 canli: BTC 1H SHORT hedefi son kapanisin %0.04 altindaki swing low'du, ilk
+# 15m mumunda 'TP before entry' yazildi): aday engel son kapanistan en az bu kadar ATR otede olmali.
+TARGET_MIN_BEYOND_ATR = 0.5
 SWING_LOOKBACK = 30          # bos / sweep icin base'den onceki swing aramasi (mum)
 BOS_EXTRA_BARS = 2           # bos: formed mumundan sonra bu kadar mum daha bakilir
 
@@ -289,6 +292,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     if last_close is None:
         last_close = float(df["close"].iloc[-1])
     ref = max(entry, last_close) if long else min(entry, last_close)
+    ref = ref + TARGET_MIN_BEYOND_ATR * z.atr if long else ref - TARGET_MIN_BEYOND_ATR * z.atr
     tp, kind = None, None
     cands = [(o.proximal, "zone") for o in zones
              if o.side != z.side and o.broken_at is None and ((o.proximal > ref) if long else (o.proximal < ref))]
