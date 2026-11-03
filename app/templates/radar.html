@@ -26,6 +26,10 @@
                         <a href="{{ rq(tf_='4h') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '4h' else off_cls }}">4H-15M</a>
                         <a href="{{ rq(tf_='1d') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '1d' else off_cls }}">1D-1H</a>
                         <a href="{{ rq(tf_='1w') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '1w' else off_cls }}">1W-4H</a>
+                        {# Supply / Demand (03.11): CRT'den ayri strateji, kendi sekmesi; olcum modu (sinyal acmaz). #}
+                        <span class="w-px h-5 bg-dark-600 mx-1"></span>
+                        <a href="{{ rq(tf_='sd') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd' else off_cls }}" title="Supply / Demand zones on 4H — measurement mode, no signals yet">S/D 4H</a>
+                        <a href="{{ rq(tf_='sd1h') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd1h' else off_cls }}" title="Supply / Demand zones on 1H (no altcoins) — measurement mode, tracked on 15m">S/D 1H</a>
                     </div>
                     <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
                         <div class="flex items-center gap-1">
@@ -65,12 +69,12 @@
                     <p id="sub-count" class="text-[10px] text-gray-500 mt-1 cursor-help">- subscriptions</p>
                 </div>
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Active setups</p>
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">{{ 'Live zones' if tf.startswith('sd') else 'Active setups' }}</p>
                     <p id="sum-setups" class="text-sm font-medium text-white">-</p>
                     <p id="sum-potential" class="text-[10px] text-blue-400 mt-1">- potential</p>
                 </div>
                 <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
-                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Waiting signals</p>
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">{{ 'Zones ready (measure only)' if tf.startswith('sd') else 'Waiting signals' }}</p>
                     <p id="sum-waiting" class="text-sm font-medium text-green-400">-</p>
                     <p id="sum-idle" class="text-[10px] text-gray-500 mt-1">- no setup</p>
                 </div>
@@ -88,6 +92,28 @@
                 <div class="overflow-x-auto">
                     <table class="w-full min-w-[1100px] text-sm">
                         <thead>
+                            {% if tf.startswith('sd') %}
+                            {# S/D sutunlari: bolge tipi (leg-in B leg-out), tazelik, leg-out gucu, base, FVG, hedef turu. #}
+                            <tr class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-dark-600">
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Symbol</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Market</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Direction</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="leg-in · Base · leg-out: RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in">Zone</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="0 touches = fresh, 1 = tested">Fresh</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Leg-out distance from the proximal edge, in HTF ATR">Leg-out</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Base candles / FVG left by the leg-out">Base</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="BOS = leg-out closed beyond the last swing before the base · Sweep = base took out the prior swing (liquidity). Measured only, no points">Context</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">1D Bias</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="strength + base + fvg + fresh + 1D bias (max 9) — measurement only">Score</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Entry = proximal edge, SL = distal edge + 0.1 ATR">Entry / SL</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Nearest opposite live zone, else next swing">Target</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">RR</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Distance from last close to the proximal edge, in ATR">Dist</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Open time of the first base candle (TSİ)">Formed</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Status</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Updated</th>
+                            </tr>
+                            {% else %}
                             <tr class="text-[10px] uppercase tracking-wider text-gray-500 border-b border-dark-600">
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Symbol</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Market</th>
@@ -105,6 +131,7 @@
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Status</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">Updated</th>
                             </tr>
+                            {% endif %}
                         </thead>
                         <tbody id="radar-body">
                             <tr><td colspan="15" class="px-2 py-8 text-center text-gray-600">Loading...</td></tr>
@@ -187,6 +214,46 @@ function modelBadge(model) {
 }
 
 const currentTf = {{ tf|tojson }};
+
+// Supply / Demand sekmesi (03.11): satir CRT sutunlarindan degil `s.sd` alt sozlugunden kurulur.
+function sdRow(s, badge) {
+    const d = s.sd || {};
+    const dash = '<span class="text-gray-600">-</span>';
+    const idle = s.state === 'no_setup' || s.state === 'no_data';
+    const zone = d.zone_type ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold ${/B(R)$/.test(d.zone_type) ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'}" title="${d.zone_type[0] === '?' ? 'leg-in weaker than 1 ATR' : (d.zone_type[0] === d.zone_type[2] ? 'continuation' : 'reversal')}">${d.zone_type}</span>` : dash;
+    const fresh = idle ? dash : (d.fresh
+        ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold text-emerald-400 bg-emerald-500/10">Fresh</span>'
+        : `<span class="px-2 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="${d.touches} touch(es)">Tested</span>`)
+        + (d.in_zone ? ' <span class="text-[10px] text-accent-blue" title="Price is inside the zone now">in zone</span>' : '');
+    const legout = d.legout_atr != null ? `${d.legout_atr.toFixed(1)}×` : dash;
+    const base = d.base_bars != null ? `${d.base_bars}${d.fvg ? ' <span class="text-[10px] text-accent-purple" title="Leg-out left an FVG">FVG</span>' : ''}` : dash;
+    const ctx = idle ? dash : ([d.bos ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="Leg-out broke structure">BOS</span>' : '',
+                               d.sweep ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="Base swept the prior swing">Sweep</span>' : ''].filter(Boolean).join(' ') || dash);
+    const score = s.score != null ? `${s.score}` : dash;
+    const lv = s.entry ? `<span class="text-white">${s.entry}</span> / <span class="text-red-400">${s.sl}</span>` : dash;
+    const target = s.tp ? `<span class="text-green-400">${s.tp}</span> <span class="text-[10px] text-gray-500">${d.target_kind || ''}</span>` : dash;
+    const dist = d.dist_atr != null ? `${d.dist_atr.toFixed(1)} ATR` : dash;
+    const zones = d.n_live != null ? ` <span class="text-[10px] text-gray-500" title="live zones / all zones in window">${d.n_live}/${d.n_zones}</span>` : '';
+    return `<tr class="border-b border-dark-700/50 hover:bg-dark-700/30 transition">
+        <td class="px-2 py-2 font-medium text-white whitespace-nowrap">${s.symbol}${zones}</td>
+        <td class="px-2 py-2 text-gray-500 text-xs whitespace-nowrap">${s.market || '-'}</td>
+        <td class="px-2 py-2 whitespace-nowrap">${dirBadge(s.direction)}</td>
+        <td class="px-2 py-2 whitespace-nowrap">${zone}</td>
+        <td class="px-2 py-2 whitespace-nowrap">${fresh}</td>
+        <td class="px-2 py-2 text-gray-300 text-xs whitespace-nowrap">${legout}</td>
+        <td class="px-2 py-2 text-gray-300 text-xs whitespace-nowrap">${base}</td>
+        <td class="px-2 py-2 whitespace-nowrap">${ctx}</td>
+        <td class="px-2 py-2 whitespace-nowrap">${biasBadge(s.bias)}</td>
+        <td class="px-2 py-2 text-gray-300 whitespace-nowrap">${score}</td>
+        <td class="px-2 py-2 text-xs font-mono whitespace-nowrap">${lv}</td>
+        <td class="px-2 py-2 text-xs font-mono whitespace-nowrap">${target}</td>
+        <td class="px-2 py-2 text-gray-300 whitespace-nowrap">${s.rr != null && !idle ? s.rr : '-'}</td>
+        <td class="px-2 py-2 text-gray-400 text-xs whitespace-nowrap">${dist}</td>
+        <td class="px-2 py-2 text-gray-400 text-xs whitespace-nowrap">${s.crt_bar_time || dash}</td>
+        <td class="px-2 py-2 whitespace-nowrap"><span class="px-2 py-0.5 rounded text-[11px] font-medium ${badge}">${s.label}</span></td>
+        <td class="px-2 py-2 text-gray-500 text-xs whitespace-nowrap">${s.updated_at || '-'}</td>
+    </tr>`;
+}
 // Sayfa URL'sindeki filtreler (market / dir / setups) API'ye aynen gider.
 const radarQuery = (() => {
     const q = new URLSearchParams(window.location.search);
@@ -241,6 +308,7 @@ async function loadRadar() {
         } else {
             body.innerHTML = data.symbols.map(s => {
                 const badge = COLOR_CLASSES[s.color] || COLOR_CLASSES.gray;
+                if (currentTf.startsWith('sd')) return sdRow(s, badge);
                 const hideRr = s.state === 'no_setup' || s.state === 'no_data';
                 const rr = hideRr || s.rr === null || s.rr === undefined ? '-' : s.rr;
                 const scoreNum = (s.score !== null && s.score !== undefined) ? Number(s.score) : null;

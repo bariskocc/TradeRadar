@@ -70,6 +70,12 @@ STAGES: list[tuple[str, str]] = [
     ("c2_open", "Waiting for C2 close"),
     ("waiting", "Signal opened"),
     ("week_close", "Cancelled at week close"),
+    # Supply / Demand (`sd`, 03.11, olcum modu -- app/sd_scanner.py). Sira = kapi derinligi.
+    ("sd_dead", "S/D: zone dead (broken / 2+ touches)"),
+    ("sd_bias", "S/D: 1D bias opposite"),
+    ("sd_no_target", "S/D: no target (zone / swing)"),
+    ("sd_low_rr", "S/D: RR < 2"),
+    ("sd_ready", "S/D: zone ready (all gates)"),
 ]
 STAGE_LABELS = dict(STAGES)
 PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak",
@@ -92,8 +98,10 @@ TRACKING = ("pending", "filled")
 # 1W (28.09): 9 gun -- C2'nin kalani + C3 haftasi; KEEP'in (10 gun, restart'ta yuklenen pencere)
 # altinda kalsin ki izleme restart'ta kopmasin.
 HORIZON = {"4h": timedelta(hours=48), "1d": timedelta(hours=120), "1h": timedelta(hours=12),
-           "1w": timedelta(days=9)}
-LTF_OF = {"4h": "15m", "1d": "1h", "1h": "5m", "1w": "4h"}
+           "1w": timedelta(days=9),
+           # S/D (03.11): bolge gunlerce bekler; KEEP'in altinda kalsin (restart'ta yuklenen pencere).
+           "sd": timedelta(days=9), "sd1h": timedelta(days=4)}
+LTF_OF = {"4h": "15m", "1d": "1h", "1h": "5m", "1w": "4h", "sd": "15m", "sd1h": "15m"}
 KEEP = timedelta(days=10)
 # Yalnizca last_seen ilerlediyse bu kadar bekleyip yaz (her 15 dk'da her satiri yazmamak icin).
 _TOUCH_EVERY = timedelta(minutes=30)
@@ -253,7 +261,7 @@ def _entries_init(rec: dict) -> dict | None:
 
 
 _LTF_DELTA = {"4h": timedelta(minutes=15), "1d": timedelta(hours=1), "1h": timedelta(minutes=5),
-              "1w": timedelta(hours=4)}
+              "1w": timedelta(hours=4), "sd": timedelta(minutes=15), "sd1h": timedelta(minutes=15)}
 
 
 def _bar_before_levels(rec: dict, bar_ts) -> bool:

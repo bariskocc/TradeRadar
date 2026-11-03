@@ -4537,6 +4537,13 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                 await detect_and_create_waiting(
                     session, bingx_symbol, frames, store=store, strategy=strategy,
                 )
+            # Supply / Demand (03.11, olcum modu): 4H kapanisinda bolge tespiti, 15m kapanisinda Journal izleme.
+            if timeframe == "4h":
+                from app import sd_scanner
+                sd_scanner.evaluate_symbol(bingx_symbol, frames)
+            if timeframe == "1h":   # 1H bolge (altcoinsiz: 1h akisi yalniz 1D evreninde)
+                from app import sd_scanner
+                sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd1h")
             if ltf_strategy and has_open_symbol(display_symbol, timeframe=ltf_strategy):
                 df_ltf = store.get_df(bingx_symbol, timeframe)
                 if df_ltf is not None and len(df_ltf) >= 2:
@@ -4562,6 +4569,10 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                     jb = df_bar.iloc[-2]
                     journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]),
                                       float(jb["close"]))
+                    if timeframe == "15m":
+                        for sd_strategy in ("sd", "sd1h"):
+                            journal.track_bar(sd_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]),
+                                              float(jb["close"]))
             await _flush_journal_and_potential(session)
     except Exception:
         log.exception("on_candle_closed failed for %s %s", bingx_symbol, timeframe)
@@ -4682,6 +4693,13 @@ async def run_scan(
                         )
                         if created is not None:
                             result["new_setups"].append(created)
+                        if strategy == STRATEGY_4H:
+                            # Supply / Demand olcumu (03.11): 4H evreniyle ayni semboller, sinyal yok.
+                            from app import sd_scanner
+                            sd_scanner.evaluate_symbol(bingx_symbol, frames)
+                        elif strategy == STRATEGY_1D:
+                            from app import sd_scanner
+                            sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd1h")
 
                         df_ltf = frames.get(cfg["ltf"])
                         display_symbol = to_display_symbol(bingx_symbol)

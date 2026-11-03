@@ -103,12 +103,16 @@ scan_state: dict = {"running": False, "last_run": None, "last_result": None}
 
 def _parse_tf(raw: str | None) -> str:
     v = (raw or "").strip().lower()
-    if v in ("1d", "1h", "1w"):
+    if v in ("1d", "1h", "1w", "sd", "sd1h"):
         return v
     return "4h"
 
 
 def _tf_label(tf: str) -> str:
+    if tf == "sd":
+        return "Supply/Demand 4H"
+    if tf == "sd1h":
+        return "Supply/Demand 1H"
     if tf == "1d":
         return "1D-1H"
     if tf == "1h":
@@ -166,6 +170,12 @@ RADAR_STATE_META = {
     "sweep_small":    {"label": "CRT rejected: sweep too small",   "color": "dim", "rank": 11},
     "no_setup":       {"label": "No setup",                   "color": "dim",    "rank": 11},
     "no_data":        {"label": "Insufficient data",          "color": "dim",    "rank": 12},
+    # Supply / Demand sekmesi (03.11, olcum modu -- app/sd_scanner.py).
+    "sd_ready":       {"label": "Zone ready (all gates)",     "color": "green",  "rank": 0},
+    "sd_low_rr":      {"label": "Low RR",                     "color": "yellow", "rank": 2},
+    "sd_no_target":   {"label": "No target",                  "color": "yellow", "rank": 3},
+    "sd_bias":        {"label": "1D bias opposite",           "color": "orange", "rank": 5},
+    "sd_dead":        {"label": "Zone dead",                  "color": "dim",    "rank": 11},
 }
 
 
@@ -1442,13 +1452,16 @@ async def setup_journal_page(
     from app import setup_journal as journal
     from app.models import SetupJournal
 
-    tf = tf if tf in ("all", "4h", "1d", "1w", "1h") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1w", "1h", "sd", "sd1h") else "all"
     stage = stage if stage in journal.STAGE_LABELS else "all"
     days = days if days in (1, 3, 7, 30, 90) else 7
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
     filters = [SetupJournal.last_seen >= since]
     if tf != "all":
         filters.append(SetupJournal.strategy == tf)
+    else:
+        # Supply / Demand (03.11) CRT'yle karismasin: "All" = uc CRT stratejisi, S/D kendi sekmesinde.
+        filters.append(SetupJournal.strategy.notin_(("sd", "sd1h")))
     if symbol:
         filters.append(SetupJournal.symbol.ilike(f"%{symbol}%"))
     # Min skor (04.10, kullanici istegi): DETAIL sutununda GORUNEN skor ("score N · ..."). `score`
@@ -1844,32 +1857,43 @@ async def api_radar(request: Request):
             "purge_time": _fmt_date_tsi(e["purge_time"]) if e.get("purge_time") else None,
             "crt_bar_time": _fmt_date_tsi(e["crt_bar_time"]) if e.get("crt_bar_time") else None,
             "updated_at": _fmt_date_tsi(e["updated_at"]) if e.get("updated_at") else None,
+            # S/D sekmesinin sutunlari (bolge tipi, tazelik, leg-out gucu...); CRT'de None.
+            "sd": e.get("sd"),
         })
     # 01.10 (kullanici): yuksek skor en ustte; skoru olmayan (no_setup / no_data) en altta.
     # Esit skorda eski sira (durum onceligi, sonra sembol).
     symbols.sort(key=lambda x: (x["score"] is None, -(x["score"] or 0), x["rank"], x["symbol"]))
 
     cnt = _Counter(s["state"] for s in symbols)
-    summary = {
-        "total": len(symbols),
-        "waiting": cnt.get("waiting", 0),
-        "potential": (
-            cnt.get("no_cisd", 0) + cnt.get("c2_open", 0) + cnt.get("low_rr", 0) + cnt.get("missed", 0)
-            + cnt.get("invalidated", 0)  # + cnt.get("same_color", 0)  # eski hard filter
-            + cnt.get("tight_stop", 0) + cnt.get("bias_mismatch", 0)
-            + cnt.get("cluster_limit", 0) + cnt.get("same_setup", 0) + cnt.get("liq_unswept", 0)
-            + cnt.get("stale", 0) + cnt.get("same_bar_sl", 0) + cnt.get("week_gap", 0)
-            + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0) + cnt.get("no_confirm", 0)
-        ),
-        "setups": sum(cnt.get(k, 0) for k in (
-            "waiting", "c2_open", "no_cisd", "low_rr", "missed", "stopped", "invalidated",
-            # "same_color",  # eski hard filter
-            "tight_stop", "bias_mismatch", "cluster_limit", "same_setup", "liq_unswept", "low_quality",
-            "has_open", "duplicate", "deleted_before", "corr_open", "stale", "same_bar_sl", "week_gap",
-            "past_sl", "missed_quality", "no_confirm",
-        )),
-        "idle": cnt.get("no_setup", 0) + cnt.get("no_data", 0),
-    }
+    if tf in ("sd", "sd1h"):
+        # S/D sekmesi: canli bolge (olu haric) = setup, kapiyi gecen = "waiting" karsiligi.
+        live = sum(n for k, n in cnt.items() if k.startswith("sd_") and k != "sd_dead")
+        summary = {
+            "total": len(symbols), "waiting": cnt.get("sd_ready", 0),
+            "potential": live - cnt.get("sd_ready", 0), "setups": live,
+            "idle": cnt.get("no_setup", 0) + cnt.get("no_data", 0),
+        }
+    else:
+        summary = {
+            "total": len(symbols),
+            "waiting": cnt.get("waiting", 0),
+            "potential": (
+                cnt.get("no_cisd", 0) + cnt.get("c2_open", 0) + cnt.get("low_rr", 0) + cnt.get("missed", 0)
+                + cnt.get("invalidated", 0)  # + cnt.get("same_color", 0)  # eski hard filter
+                + cnt.get("tight_stop", 0) + cnt.get("bias_mismatch", 0)
+                + cnt.get("cluster_limit", 0) + cnt.get("same_setup", 0) + cnt.get("liq_unswept", 0)
+                + cnt.get("stale", 0) + cnt.get("same_bar_sl", 0) + cnt.get("week_gap", 0)
+                + cnt.get("past_sl", 0) + cnt.get("missed_quality", 0) + cnt.get("no_confirm", 0)
+            ),
+            "setups": sum(cnt.get(k, 0) for k in (
+                "waiting", "c2_open", "no_cisd", "low_rr", "missed", "stopped", "invalidated",
+                # "same_color",  # eski hard filter
+                "tight_stop", "bias_mismatch", "cluster_limit", "same_setup", "liq_unswept", "low_quality",
+                "has_open", "duplicate", "deleted_before", "corr_open", "stale", "same_bar_sl", "week_gap",
+                "past_sl", "missed_quality", "no_confirm",
+            )),
+            "idle": cnt.get("no_setup", 0) + cnt.get("no_data", 0),
+        }
 
     return JSONResponse(content={
         "ws": {

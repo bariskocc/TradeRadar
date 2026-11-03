@@ -829,7 +829,8 @@ async def _p_nonsignal_outcomes(db: AsyncSession) -> Progress:
         _n(t.c.outcome == "tp_before_entry"), _n(t.c.outcome == "ambiguous"),
         _n(and_(t.c.outcome == "win", t.c.first_seen >= week_ago)),
         _n(and_(t.c.outcome == "loss", t.c.first_seen >= week_ago)),
-    ).where(or_(t.c.outcome.is_(None), t.c.outcome != "signal")).group_by(t.c.strategy, pre))).all()
+    ).where(or_(t.c.outcome.is_(None), t.c.outcome != "signal"), t.c.strategy.notin_(("sd", "sd1h")),
+            ).group_by(t.c.strategy, pre))).all()
     agg = {(r[0], bool(r[1])): [int(x or 0) for x in r[2:]] for r in rows}
 
     def _wr(tp: int, sl: int) -> str:
@@ -1687,6 +1688,52 @@ async def _p_session_anchor(db: AsyncSession) -> Progress:
         )
     ) or 0
     return Progress(bars=[Bar("yeni ızgarada sonuçlanmış CME setup", n, 200)])
+
+
+async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
+    """03.11 (kullanici): Supply/Demand 4H olcumu. Journal `sd` satirlari (sinyal yok, duz TP/SL, seviye = proximal /
+    distal + tampon / hedef). Cozulmus = TP once mi SL once mi (win + tp_before_entry = TP, loss = SL). Tablo: tazelik
+    (seviye andaki `touches`) ve bolge tipi (devam RBR/DBD, donus DBR/RBD, leg-in zayif ?) x TP/SL; kapi gecen vs gecmeyen.
+    Tetik 100 cozulmus kapi gecmis (sd_ready) bolge."""
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(t.c.strategy == strategy, t.c.entry.is_not(None)))).mappings().all()
+    groups: dict[str, list[int]] = {}
+
+    def _add(name: str, tp: bool) -> None:
+        g = groups.setdefault(name, [0, 0])
+        g[0 if tp else 1] += 1
+
+    ready = 0
+    for r in rows:
+        o = r["outcome"]
+        if o not in ("win", "tp_before_entry", "loss"):
+            continue
+        tp = o != "loss"
+        try:
+            f = json.loads(r["features_at_levels"] or "{}")
+        except Exception:
+            f = {}
+        fresh = (f.get("touches") or 0) == 0
+        zt = str(f.get("zone_type") or r["model"] or "?")
+        fam = "leg-in zayıf (?)" if zt.startswith("?") else ("devam (RBR/DBD)" if zt[0] == zt[-1] else "dönüş (DBR/RBD)")
+        gate = r["best_stage"] == "sd_ready"
+        if gate:
+            ready += 1
+        _add("Kapıyı geçen (sd_ready)" if gate else "Kapıda elenen", tp)
+        _add("Taze" if fresh else "Test edilmiş", tp)
+        _add(fam, tp)
+        _add(f"RR {'≥ 3' if (r['rr'] or 0) >= 3 else '2–3' if (r['rr'] or 0) >= 2 else '< 2'}", tp)
+    table = [["Dilim", "TP", "SL", "WR"]]
+    for name, (w, l) in groups.items():
+        n = w + l
+        table.append([name, str(w), str(l), f"%{100 * w / n:.0f}" if n else "-"])
+    n_all = sum(w + l for w, l in groups.values()) // 4 if groups else 0
+    return Progress(bars=[Bar("S/D kapıyı geçen bölge — çözülmüş", ready, 100)], table=table,
+                    note=f"{n_all} çözülmüş bölge · {len(rows)} seviyeli satır · düz TP/SL, sinyal yok")
+
+
+async def _p_sd1h_outcomes(db: AsyncSession) -> Progress:
+    return await _p_sd_outcomes(db, "sd1h")
 
 
 ITEMS: list[WatchItem] = [
@@ -2677,6 +2724,25 @@ ITEMS: list[WatchItem] = [
         trigger="CISD RR'si ≥ 2.0 olan bir setup IFVG yüzünden kaçarsa maddeyi geri aç",
         md="0b. IFVG fallback — ölçüldü, YAPILMADI (09.09)",
         result="Yapılmadı; gerekçe ölçüme dayanıyor. IFVG-RR koruması sorunun çoğunu zaten çözdü.",
+    ),
+    WatchItem(
+        key="sd_measure", status="open", started="03.11", onem=1,
+        title="Supply/Demand 4H — ölçüm modu: hangi bölge kazanıyor?",
+        trigger="kapıyı geçen (sd_ready) 100 çözülmüş bölge (TP önce mi): WR ≥ %50 ve taze/test edilmiş, devam/dönüş "
+                "dilimlerinde fark ≥ 5 puan okunur → canlı sinyal (hangi dilimle, hangi evrende) kararı kullanıcıya; "
+                "WR < %40 ise eşikler (leg-out ATR, base, tazelik) gözden geçirilir",
+        measure="/setup-journal?tf=sd (özet) · /radar?tf=sd · python tmp/tmp_sd_check.py",
+        md="Supply/Demand 4H — ölçüm modu (03.11.2026)",
+        progress_fn=_p_sd_outcomes,
+    ),
+    WatchItem(
+        key="sd1h_measure", status="open", started="03.11", onem=1,
+        title="Supply/Demand 1H — ölçüm modu: hangi bölge kazanıyor?",
+        trigger="kapıyı geçen (sd_ready) 100 çözülmüş 1H bölgesi (TP önce mi); kural 4H maddesiyle aynı — 4H ile kıyas "
+                "(WR, dilimler) canlıya hangisinin alınacağını söyler",
+        measure="/setup-journal?tf=sd1h · /radar?tf=sd1h · python tmp/tmp_sd_check.py",
+        md="Supply/Demand 1H — ölçüm modu (03.11.2026)",
+        progress_fn=_p_sd1h_outcomes,
     ),
 ]
 
