@@ -125,16 +125,16 @@
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SYMBOL</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">TF</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SIDE</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out; Fresh = untouched when the signal formed">ZONE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Demand = buy zone, Supply = sell zone · leg-in · Base · leg-out (continuation = same direction in and out, reversal = direction flips) · Fresh = untouched when the signal formed">ZONE</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="BOS = leg-out broke structure · Sweep = base took prior liquidity · FVG left by the leg-out">CONTEXT</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Entry = proximal edge · SL = distal edge + 0.1 ATR · TP = nearest obstacle, capped at 4R">ENTRY / SL / TP</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
-                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">PRICE</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first">RESULT</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="When the zone passed every gate (TSİ); zone base candle in tooltip">READY</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Open time of the first base candle of the zone (TF candle, TSİ)">SETUP</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="The 15m candle that touched the entry (TSİ)">RETEST</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-dark-700">
@@ -146,7 +146,7 @@
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ r.direction }}</span>
                             </td>
                             <td class="px-2 py-2 text-xs whitespace-nowrap">
-                                <span class="font-bold text-gray-300">{{ r.zone_type }}</span>
+                                <span class="font-bold text-gray-300" title="{{ r.zone_type }}">{{ r.zone_label }}</span>
                                 {% if r.fresh is true %}<span class="ml-1 text-[10px] text-emerald-400">fresh</span>{% elif r.fresh is false %}<span class="ml-1 text-[10px] text-amber-400">tested</span>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-[10px] whitespace-nowrap">
@@ -157,10 +157,9 @@
                             </td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
-                                {{ r.entry|fmt_price }} / <span class="text-red-400/80">{{ r.sl|fmt_price }}</span> / <span class="text-green-400/80">{{ r.tp|fmt_price }}</span>
+                                {{ r.entry_s }} / <span class="text-red-400/80">{{ r.sl_s }}</span> / <span class="text-green-400/80">{{ r.tp_s }}</span>
                             </td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300 whitespace-nowrap">{% if r.rr is not none %}{{ '%.2f'|format(r.rr) }}{% endif %}{% if r.target_kind == 'cap' %} <span class="text-[10px] text-gray-500" title="Structural RR {{ r.rr_struct }}">cap</span>{% endif %}</td>
-                            <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">{% if r.price is not none %}{{ r.price|fmt_price }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
                                 {% if r.live_r is not none %}<span class="{% if r.live_r > 0 %}text-green-400{% elif r.live_r < 0 %}text-red-400{% else %}text-gray-300{% endif %} font-bold">{{ '%+.2f'|format(r.live_r) }}R</span>
                                 {% elif r.dist_r is not none %}<span class="text-gray-400" title="Distance to entry">{{ '%.2f'|format(r.dist_r) }}R away</span>
@@ -175,7 +174,8 @@
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ COLOR[r.result_color] }}">{{ r.result_label }}</span>
                                 {% if r.closed_at %}<div class="text-[10px] text-gray-500 mt-0.5">{{ r.closed_at }}{% if r.hours is not none %} · {{ r.hours }}h{% endif %}</div>{% endif %}
                             </td>
-                            <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="Zone base candle {{ r.formed }}">{{ r.ready_at }}</td>
+                            <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="Zone qualified {{ r.ready_at }}">{{ r.setup_at }}</td>
+                            <td class="px-2 py-2 text-xs whitespace-nowrap">{% if r.retest_at %}<span class="text-gray-300">{{ r.retest_at }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
                         </tr>
                         {% else %}
                         <tr><td colspan="13" class="px-3 py-8 text-center text-sm text-gray-600">No S/D signals match these filters</td></tr>
@@ -198,7 +198,8 @@
                 <b>Waiting</b>: price has not touched the entry yet — if price runs to the target without filling, the zone keeps waiting (no result).
                 <b>Filled</b>: entry touched, no TP/SL yet. <b>Closed</b>: TP or SL hit after the fill (flat TP/SL on 15m candles, no partial
                 profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days). Entry and SL are frozen when the zone first
-                qualifies; the target follows the nearest obstacle until the fill.
+                qualifies; the target follows the nearest obstacle until the fill. <b>Setup</b> = open time of the zone's first base candle
+                (4H or 1H candle); <b>Retest</b> = the 15m candle that touched the entry. Rows are sorted by score.
             </p>
         </div>
     </main>

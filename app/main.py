@@ -1848,6 +1848,11 @@ async def api_radar(request: Request):
     tf = _parse_tf(request.query_params.get("tf"))
     flt = _radar_filters(request)
     snap = get_radar_snapshot(strategy=tf)
+    if tf.startswith("sd"):
+        from app.sd_signals import _fmt_p          # 03.11 (kullanici): S/D sayfalarinda fiyat 2 ondalik (>= 10)
+        _px = lambda v: _fmt_p(v) if v is not None else None
+    else:
+        _px = lambda v: _fmt_price(v) if v is not None else None
     ws = market_data.status()
 
     symbols = []
@@ -1877,9 +1882,9 @@ async def api_radar(request: Request):
             "bias": e.get("bias"),
             "weekly_bias": e.get("weekly_bias"),
             "rr": e.get("rr"),
-            "entry": _fmt_price(e["entry"]) if e.get("entry") is not None else None,
-            "sl": _fmt_price(e["sl"]) if e.get("sl") is not None else None,
-            "tp": _fmt_price(e["tp"]) if e.get("tp") is not None else None,
+            "entry": _px(e.get("entry")),
+            "sl": _px(e.get("sl")),
+            "tp": _px(e.get("tp")),
             "smt": _fmt_ui_symbol(e.get("smt"), "crypto") if e.get("smt") else None,
             "pd": e.get("pd"),
             "c2_closed": e.get("c2_closed"),

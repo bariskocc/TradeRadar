@@ -21,7 +21,13 @@ log = logging.getLogger(__name__)
 TSI = timezone(timedelta(hours=3))
 PAGE_SIZE = 50
 STRATEGIES = ("sd", "sd1h")
-TF_LABELS = {"sd": "S/D 4H", "sd1h": "S/D 1H"}
+TF_LABELS = {"sd": "4H", "sd1h": "1H"}          # 03.11 (kullanici): sutunda yalniz TF
+# Bolge tipi acik adiyla (kullanici: "DBD'nin ne oldugunu anlamiyorum"): leg-in · Base · leg-out, devam / donus.
+ZONE_NAMES = {
+    "RBR": "Rally · Base · Rally (continuation)", "DBR": "Drop · Base · Rally (reversal)",
+    "DBD": "Drop · Base · Drop (continuation)", "RBD": "Rally · Base · Drop (reversal)",
+    "?BR": "Base · Rally (weak leg-in)", "?BD": "Base · Drop (weak leg-in)",
+}
 TF_FILTERS = [("all", "All"), ("sd", "S/D 4H"), ("sd1h", "S/D 1H")]
 MARKET_FILTERS = [("all", "All"), ("crypto", "Crypto"), ("fx", "FX")]
 DIRECTION_FILTERS = [("all", "All"), ("long", "Long"), ("short", "Short")]
@@ -82,6 +88,15 @@ def _live_price(symbol: str) -> float | None:
     return None
 
 
+def _fmt_p(v) -> str:
+    """Fiyat: >= 10 ise 2 ondalik (kullanici: "virgulden sonra 2 basamak yeter"), kucuk fiyatlarda (FX/altcoin) 5'e kadar."""
+    if v is None:
+        return "—"
+    v = float(v)
+    s = f"{v:.2f}" if abs(v) >= 10 else f"{v:.5f}".rstrip("0").rstrip(".")
+    return s.replace(".", ",")
+
+
 def _feats(row) -> dict:
     try:
         return json.loads(row.features_at_levels or row.features or "{}") or {}
@@ -111,9 +126,14 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
     elif oc in ("ambiguous", "no_touch", "open"):
         final_r = 0.0
     touches = f.get("touches")
+    zt = r.model or f.get("zone_type") or "?"
     return {
         "symbol": r.symbol, "market": r.market_type, "tf": r.strategy, "tf_label": TF_LABELS.get(r.strategy, r.strategy),
-        "direction": r.direction, "zone_type": r.model or f.get("zone_type") or "—",
+        "direction": r.direction, "zone_type": zt,
+        "zone_label": ("Demand" if long else "Supply") + " · " + ZONE_NAMES.get(zt, zt),
+        "entry_s": _fmt_p(entry), "sl_s": _fmt_p(sl), "tp_s": _fmt_p(tp),
+        "setup_at": _fmt_tsi(r.purge_time), "retest_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
+        "_sort": (-(int(r.score) if r.score is not None else -1), -(r.best_stage_at.timestamp() if r.best_stage_at else 0)),
         "fresh": None if touches is None else int(touches) == 0,
         "bos": bool(f.get("bos")), "sweep": bool(f.get("sweep")), "fvg": bool(f.get("fvg")),
         "score": int(r.score) if r.score is not None else None,
@@ -165,6 +185,7 @@ async def build_sd_signals(
         if r.symbol not in cache:
             cache[r.symbol] = price_fn(r.symbol) if (r.outcome or "pending") in ("pending", "filled") else None
         views.append(_row_view(r, cache[r.symbol]))
+    views.sort(key=lambda v: v["_sort"])      # 03.11 (kullanici): skor azalan, esitte en yeni (CRT sayfalari gibi)
     counts = {k: 0 for k, _ in STATUS_FILTERS}
     summary = {}
     for v in views:
