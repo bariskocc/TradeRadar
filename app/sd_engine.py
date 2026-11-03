@@ -50,6 +50,9 @@ LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
 MAX_AGE_BARS = 120           # daha eski base'ler Journal'a yazilmaz (ilk calismada eski bolge seli olmasin)
 TARGET_SWING_K = 2           # hedef swing: 5'li fraktal
 MIN_RR = 2.0
+# 03.11 (kullanici: "40R sacma, 3-4R'den fazlasi olmasin"): yapisal hedef (en yakin karsi bolge YA DA swing) MAX_RR'yi asarsa
+# TP = giris + MAX_RR x risk (`target_kind` "cap"); yapisal RR `features.rr_struct`'ta olculmeye devam eder.
+MAX_RR = 4.0
 SWING_LOOKBACK = 30          # bos / sweep icin base'den onceki swing aramasi (mum)
 BOS_EXTRA_BARS = 2           # bos: formed mumundan sonra bu kadar mum daha bakilir
 
@@ -105,7 +108,9 @@ class SDPlan:
     sl: float
     tp: Optional[float]
     rr: Optional[float]
-    target_kind: Optional[str]   # zone | swing | None
+    target_kind: Optional[str]   # zone | swing | cap | None
+    tp_struct: Optional[float] = None   # tavan uygulanmadan onceki yapisal hedef
+    rr_struct: Optional[float] = None
 
 
 def closed_bars(df: pd.DataFrame, now=None, delta: timedelta = HTF_DELTA) -> pd.DataFrame:
@@ -276,7 +281,7 @@ def _swing_levels(df: pd.DataFrame, kind: str, k: int = TARGET_SWING_K) -> list[
 
 
 def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: float | None = None) -> SDPlan:
-    """Giris / SL / TP: TP karsi taraftaki ilk canli bolge, yoksa fiyatin otesindeki ilk swing."""
+    """Giris / SL / TP: TP = en yakin engel (karsi canli bolgenin proximal'i ya da fiyatin otesindeki ilk swing), MAX_RR tavani."""
     buf = SL_BUFFER_ATR * z.atr
     entry = z.proximal
     long = z.direction == "LONG"
@@ -285,19 +290,22 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
         last_close = float(df["close"].iloc[-1])
     ref = max(entry, last_close) if long else min(entry, last_close)
     tp, kind = None, None
-    cands = [o.proximal for o in zones
+    cands = [(o.proximal, "zone") for o in zones
              if o.side != z.side and o.broken_at is None and ((o.proximal > ref) if long else (o.proximal < ref))]
+    cands += [(s, "swing") for s in _swing_levels(df, "high" if long else "low") if ((s > ref) if long else (s < ref))]
     if cands:
-        tp, kind = (min(cands) if long else max(cands)), "zone"
-    else:
-        swings = [s for s in _swing_levels(df, "high" if long else "low") if ((s > ref) if long else (s < ref))]
-        if swings:
-            tp, kind = (min(swings) if long else max(swings)), "swing"
+        tp, kind = min(cands) if long else max(cands)   # fiyata en yakin engel (bolge ya da swing)
     rr = None
     risk = abs(entry - sl)
+    tp_struct, rr_struct = tp, None
     if tp is not None and risk > 0:
+        rr_struct = round(abs(tp - entry) / risk, 2)
+        if rr_struct > MAX_RR:
+            tp = entry + MAX_RR * risk if long else entry - MAX_RR * risk
+            kind = "cap"
         rr = round(abs(tp - entry) / risk, 2)
-    return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind)
+    return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind,
+                  tp_struct=tp_struct, rr_struct=rr_struct)
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -339,6 +347,7 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
     }
     if plan is not None:
         out["target_kind"] = plan.target_kind
+        out["rr_struct"] = plan.rr_struct
     return out
 
 

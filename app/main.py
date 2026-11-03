@@ -1384,6 +1384,40 @@ async def calendar_page(
     })
 
 
+@app.get("/sd-signals", response_class=HTMLResponse)
+async def sd_signals_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    tf: str = Query(default="all"),
+    status: str = Query(default="all"),
+    market: str = Query(default="all"),
+    direction: str = Query(default="all"),
+    date_from: str = Query(default=""),
+    date_to: str = Query(default=""),
+    page: int = Query(default=1),
+):
+    """S/D Signals (03.11, kullanici): olcum modundaki S/D bolgelerinden butun kapilari gecenler, Open Signals diliyle
+    (Waiting / Filled / Closed, anlik fiyat + canli R). Veri app/sd_signals.py (Setup Journal `sd_ready` satirlari).
+    Varsayilan bu hafta (Pazartesi TSI, kapilari gectigi an); `date_from=` bos gelirse tarih filtresi yok."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from app.sd_signals import build_sd_signals, week_start_tsi
+    if "date_from" not in request.query_params:
+        date_from = week_start_tsi()
+    data = await build_sd_signals(db, tf=tf, status=status, market=market, direction=direction,
+                                  date_from=date_from, date_to=date_to, page=page)
+    base_qs = urlencode({"tf": data["tf"], "market": data["market"], "direction": data["direction"],
+                         "date_from": data["date_from"], "date_to": data["date_to"]})
+    return templates.TemplateResponse(request=request, name="sd_signals.html", context={
+        "user": user,
+        "active_page": "sd_signals",
+        "base_qs": base_qs,
+        "week_start": week_start_tsi(),
+        **data,
+    })
+
+
 @app.get("/potential-signals", response_class=HTMLResponse)
 async def potential_signals_page(
     request: Request,

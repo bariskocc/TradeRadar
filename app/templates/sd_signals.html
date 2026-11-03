@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+
+{% block title %}TradeRadar - S/D Signals{% endblock %}
+
+{# 03.11 (kullanici istegi): olcum modundaki S/D bolgelerinden kapilari gecenler, Open Signals diliyle.
+   Tailwind yalniz sablonlari tarar -- renk siniflari burada acik yazili:
+   bg-accent-green/15 text-accent-green bg-accent-red/15 text-accent-red bg-accent-yellow/15 text-accent-yellow
+   bg-accent-blue/15 text-accent-blue bg-dark-600 text-gray-300 #}
+{% set COLOR = {
+    'green': 'bg-accent-green/15 text-accent-green',
+    'red': 'bg-accent-red/15 text-accent-red',
+    'yellow': 'bg-accent-yellow/15 text-accent-yellow',
+    'blue': 'bg-accent-blue/15 text-accent-blue',
+    'gray': 'bg-dark-600 text-gray-300',
+} %}
+{% block body %}
+<div class="flex h-full">
+
+    {% include 'sidebar.html' %}
+
+    <main class="flex-1 overflow-auto">
+        <div class="p-3 md:p-6">
+            <div class="mb-5">
+                <h1 class="text-xl font-bold text-white">S/D Signals</h1>
+                <p class="text-sm text-gray-500 mt-0.5">Supply / Demand zones that passed every gate — measurement mode: no real order, no Telegram. Entry = proximal edge, flat TP/SL tracked on 15m.</p>
+            </div>
+
+            {% if error %}
+            <div class="mb-4 px-4 py-3 rounded-lg bg-accent-yellow/10 border border-accent-yellow/20 text-sm text-accent-yellow">Could not read the Setup Journal.</div>
+            {% endif %}
+
+            <!-- Ozet: strateji basina -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5">
+                {% for s in summary %}
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4">
+                    <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">{{ s.label }}</p>
+                    <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                        <span class="text-lg font-bold {% if s.r > 0 %}text-green-400{% elif s.r < 0 %}text-red-400{% else %}text-white{% endif %}">{{ '%+.2f'|format(s.r) }}R</span>
+                        <span class="text-xs text-gray-400">{{ s.n }} signal{% if s.n != 1 %}s{% endif %}</span>
+                        <span class="text-xs"><span class="text-green-400 font-semibold">{{ s.tp }} TP</span> · <span class="text-red-400 font-semibold">{{ s.sl }} SL</span>{% if s.wr is not none %} · WR {{ s.wr }}%{% endif %}</span>
+                        <span class="text-xs text-gray-500">{{ s.open }} open</span>
+                    </div>
+                </div>
+                {% else %}
+                <div class="bg-dark-800 rounded-xl border border-dark-600 p-4 text-sm text-gray-500 md:col-span-2">No S/D signal in this period yet — zones appear after the first 4H / 1H close that passes every gate.</div>
+                {% endfor %}
+            </div>
+
+            <!-- Filtreler -->
+            {% set n_filters = (1 if tf != 'all' else 0) + (1 if market != 'all' else 0) + (1 if direction != 'all' else 0) + (1 if date_to else 0) %}
+            <form method="GET" action="/sd-signals" class="mb-5 p-3 md:p-4 bg-dark-800 rounded-xl border border-dark-600">
+                <button type="button" id="sd-filters-toggle" aria-expanded="false" aria-controls="sd-filters-body"
+                    class="md:hidden w-full flex items-center justify-between gap-2 text-sm text-gray-300">
+                    <span class="flex items-center gap-2">
+                        <span class="font-medium">Filters</span>
+                        {% if n_filters %}<span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold bg-accent-blue/20 text-accent-blue">{{ n_filters }} active</span>{% endif %}
+                        <span class="text-xs text-gray-500">{% if date_from == week_start and not date_to %}this week{% elif not date_from and not date_to %}all dates{% else %}{{ date_from or '…' }} – {{ date_to or 'today' }}{% endif %}</span>
+                    </span>
+                    <svg id="sd-filters-chevron" class="w-4 h-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                </button>
+                <div id="sd-filters-body" class="hidden md:block mt-3 md:mt-0">
+                <div class="flex flex-wrap items-end gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
+                        <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, label in tf_filters %}<option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">MARKET</label>
+                        <select name="market" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, label in market_filters %}<option value="{{ key }}" {% if market == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">DIRECTION</label>
+                        <select name="direction" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, label in direction_filters %}<option value="{{ key }}" {% if direction == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1" title="When the zone passed every gate (TSİ)">READY FROM</label>
+                        <input type="date" name="date_from" value="{{ date_from }}" class="px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">TO</label>
+                        <input type="date" name="date_to" value="{{ date_to }}" class="px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                    </div>
+                    <input type="hidden" name="status" value="{{ status }}">
+                    <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-accent-blue/80 text-white text-sm font-medium rounded-lg transition">Filter</button>
+                    <a href="/sd-signals?tf={{ tf }}&market={{ market }}&direction={{ direction }}&status={{ status }}&date_from=" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">All dates</a>
+                    <a href="/sd-signals" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Reset</a>
+                </div>
+                </div>
+            </form>
+            <script>
+            (function () {
+                var btn = document.getElementById("sd-filters-toggle"), body = document.getElementById("sd-filters-body");
+                var chev = document.getElementById("sd-filters-chevron");
+                if (!btn || !body) return;
+                btn.addEventListener("click", function () {
+                    var open = body.classList.toggle("hidden") === false;
+                    btn.setAttribute("aria-expanded", open ? "true" : "false");
+                    if (chev) chev.style.transform = open ? "rotate(180deg)" : "";
+                });
+            })();
+            </script>
+
+            <!-- Durum sekmeleri -->
+            <div class="mb-4 flex flex-wrap items-center gap-2">
+                {% for key, label in status_filters %}
+                <a href="/sd-signals?{{ base_qs }}&status={{ key }}"
+                   class="px-3 py-1.5 rounded-lg text-sm transition {% if status == key %}bg-accent-blue/15 text-accent-blue font-medium{% else %}bg-dark-700 text-gray-400 hover:bg-dark-600{% endif %}">
+                    {{ label }} <span class="text-xs text-gray-500">{{ counts[key] }}</span>
+                </a>
+                {% endfor %}
+                <span class="ml-auto text-xs text-gray-500">Prices from the live feed, refreshed on reload</span>
+            </div>
+
+            <div class="bg-dark-800 rounded-xl border border-dark-600 overflow-hidden">
+                <div class="overflow-x-auto">
+                <table class="w-full min-w-[1200px]">
+                    <thead>
+                        <tr class="border-b border-dark-600 text-xs text-gray-500">
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SYMBOL</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">TF</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SIDE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out; Fresh = untouched when the signal formed">ZONE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="BOS = leg-out broke structure · Sweep = base took prior liquidity · FVG left by the leg-out">CONTEXT</th>
+                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Entry = proximal edge · SL = distal edge + 0.1 ATR · TP = nearest obstacle, capped at 4R">ENTRY / SL / TP</th>
+                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">PRICE</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="TP or SL first (entry fill not required)">RESULT</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="When the zone passed every gate (TSİ); zone base candle in tooltip">READY</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-700">
+                        {% for r in rows %}
+                        <tr class="hover:bg-dark-700/50 {% if r.tab == 'closed' and r.outcome in ('no_touch', 'open') %}opacity-60{% endif %}">
+                            <td class="px-2 py-2 text-sm font-medium text-white whitespace-nowrap">{{ fmt_ui_symbol(r.symbol, r.market) }}</td>
+                            <td class="px-2 py-2 whitespace-nowrap"><span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400">{{ r.tf_label }}</span></td>
+                            <td class="px-2 py-2 whitespace-nowrap">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ r.direction }}</span>
+                            </td>
+                            <td class="px-2 py-2 text-xs whitespace-nowrap">
+                                <span class="font-bold text-gray-300">{{ r.zone_type }}</span>
+                                {% if r.fresh is true %}<span class="ml-1 text-[10px] text-emerald-400">fresh</span>{% elif r.fresh is false %}<span class="ml-1 text-[10px] text-amber-400">tested</span>{% endif %}
+                            </td>
+                            <td class="px-2 py-2 text-[10px] whitespace-nowrap">
+                                {% if r.bos %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-blue bg-accent-blue/10">BOS</span>{% endif %}
+                                {% if r.sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10">Sweep</span>{% endif %}
+                                {% if r.fvg %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10">FVG</span>{% endif %}
+                                {% if not (r.bos or r.sweep or r.fvg) %}<span class="text-gray-600">—</span>{% endif %}
+                            </td>
+                            <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
+                            <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
+                                {{ r.entry|fmt_price }} / <span class="text-red-400/80">{{ r.sl|fmt_price }}</span> / <span class="text-green-400/80">{{ r.tp|fmt_price }}</span>
+                            </td>
+                            <td class="px-2 py-2 text-center text-xs text-gray-300 whitespace-nowrap">{% if r.rr is not none %}{{ '%.2f'|format(r.rr) }}{% endif %}{% if r.target_kind == 'cap' %} <span class="text-[10px] text-gray-500" title="Structural RR {{ r.rr_struct }}">cap</span>{% endif %}</td>
+                            <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">{% if r.price is not none %}{{ r.price|fmt_price }}{% else %}—{% endif %}</td>
+                            <td class="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
+                                {% if r.live_r is not none %}<span class="{% if r.live_r > 0 %}text-green-400{% elif r.live_r < 0 %}text-red-400{% else %}text-gray-300{% endif %} font-bold">{{ '%+.2f'|format(r.live_r) }}R</span>
+                                {% elif r.dist_r is not none %}<span class="text-gray-400" title="Distance to entry">{{ '%.2f'|format(r.dist_r) }}R away</span>
+                                {% elif r.final_r is not none %}<span class="{% if r.final_r > 0 %}text-green-400{% elif r.final_r < 0 %}text-red-400{% else %}text-gray-500{% endif %} font-bold">{{ '%+.2f'|format(r.final_r) }}R</span>
+                                {% else %}<span class="text-gray-600">—</span>{% endif %}
+                            </td>
+                            <td class="px-2 py-2 whitespace-nowrap">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ COLOR[r.status_color] }}">{{ r.status_label }}</span>
+                                {% if r.filled_at %}<div class="text-[10px] text-gray-500 mt-0.5">filled {{ r.filled_at }}</div>{% endif %}
+                            </td>
+                            <td class="px-2 py-2 whitespace-nowrap">
+                                <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {{ COLOR[r.result_color] }}">{{ r.result_label }}</span>
+                                {% if r.closed_at %}<div class="text-[10px] text-gray-500 mt-0.5">{{ r.closed_at }}{% if r.hours is not none %} · {{ r.hours }}h{% endif %}</div>{% endif %}
+                            </td>
+                            <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="Zone base candle {{ r.formed }}">{{ r.ready_at }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="13" class="px-3 py-8 text-center text-sm text-gray-600">No S/D signals match these filters</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                </div>
+                {% if pages > 1 %}
+                <div class="px-4 py-3 border-t border-dark-600 flex items-center justify-between text-sm">
+                    {% set qs = base_qs ~ '&status=' ~ status %}
+                    {% if page > 1 %}<a href="/sd-signals?{{ qs }}&page={{ page - 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">← Previous</a>{% else %}<span></span>{% endif %}
+                    <span class="text-gray-500 text-xs">page {{ page }} / {{ pages }}</span>
+                    {% if page < pages %}<a href="/sd-signals?{{ qs }}&page={{ page + 1 }}" class="px-3 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300">Next →</a>{% else %}<span></span>{% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            <p class="mt-4 text-[11px] text-gray-500 leading-relaxed">
+                A row is a zone that passed every gate (1D bias, target, R:R ≥ 2) — the engine would place a limit order at the proximal edge.
+                <b>Waiting</b>: price has not touched the entry yet. <b>Filled</b>: entry touched, no TP/SL yet. <b>Closed</b>: TP or SL hit first
+                (flat TP/SL on 15m candles, no partial profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days).
+                "TP before entry" counts as TP, per the setup-result rule. Levels are frozen when the zone first appeared.
+            </p>
+        </div>
+    </main>
+</div>
+{% endblock %}
