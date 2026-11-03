@@ -32,7 +32,8 @@ _OUTCOME = {
     "pending":         ("waiting", "Waiting entry",   "blue",   "—",               "gray"),
     "filled":          ("filled",  "Filled",          "yellow", "—",               "gray"),
     "win":             ("closed",  "Closed",          "gray",   "TP",              "green"),
-    "tp_before_entry": ("closed",  "Closed",          "gray",   "TP before entry", "green"),
+    # 03.11 (kullanici): dolum olmadan TP sonuc degil -- motor artik bu satiri uretmez (bekleyis surer); eski satirlar "Missed", R yok
+    "tp_before_entry": ("closed",  "Missed",          "gray",   "TP before entry", "yellow"),
     "loss":            ("closed",  "Closed",          "gray",   "SL",              "red"),
     "ambiguous":       ("closed",  "Closed",          "gray",   "Same bar (?)",    "yellow"),
     "no_touch":        ("closed",  "Expired",         "gray",   "No entry",        "gray"),
@@ -103,7 +104,7 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
         elif oc == "pending":
             dist_r = round(move / risk, 2)           # pozitif = fiyat girise henuz gelmedi (LONG'da ustunde, SHORT'ta altinda)
     final_r = None
-    if oc in ("win", "tp_before_entry"):
+    if oc == "win":
         final_r = rr
     elif oc == "loss":
         final_r = -1.0
@@ -171,7 +172,7 @@ async def build_sd_signals(
         counts[v["tab"]] += 1
         s = summary.setdefault(v["tf"], {"label": v["tf_label"], "n": 0, "tp": 0, "sl": 0, "r": 0.0, "open": 0})
         s["n"] += 1
-        if v["outcome"] in ("win", "tp_before_entry"):
+        if v["outcome"] == "win":
             s["tp"] += 1
             s["r"] += float(v["rr"] or 0)
         elif v["outcome"] == "loss":

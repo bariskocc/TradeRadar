@@ -871,7 +871,8 @@ def _apply_shadow(rec: dict, bar_ts, high: float, low: float) -> None:
             v["pt"] = prev == "pending"
         if v["o"] == "pending":
             if hit_tp and not hit_e:
-                v["o"], v["at"] = "tp_before_entry", bar_ts
+                if rec.get("strategy") not in SD_FILL_REQUIRED_STRATEGIES:
+                    v["o"], v["at"] = "tp_before_entry", bar_ts
             elif hit_e:
                 v["e"] = bar_ts
                 if hit_tp:
@@ -933,6 +934,10 @@ FINAL_REFREEZE_STRATEGIES = frozenset({"1d", "1w"})
 # S/D (03.11, kullanici: XAUUSD hedefi): bekleyen (dolmamis) bolgenin TP'si her HTF kapanisinda "fiyatin otesindeki en yakin
 # engel"e guncellenir; giris/SL donuk kalir, dolumda TP de donar. Golge RR'leri ve dolum oncesi kosu yolu TP ile birlikte yenilenir.
 SD_TP_UPDATE_STRATEGIES = frozenset({"sd", "sd1h"})
+# S/D sonucu DOLUM ister (03.11, kullanici: "entry'e gelmeden TP olduysa win sayilmaz" -- CRT'deki 24.10 kuralindan FARKLI):
+# fiyat girise dokunmadan TP'ye giderse satir kapanmaz, bolge beklemeye devam eder (TP bir sonraki HTF kapanisinda yenilenir);
+# sonuc yalniz win / loss (dolumdan sonra) ya da ufukta no_touch.
+SD_FILL_REQUIRED_STRATEGIES = SD_TP_UPDATE_STRATEGIES
 _RESET_KEYS = ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
                "entry_touched_at", "tracked_until", "shadow", "entries", "entry_cands",
                "retrace", "prefill", "parts_at_levels", "features_at_levels", "first_bar", "parts_final")
@@ -1438,7 +1443,8 @@ def _apply_bar(rec: dict, bar_ts, high: float, low: float) -> None:
     rec["tracked_until"] = bar_ts
     if rec["outcome"] == "pending":
         if hit_tp and not hit_e:
-            _final(rec, "tp_before_entry", bar_ts)
+            if rec.get("strategy") not in SD_FILL_REQUIRED_STRATEGIES:
+                _final(rec, "tp_before_entry", bar_ts)
         elif hit_e:
             rec["entry_touched_at"] = bar_ts
             if hit_tp:

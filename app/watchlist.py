@@ -1692,7 +1692,7 @@ async def _p_session_anchor(db: AsyncSession) -> Progress:
 
 async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
     """03.11 (kullanici): Supply/Demand 4H olcumu. Journal `sd` satirlari (sinyal yok, duz TP/SL, seviye = proximal /
-    distal + tampon / hedef). Cozulmus = TP once mi SL once mi (win + tp_before_entry = TP, loss = SL). Tablo: tazelik
+    distal + tampon / hedef). Cozulmus = DOLUMDAN sonra TP mi SL mi (win / loss; dolumsuz TP sayilmaz -- 03.11 kullanici). Tablo: tazelik
     (seviye andaki `touches`) ve bolge tipi (devam RBR/DBD, donus DBR/RBD, leg-in zayif ?) x TP/SL; kapi gecen vs gecmeyen.
     Tetik 100 cozulmus kapi gecmis (sd_ready) bolge."""
     t = _journal_table()
@@ -1706,9 +1706,9 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
     ready = 0
     for r in rows:
         o = r["outcome"]
-        if o not in ("win", "tp_before_entry", "loss"):
+        if o not in ("win", "loss"):
             continue
-        tp = o != "loss"
+        tp = o == "win"
         try:
             f = json.loads(r["features_at_levels"] or "{}")
         except Exception:

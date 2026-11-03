@@ -133,7 +133,7 @@
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap">PRICE</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="TP or SL first (entry fill not required)">RESULT</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first">RESULT</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="When the zone passed every gate (TSİ); zone base candle in tooltip">READY</th>
                         </tr>
                     </thead>
@@ -195,9 +195,10 @@
 
             <p class="mt-4 text-[11px] text-gray-500 leading-relaxed">
                 A row is a zone that passed every gate (1D bias, target, R:R ≥ 2) — the engine would place a limit order at the proximal edge.
-                <b>Waiting</b>: price has not touched the entry yet. <b>Filled</b>: entry touched, no TP/SL yet. <b>Closed</b>: TP or SL hit first
-                (flat TP/SL on 15m candles, no partial profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days).
-                "TP before entry" counts as TP, per the setup-result rule. Levels are frozen when the zone first appeared.
+                <b>Waiting</b>: price has not touched the entry yet — if price runs to the target without filling, the zone keeps waiting (no result).
+                <b>Filled</b>: entry touched, no TP/SL yet. <b>Closed</b>: TP or SL hit after the fill (flat TP/SL on 15m candles, no partial
+                profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days). Entry and SL are frozen when the zone first
+                qualifies; the target follows the nearest obstacle until the fill.
             </p>
         </div>
     </main>
