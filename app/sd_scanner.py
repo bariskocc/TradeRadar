@@ -33,7 +33,7 @@ SD_CFG = {
 }
 
 # Radar siralamasi icin kapi onceligi (yuksek = daha ileri).
-_STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_low_rr": 3, "sd_ready": 4}
+_STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_ready": 5}
 
 
 def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
@@ -43,6 +43,11 @@ def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
         return "sd_bias"
     if plan.tp is None:
         return "sd_no_target"
+    if plan.dist_r is not None and plan.dist_r > sde.MAX_RR:
+        # 03.11 (kullanici: "fresh bolgeye TP yazmis"): giris fiyattan MAX_RR x risk'ten uzaksa 4R'lik TP fiyatin bu
+        # tarafinda kalir -- Journal ilk mumda "TP before entry" sayiyordu (BTC 1H SHORT 8 ATR ustte, stop 0.3 ATR).
+        # Boyle bolgeye emir de konmaz; seviye yazilmaz, izlenmez.
+        return "sd_far"
     if plan.rr is None or plan.rr < sde.MIN_RR:
         return "sd_low_rr"
     return "sd_ready"
@@ -94,8 +99,9 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
                 strategy, display, market, stage,
                 direction=z.direction, purge_time=z.base_start, crt_bar_time=z.base_start,
                 score=parts["score"], bias=bias, weekly_bias=weekly, rr=plan.rr,
-                entry=plan.entry if plan.tp is not None else None,
-                sl=plan.sl if plan.tp is not None else None, tp=plan.tp,
+                entry=plan.entry if plan.tp is not None and stage != "sd_far" else None,
+                sl=plan.sl if plan.tp is not None and stage != "sd_far" else None,
+                tp=plan.tp if stage != "sd_far" else None,
                 model=z.zone_type, parts=parts, features=feats, now=now,
             )
             if z.dead:

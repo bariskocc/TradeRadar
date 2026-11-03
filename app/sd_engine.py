@@ -114,6 +114,7 @@ class SDPlan:
     target_kind: Optional[str]   # zone | swing | cap | None
     tp_struct: Optional[float] = None   # tavan uygulanmadan onceki yapisal hedef
     rr_struct: Optional[float] = None
+    dist_r: Optional[float] = None      # son kapanisin girise uzakligi, R cinsinden (pozitif = giris henuz dolmadi)
 
 
 def closed_bars(df: pd.DataFrame, now=None, delta: timedelta = HTF_DELTA) -> pd.DataFrame:
@@ -302,6 +303,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     rr = None
     risk = abs(entry - sl)
     tp_struct, rr_struct = tp, None
+    dist_r = round(((last_close - entry) if long else (entry - last_close)) / risk, 2) if risk > 0 else None
     if tp is not None and risk > 0:
         rr_struct = round(abs(tp - entry) / risk, 2)
         if rr_struct > MAX_RR:
@@ -309,7 +311,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
             kind = "cap"
         rr = round(abs(tp - entry) / risk, 2)
     return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind,
-                  tp_struct=tp_struct, rr_struct=rr_struct)
+                  tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r)
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -352,6 +354,7 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
     if plan is not None:
         out["target_kind"] = plan.target_kind
         out["rr_struct"] = plan.rr_struct
+        out["dist_r"] = plan.dist_r
     return out
 
 

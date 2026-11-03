@@ -74,6 +74,7 @@ STAGES: list[tuple[str, str]] = [
     ("sd_dead", "S/D: zone dead (broken / 2+ touches)"),
     ("sd_bias", "S/D: 1D bias opposite"),
     ("sd_no_target", "S/D: no target (zone / swing)"),
+    ("sd_far", "S/D: zone too far (> 4R from price)"),
     ("sd_low_rr", "S/D: RR < 2"),
     ("sd_ready", "S/D: zone ready (all gates)"),
 ]
