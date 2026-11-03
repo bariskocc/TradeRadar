@@ -100,33 +100,22 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
             # bolge olusumundan sonra goruluyor; Journal yalniz donmadan SONRA kapanan 15m mumlarini izledigi icin aradaki
             # dolum/TP kayboluyordu. Yeni satirda seviyeler olusum anina (formed mumunun kapanisi) tarihlenir ve store'daki
             # kapanmis 15m mumlari o andan bugune yeniden oynatilir -- 15m gecmisi olusumu kapsiyorsa.
-            note_now, df15, lv = now, frames.get("15m"), plan
-            if has_levels and not journal.has_record(strategy, display, z.direction, z.base_start):
-                formed_close = z.formed_time + cfg["delta"]
-                if df15 is not None and len(df15) and df15.index[0] <= formed_close < _ts(now, df15.index[0]):
-                    # Seviyeler OLUSUM ANINDAKI engellerle (o gunku bolgeler / swingler) hesaplanir; bugunku hedefle geriye
-                    # gitmek sonradan olusan swing'i hedef sayip sahte "TP before entry" uretiyordu (XAUUSD 3978).
-                    past = closed[closed.index <= z.formed_time]
-                    zones_at = sde.detect_zones(past)
-                    twin = next((q for q in zones_at if q.base_start == z.base_start and q.side == z.side), None)
-                    plan_at = sde.plan_zone(twin, zones_at, past, float(past["close"].iloc[-1])) if twin is not None else None
-                    if plan_at is not None and plan_at.tp is not None and plan_at.dist_r is not None \
-                            and plan_at.dist_r <= sde.MAX_RR and plan_at.rr >= sde.MIN_RR:
-                        note_now, lv = formed_close.to_pydatetime(), plan_at
+            df15 = frames.get("15m")
+            if has_levels and not journal.has_record(strategy, display, z.direction, z.base_start) \
+                    and df15 is not None and len(df15) and df15.index[0] <= z.formed_time + cfg["delta"]:
+                # Ilk gorus geri doldurmasi: olusumdan bugune HTF mumu mumu (o anki engeller / bias / uzaklik) yuruyup
+                # kapanmis 15m mumlarini oynat -- motor surekli calissaydi ne gorecekse o. Bugunku degerlendirme en sonda.
+                _backfill_zone(strategy, display, market, z, closed, df15, d1 if (d1 := frames.get("1d")) is not None else None,
+                               cfg["delta"], now, weekly)
             journal.note(
                 strategy, display, market, stage,
                 direction=z.direction, purge_time=z.base_start, crt_bar_time=z.base_start,
-                score=parts["score"], bias=bias, weekly_bias=weekly, rr=lv.rr,
-                entry=lv.entry if has_levels else None,
-                sl=lv.sl if has_levels else None,
-                tp=lv.tp if has_levels else None,
-                model=z.zone_type, parts=parts, features=feats, now=note_now,
+                score=parts["score"], bias=bias, weekly_bias=weekly, rr=plan.rr,
+                entry=plan.entry if has_levels else None,
+                sl=plan.sl if has_levels else None,
+                tp=plan.tp if has_levels else None,
+                model=z.zone_type, parts=parts, features=feats, now=now,
             )
-            if note_now is not now:
-                for ts, b in df15[df15.index >= note_now].iterrows():
-                    if ts + timedelta(minutes=15) > _ts(now, ts):
-                        break                                   # olusan mum
-                    journal.track_bar(strategy, display, ts, float(b["high"]), float(b["low"]), float(b["close"]))
             if z.dead:
                 continue
             n_live += 1
@@ -157,6 +146,45 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
     except Exception:
         log.exception("%s evaluate failed for %s", strategy, bingx_symbol)
         return None
+
+
+def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now, weekly) -> None:
+    """Yeni gorulen bolge icin gecmisi yeniden oynat: her HTF kapanisinda o anki plan/kapi ile `journal.note` (dolum oncesi
+    TP guncellemesi dahil), aradaki kapanmis 15m mumlariyla `track_bar`. Bugunun kapanisi dahil degil (cagiran yazar)."""
+    now_ts = _ts(now, closed.index[0])
+    hts = [t for t in closed.index if t >= z.formed_time and t + delta < now_ts]
+    prev_close = None
+    for t in hts:
+        past = closed[closed.index <= t]
+        zones_at = sde.detect_zones(past)
+        twin = next((q for q in zones_at if q.base_start == z.base_start and q.side == z.side), None)
+        if twin is None:
+            continue
+        last_close = float(past["close"].iloc[-1])
+        plan_at = sde.plan_zone(twin, zones_at, past, last_close)
+        bias_at = "NEUTRAL"
+        if df1d is not None and not df1d.empty:
+            d1p = df1d[df1d.index <= t]
+            bias_at = compute_daily_bias(d1p) if not d1p.empty else "NEUTRAL"
+        stage_at = _gate(twin, plan_at, bias_at)
+        lv = plan_at.tp is not None and stage_at != "sd_far"
+        parts_at = sde.score_zone(twin, bias_at)
+        feats_at = sde.zone_features(twin, last_close, _bars_since(past, twin.base_start), plan_at)
+        t_close = (t + delta).to_pydatetime()
+        journal.note(
+            strategy, display, market, stage_at,
+            direction=twin.direction, purge_time=twin.base_start, crt_bar_time=twin.base_start,
+            score=parts_at["score"], bias=bias_at, weekly_bias=weekly, rr=plan_at.rr,
+            entry=plan_at.entry if lv else None, sl=plan_at.sl if lv else None, tp=plan_at.tp if lv else None,
+            model=twin.zone_type, parts=parts_at, features=feats_at, now=t_close,
+        )
+        lo = prev_close if prev_close is not None else t
+        bars = df15[(df15.index + timedelta(minutes=15) > lo) & (df15.index + timedelta(minutes=15) <= t + delta)]
+        for ts, b in bars.iterrows():
+            journal.track_bar(strategy, display, ts, float(b["high"]), float(b["low"]), float(b["close"]))
+        prev_close = t + delta
+        if twin.dead:
+            break
 
 
 def _ts(now, like) -> pd.Timestamp:

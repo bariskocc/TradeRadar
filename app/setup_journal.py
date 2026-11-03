@@ -930,6 +930,9 @@ C2_REFREEZE_STRATEGIES = frozenset({"4h"})
 #   - sinyal olmadan C2 kapanirsa 4H gibi C2 kapanisinda (purge ucu kesinlesti).
 # 25.09+ 1D setuplarinin %88'i seviyeyi C2 acikken donduruyordu (kosan SL -> sonuc SL yonune yanli).
 FINAL_REFREEZE_STRATEGIES = frozenset({"1d", "1w"})
+# S/D (03.11, kullanici: XAUUSD hedefi): bekleyen (dolmamis) bolgenin TP'si her HTF kapanisinda "fiyatin otesindeki en yakin
+# engel"e guncellenir; giris/SL donuk kalir, dolumda TP de donar. Golge RR'leri ve dolum oncesi kosu yolu TP ile birlikte yenilenir.
+SD_TP_UPDATE_STRATEGIES = frozenset({"sd", "sd1h"})
 _RESET_KEYS = ("entry", "sl", "tp", "rr", "levels_at", "outcome", "outcome_at",
                "entry_touched_at", "tracked_until", "shadow", "entries", "entry_cands",
                "retrace", "prefill", "parts_at_levels", "features_at_levels", "first_bar", "parts_final")
@@ -1283,6 +1286,26 @@ def note(
             if merged != rec.get("features"):
                 rec["features"] = merged
                 changed = True
+        if (
+            key[0] in SD_TP_UPDATE_STRATEGIES and tp is not None and rec.get("levels_at") is not None
+            and stage == "sd_ready"      # yalniz kapilari gecen plan (RR >= 2, hedef fiyatin otesinde); low_rr hedefi TP yapmaz
+            and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None
+            and rec.get("tp") is not None and abs(float(tp) - float(rec["tp"])) > 1e-9 * max(1.0, abs(float(tp)))
+            and entry is not None and sl is not None
+            and abs(float(entry) - float(rec["entry"])) < 1e-9 * max(1.0, abs(float(entry)))
+            and abs(float(sl) - float(rec["sl"])) < 1e-9 * max(1.0, abs(float(sl)))
+        ):
+            rec["tp"] = float(tp)
+            rec["rr"] = float(rr) if rr is not None else rec.get("rr")
+            risk = abs(float(rec["entry"]) - float(rec["sl"]))
+            for v in (rec.get("shadow") or {}).values():
+                if v.get("k") and risk:
+                    v["rr"] = round(abs(float(tp) - float(rec["entry"])) / (float(v["k"]) * risk), 4)
+            if rec.get("prefill"):
+                path = (float(tp) - float(rec["entry"])) if rec["direction"] == "LONG" else (float(rec["entry"]) - float(tp))
+                if path > 0:
+                    rec["prefill"]["path"] = round(path, 8)
+            changed = True
         if entry is not None and sl is not None and tp is not None and rec.get("levels_at") is None:
             # Ilk gorulen seviyeler dondurulur: sonuc izleme bunlarla yapilir.
             rec.update(entry=float(entry), sl=float(sl), tp=float(tp),
