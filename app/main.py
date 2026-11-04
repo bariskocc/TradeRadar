@@ -202,6 +202,17 @@ templates.env.globals["calc_rr_ratio"] = _calc_rr_ratio
 templates.env.globals["signal_planned_rr"] = _signal_planned_rr
 templates.env.globals["signal_realized_rr"] = _signal_realized_rr
 templates.env.globals["fmt_ui_symbol"] = _fmt_ui_symbol
+# Sol menu rozetleri (04.11): aksiyon bekleyen izleme maddesi sayisi, bellekten (app/watch_badges.py).
+from app import watch_badges  # noqa: E402
+templates.env.globals["watch_badges"] = watch_badges.get
+
+
+@app.middleware("http")
+async def _watch_badge_refresh(request: Request, call_next):
+    """Her sayfa isteginde rozet sayilarini arka planda tazele (TTL 60 sn); sayfa beklemez."""
+    if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
+        watch_badges.schedule_refresh()
+    return await call_next(request)
 
 
 def _shown_smt(sig) -> str | None:
@@ -1298,6 +1309,7 @@ async def watchlist_page(request: Request, db: AsyncSession = Depends(get_db)):
         return RedirectResponse(url="/login", status_code=303)
     # Tamamlananlar her zaman en altta, katlanmis baslikta; ?done=1 o basligi acik getirir (28.09).
     data = await build_watchlist(db, show_done=request.query_params.get("done") == "1")
+    watch_badges.set_from("crt", data["counts"])
     return templates.TemplateResponse(request=request, name="watchlist.html", context={
         "user": user,
         "active_page": "watchlist",
@@ -1314,6 +1326,7 @@ async def sd_watchlist_page(request: Request, db: AsyncSession = Depends(get_db)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
     data = await build_watchlist(db, show_done=request.query_params.get("done") == "1", group="sd")
+    watch_badges.set_from("sd", data["counts"])
     return templates.TemplateResponse(request=request, name="watchlist.html", context={
         "user": user,
         "active_page": "sd_watchlist",
@@ -1636,8 +1649,15 @@ async def sd_hub_page(request: Request, db: AsyncSession = Depends(get_db)):
         return RedirectResponse(url="/login", status_code=303)
     q = request.query_params
     view = q.get("view") or "radar"
-    view = view if view in ("radar", "journal", "signals") else "radar"
+    view = view if view in ("radar", "journal", "signals", "score") else "radar"
     tf = q.get("tf") or "sd"
+    if view == "score":
+        # S/D Skor Tablosu (04.11, kullanici): app/sd_score_table.py, arayuz Turkce
+        from app.sd_score_table import build_sd_score_table
+        data = await build_sd_score_table(db, tf)
+        return templates.TemplateResponse(request=request, name="sd_score_table.html", context={
+            "user": user, "active_page": "sd", "sd_view": "score", **data,
+        })
     if view == "signals":
         tf = tf if tf in ("all", "sd", "sd1h", "sd15m") else "all"
         from app.sd_signals import build_sd_signals, week_start_tsi

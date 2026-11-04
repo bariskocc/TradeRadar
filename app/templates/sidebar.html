@@ -63,6 +63,14 @@
         #tr-sidebar nav > a { padding-top: .4rem; padding-bottom: .4rem; }
         #tr-sidebar nav > p { margin-top: .75rem; }
     }
+    /* Kaydirma cubugu yalniz menunun ustune gelince (04.11, kullanici): Firefox'ta scrollbar-color, WebKit'te ::-webkit-scrollbar.
+       Genislik sabit (6px) ki hover'da icerik kaymasin; cubuk saydam, hover'da gri. */
+    #tr-sidebar nav { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+    #tr-sidebar nav:hover { scrollbar-color: rgb(var(--tr-d600)) transparent; }
+    #tr-sidebar nav::-webkit-scrollbar { width: 6px; }
+    #tr-sidebar nav::-webkit-scrollbar-track { background: transparent; }
+    #tr-sidebar nav::-webkit-scrollbar-thumb { background: transparent; border-radius: 3px; }
+    #tr-sidebar nav:hover::-webkit-scrollbar-thumb { background: rgb(var(--tr-d600)); }
 </style>
 <button id="tr-nav-toggle" type="button" aria-label="Toggle menu" aria-controls="tr-sidebar">
     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -146,6 +154,7 @@
             {% if active_page == 'watchlist' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
             Watchlist
+            {% set wb = watch_badges() %}{% if wb.crt %}<span class="ml-auto px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-accent-yellow/15 text-accent-yellow" title="Aksiyon bekleyen madde">{{ wb.crt }}</span>{% endif %}
         </a>
         {# Supply / Demand (03.11, kullanici: "CRT ile karismasin") -- ayni sayfalar, ayri strateji sekmesi. #}
         <p class="px-3 py-1.5 mt-4 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Supply / Demand</p>
@@ -164,10 +173,16 @@
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
             S/D Journal
         </a>
+        <a href="/sd?view=score" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
+            {% if active_page == 'sd' and sd_view == 'score' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+            S/D Score Table
+        </a>
         <a href="/sd-izleme" class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition
             {% if active_page == 'sd_watchlist' %}bg-accent-blue/10 text-accent-blue font-medium{% else %}text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
             S/D Watchlist
+            {% set wb = watch_badges() %}{% if wb.sd %}<span class="ml-auto px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-accent-yellow/15 text-accent-yellow" title="Aksiyon bekleyen madde">{{ wb.sd }}</span>{% endif %}
         </a>
         {# Analytics ve Logs menuden kaldirildi (03.11, kullanici: "hic kullanmiyorum, gerekirse acariz"); /analytics ve /logs route'lari duruyor. #}
         {% if false %}

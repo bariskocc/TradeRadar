@@ -24,7 +24,7 @@ MAX_BUFFER = 400                 # 15m mum (~4 gun); daha eskisi CHOCH icin gere
 SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (seviye - dip)
 FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open")
 LABELS = {
-    "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — waiting retest", "filled": "Filled (confirm)",
+    "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — limit resting", "filled": "Filled on retest",
     "win": "TP", "loss": "SL", "ambiguous": "Same bar (?)", "missed": "Missed (no retest)",
     "failed": "Zone failed before CHOCH", "no_touch": "No retest in horizon", "no_choch": "No CHOCH in horizon",
     "open": "Open at horizon",

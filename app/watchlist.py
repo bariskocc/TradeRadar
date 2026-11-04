@@ -1753,9 +1753,27 @@ async def _p_sd_entry_model(db: AsyncSession) -> Progress:
             st = {}
         lo, co = r["outcome"], st.get("o")
         if lo in ("win", "loss"):
-            g = acc.setdefault((r["strategy"], "limit"), [0, 0, 0.0, 0])
+            g = acc.setdefault((r["strategy"], "limit (proximal)"), [0, 0, 0.0, 0])
             g[0 if lo == "win" else 1] += 1
             g[2] += float(r["rr"] or 0) if lo == "win" else -1.0
+        # 04.11: bolge ortasi / distal kenar varyantlari (Journal entries, SL/TP ayni); dolmadan TP = kacirildi
+        try:
+            ents = json.loads(r["entries"] or "{}")
+        except Exception:
+            ents = {}
+        for vname, label in (("zone_mid", "limit (%50)"), ("zone_far", "limit (distal)")):
+            v = ents.get(vname) or {}
+            vo = v.get("o")
+            if vo in ("win", "loss", "tp_before_entry", "no_touch"):
+                g = acc.setdefault((r["strategy"], label), [0, 0, 0.0, 0])
+                if vo == "win":
+                    g[0] += 1
+                    g[2] += float(v.get("rr") or 0)
+                elif vo == "loss":
+                    g[1] += 1
+                    g[2] -= 1.0
+                else:
+                    g[3] += 1
         if co in ("win", "loss", "missed", "failed"):
             g = acc.setdefault((r["strategy"], "onay+retest"), [0, 0, 0.0, 0])
             if co == "win":
@@ -1773,7 +1791,35 @@ async def _p_sd_entry_model(db: AsyncSession) -> Progress:
         n = w + l
         table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H'}.get(st_, st_) } · {label}", str(w), str(l), f"{rs / n:+.2f}" if n else "-", str(m)])
     return Progress(bars=[Bar("iki kolu da çözülmüş bölge", pairs, 60)], table=table,
-                    note="aynı bölge: limit = proximal'de dolum; onay = 15m CHOCH sonrası kırılan seviyenin retesti, dar stop (kaçan = retest gelmedi)")
+                    note="aynı bölge, SL/TP aynı: limit proximal (bugünkü) / %50 / distal; onay = 15m CHOCH sonrası retest, dar stop (kaçan = dolmadan gitti)")
+
+
+async def _p_sd_score_items(db: AsyncSession) -> Progress:
+    """04.11 (kullanici: "1H sinyallerinin skoru cok dusuk"): S/D skor kalemleri kazanani ayiriyor mu? Cozulmus (win/loss) S/D
+    satirlarinda her kalem degeri -> TP / SL / WR; BOS ve sweep (puansiz) da. Surekli tablo, tetik yok; tablo kurulurken okunur."""
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.outcome.in_(("win", "loss"))))).mappings().all()
+    acc: dict[tuple, list] = {}
+    for r in rows:
+        try:
+            p = json.loads(r["parts_at_levels"] or r["score_parts"] or "{}")
+            f = json.loads(r["features_at_levels"] or r["features"] or "{}")
+        except Exception:
+            continue
+        win = r["outcome"] == "win"
+        items = [("strength", p.get("strength")), ("base", p.get("base")), ("fvg", p.get("fvg")), ("fresh", p.get("fresh")),
+                 ("htf (1D bias)", p.get("htf")), ("bos", f.get("bos")), ("sweep", f.get("sweep")),
+                 ("skor", int(p.get("score")) if p.get("score") is not None else None)]
+        for name, val in items:
+            if val is None:
+                continue
+            g = acc.setdefault((name, int(val)), [0, 0])
+            g[0 if win else 1] += 1
+    table = [["Kalem = değer", "TP", "SL", "WR"]]
+    for (name, val), (w, l) in sorted(acc.items()):
+        n = w + l
+        table.append([f"{name} = {val}", str(w), str(l), f"%{100 * w / n:.0f}"])
+    return Progress(table=table, note=f"{len(rows)} çözülmüş S/D bölgesi (üç TF birlikte, kapıdan bağımsız) · seviye andaki kalemler")
 
 
 async def _p_sd_stop_width(db: AsyncSession) -> Progress:
@@ -2819,12 +2865,20 @@ ITEMS: list[WatchItem] = [
     ),
     WatchItem(
         key="sd_entry_model", status="open", started="03.11", onem=1, group="sd",
-        title="S/D giriş: limit mi, 15m CHOCH + retest mi?",
+        title="S/D giriş: limit (proximal / %50 / distal) mi, 15m CHOCH + retest mi?",
         trigger="iki kolu da çözülmüş 60 bölge: onay kolu R/işlemde ≥ +0,15 ileride VE kaçırdığı (retest gelmeyen) bölgeler "
                 "hesaba katılınca toplam R de ileride VE iki yarıda aynı yön → canlıda onaylı giriş; aksi halde limit",
         measure="/sd-signals CONFIRM sütunu · /izleme tablosu (Journal entries.sdc)",
         md="S/D giriş: limit mi, 15m CHOCH + retest mi? (03.11.2026)",
         progress_fn=_p_sd_entry_model,
+    ),
+    WatchItem(
+        key="sd_score_items", status="open", started="04.11", onem=2, group="sd", continuous=True,
+        title="S/D skor kalemleri — hangisi kazananı ayırıyor?",
+        trigger="sürekli; 100 çözülmüş bölgede kalem başına taraf ≥ 20 olunca tablo yeniden kurulur (puan sadece ayıran kaleme)",
+        measure="/sd-izleme tablosu (Journal parts_at_levels / features_at_levels)",
+        md="S/D skor kalemleri — hangisi kazananı ayırıyor? (04.11.2026)",
+        progress_fn=_p_sd_score_items,
     ),
     WatchItem(
         key="sd_stop_width", status="open", started="03.11", onem=1, group="sd",

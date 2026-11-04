@@ -24,6 +24,10 @@ log = logging.getLogger(__name__)
 
 STRATEGY_SD = sde.STRATEGY_SD
 MEASURE_ONLY = True   # sinyal acilmaz; canliya gecis ayri karar (kullanici)
+# 1D bias hard kapisi (04.11, kullanici karari: KAPALI). CRT'den miras `sd_bias` XAUUSD 1H 04.11 06:00 TSI demand'ini (1D BEARISH,
+# leg-out 4.8 ATR) eliyordu; S/D'de bolge zaten trende karsi donus olarak calisir. Bias yalniz skor kalemi (+2/-2); etkisi
+# `/sd-izleme` sayaclarinda (features/parts "htf"). True yapmak eski davranisi geri getirir.
+BIAS_GATE = False
 
 # Iki olcum stratejisi (03.11, kullanici): 4H bolge (tum 4H evreni) ve 1H bolge (altcoin yok -- 1h akisi yalniz BTC/ETH +
 # FX/metal/endeks/petrol'de var). Ikisi de 15m ile izlenir: 5m akisi 28.09'dan beri kapali, olcum icin 15m yeterli.
@@ -42,7 +46,7 @@ _STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_l
 def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
     if z.dead:
         return "sd_dead"
-    if not sde.bias_aligned(z.direction, bias):
+    if BIAS_GATE and not sde.bias_aligned(z.direction, bias):
         return "sd_bias"
     if plan.tp is None:
         return "sd_no_target"
@@ -120,6 +124,7 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
                 sl=plan.sl if has_levels else None,
                 tp=plan.tp if has_levels else None,
                 model=z.zone_type, parts=parts, features=feats, now=now,
+                entries=_entry_cands(z, plan, last_close) if has_levels else None,
             )
             if z.dead:
                 continue
@@ -183,6 +188,7 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
             score=parts_at["score"], bias=bias_at, weekly_bias=weekly, rr=plan_at.rr,
             entry=plan_at.entry if lv else None, sl=plan_at.sl if lv else None, tp=plan_at.tp if lv else None,
             model=twin.zone_type, parts=parts_at, features=feats_at, now=t_close,
+            entries=_entry_cands(twin, plan_at, last_close) if lv else None,
         )
         lo = prev_close if prev_close is not None else t
         bars = df15[(df15.index + ltf_delta > lo) & (df15.index + ltf_delta <= t + delta)]
@@ -191,6 +197,13 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
         prev_close = t + delta
         if twin.dead:
             break
+
+
+def _entry_cands(z, plan, last_close: float) -> dict:
+    """Journal giris varyantlari (04.11): chosen = proximal (bugunku), zone_mid = bolge ortasi, zone_far = distal kenar.
+    SL/TP satirinki; `_ref` = seviye andaki fiyat (Journal 'zaten gecilmis giris' isaretlemesi icin)."""
+    return {"chosen": float(plan.entry), "zone_mid": float((z.proximal + z.distal) / 2), "zone_far": float(z.distal),
+            "_ref": float(last_close)}
 
 
 def _ts(now, like) -> pd.Timestamp:

@@ -140,7 +140,7 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
             c_live = round(((price - float(sdc["e"])) if long else (float(sdc["e"]) - price)) / c_risk, 2)
     return {
         "symbol": r.symbol, "market": r.market_type, "tf": r.strategy, "tf_label": TF_LABELS.get(r.strategy, r.strategy),
-        "direction": r.direction, "zone_type": zt,
+        "direction": r.direction, "zone_type": zt, "bias": r.htf_bias,
         "zone_label": ("Demand" if long else "Supply") + " · " + ZONE_NAMES.get(zt, zt),
         "entry_s": _fmt_p(entry), "sl_s": _fmt_p(sl), "tp_s": _fmt_p(tp),
         "confirm_o": c_o, "confirm_label": sd_confirm.LABELS.get(c_o, "—") if c_o else None,

@@ -132,16 +132,17 @@
                         <tr class="border-b border-dark-600 text-xs text-gray-500">
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SYMBOL</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">TF</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SIDE</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Demand = buy zone, Supply = sell zone · leg-in · Base · leg-out (continuation = same direction in and out, reversal = direction flips) · Fresh = untouched when the signal formed">ZONE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">DIRECTION</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out: R = rally, D = drop (RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in) · hover for the full name · Fresh = untouched when the signal formed">ZONE</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="BOS = leg-out broke structure · Sweep = base took prior liquidity · FVG left by the leg-out">CONTEXT</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="1D bias at the last evaluation">1D BIAS</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Entry = proximal edge · SL = distal edge + 0.1 ATR · TP = nearest obstacle, capped at 4R">ENTRY / SL / TP</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first">RESULT</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Alternative entry (measured in parallel): after the zone is touched, wait for a 15m CHOCH (close beyond the last lower-high / higher-low), enter on the retest of that level, SL just beyond the pullback low/high">CONFIRM (15m)</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Alternative entry (measured in parallel): after the zone is touched, wait for a 15m CHOCH (close beyond the last lower-high / higher-low), place a LIMIT at that level and enter only on its retest, SL just beyond the pullback low/high (LTF = 5m where available, else 15m)">LTF CONFIRM</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Open time of the first base candle of the zone (TF candle, TSİ)">SETUP</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="The 15m candle that touched the entry (TSİ)">RETEST</th>
                         </tr>
@@ -150,12 +151,12 @@
                         {% for r in rows %}
                         <tr class="hover:bg-dark-700/50 {% if r.tab == 'closed' and r.outcome in ('no_touch', 'open') %}opacity-60{% endif %}">
                             <td class="px-2 py-2 text-sm font-medium text-white whitespace-nowrap">{{ fmt_ui_symbol(r.symbol, r.market) }}</td>
-                            <td class="px-2 py-2 whitespace-nowrap"><span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400">{{ r.tf_label }}</span></td>
+                            <td class="px-2 py-2 whitespace-nowrap"><span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.tf == 'sd' %}bg-accent-blue/15 text-accent-blue{% elif r.tf == 'sd1h' %}bg-accent-purple/15 text-accent-purple{% else %}bg-amber-500/15 text-amber-400{% endif %}">{{ r.tf_label }}</span></td>
                             <td class="px-2 py-2 whitespace-nowrap">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ r.direction }}</span>
                             </td>
                             <td class="px-2 py-2 text-xs whitespace-nowrap">
-                                <span class="font-bold text-gray-300" title="{{ r.zone_type }}">{{ r.zone_label }}</span>
+                                <span class="font-bold text-gray-300" title="{{ r.zone_label }}">{{ r.zone_type }}</span>
                                 {% if r.fresh is true %}<span class="ml-1 text-[10px] text-emerald-400">fresh</span>{% elif r.fresh is false %}<span class="ml-1 text-[10px] text-amber-400">tested</span>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-[10px] whitespace-nowrap">
@@ -164,6 +165,7 @@
                                 {% if r.fvg %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10">FVG</span>{% endif %}
                                 {% if not (r.bos or r.sweep or r.fvg) %}<span class="text-gray-600">—</span>{% endif %}
                             </td>
+                            <td class="px-2 py-2 text-xs whitespace-nowrap">{% if r.bias == 'BULLISH' %}<span class="text-green-400">BULLISH</span>{% elif r.bias == 'BEARISH' %}<span class="text-red-400">BEARISH</span>{% elif r.bias %}<span class="text-gray-400">{{ r.bias }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
                                 {{ r.entry_s }} / <span class="text-red-400/80">{{ r.sl_s }}</span> / <span class="text-green-400/80">{{ r.tp_s }}</span>
@@ -195,7 +197,7 @@
                             <td class="px-2 py-2 text-xs whitespace-nowrap">{% if r.retest_at %}<span class="text-gray-300">{{ r.retest_at }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="14" class="px-3 py-8 text-center text-sm text-gray-600">No S/D signals match these filters</td></tr>
+                        <tr><td colspan="15" class="px-3 py-8 text-center text-sm text-gray-600">No S/D signals match these filters</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -217,9 +219,9 @@
                 profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days). Entry and SL are frozen when the zone first
                 qualifies; the target follows the nearest obstacle until the fill. <b>Setup</b> = open time of the zone's first base candle
                 (4H or 1H candle); <b>Retest</b> = the 15m candle that touched the entry. Rows are sorted by score.
-                <b>Confirm (15m)</b> is the alternative entry measured on the same zone: after the touch, wait for a 15m CHOCH (close beyond the
-                last lower-high / higher-low of the move into the zone), enter on the retest of that level with the stop just beyond the
-                pullback extreme — "Missed" = price left without a retest, "Zone failed" = the zone's stop was hit before any CHOCH.
+                <b>LTF Confirm</b> is the alternative entry measured on the same zone: after the touch, wait for an LTF CHOCH (close beyond the
+                last lower-high / higher-low of the move into the zone), then a <b>limit order at that level</b> — filled only on its retest, stop just
+                beyond the pullback extreme. "Missed" = price left without a retest, "Zone failed" = the zone's stop was hit before any CHOCH.
             </p>
         </div>
     </main>

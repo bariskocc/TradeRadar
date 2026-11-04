@@ -172,6 +172,9 @@ ENTRY_VARIANTS = ("chosen", "cisd", "mss",
                   "bpr_near", "bpr_mid", "bpr_far",
                   "bfvg_near", "bfvg_mid", "bfvg_far",
                   "dfvg_near", "dfvg_mid", "dfvg_far",
+                  # S/D (04.11, kullanici: "giris bolgenin %50'si olsun mu?"): ayni bolge, SL/TP ayni, giris proximal (chosen) /
+                  # bolge ortasi / distal kenar -- `app/sd_scanner` verir, CRT satirlarinda yok.
+                  "zone_mid", "zone_far",
                   "cfvg_near", "cfvg_mid", "cfvg_far")
 
 # CISD kirilim FVG'si: onay mumu merkezli pencere (orta mum: onay-1 .. onay+2). Adaylardan
