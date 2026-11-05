@@ -136,6 +136,7 @@
                     {{ label }} <span class="text-xs text-gray-500">{{ counts[key] }}</span>
                 </a>
                 {% endfor %}
+                {% if hidden_no_trade %}<a href="{{ sb }}?{{ sq }}tf={{ tf }}&market={{ market }}&direction={{ direction }}&result=no_trade&confirm={{ confirm }}&date_from={{ date_from }}&date_to={{ date_to }}" class="text-xs text-gray-500 hover:text-gray-300" title="Zone failed before CHOCH / no retest — no trade was opened">{{ hidden_no_trade }} no-trade rows hidden · show</a>{% endif %}
                 <span class="ml-auto text-xs text-gray-500">Prices from the live feed, refreshed on reload</span>
             </div>
 
@@ -149,7 +150,7 @@
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">DIRECTION</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="1D bias at the last evaluation">1D BIAS</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out: R = rally, D = drop (RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in) · hover for the full name · Fresh = untouched when the signal formed">ZONE</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="MSS = reversal zone (DBR / RBD) broke the last swing · BOS = the same break in a continuation zone · Sweep = base took the main liquidity (wide swing / EQ = equal lows-highs / PDL-PDH; a minor swing alone is not counted) · Discount / Premium = zone in the lower / upper half of the last 72 candles · FVG left by the leg-out">KEY LEVEL</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="MSS = reversal zone (DBR / RBD) broke the last swing · BOS = the same break in a continuation zone · HTF sweep = base took the main liquidity (wide swing / EQ = equal lows-highs / PDL-PDH; a minor swing alone is not counted) · LTF sweep = the pullback into the zone took LTF swing lows / highs formed since the base (extra confirmation; with it a far CHOCH swing falls back to the nearest short swing) · Discount / Premium = zone in the lower / upper half of the last 72 candles · FVG left by the leg-out">KEY LEVEL</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="4H / 1H: before the CHOCH the zone's levels (tagged 'zone'), after it the retest candidate nearest to price and the CHOCH stop (pullback extreme + 10% buffer) · 15m: proximal edge / distal edge + 0.1 ATR · TP = nearest obstacle, capped at 4R">ENTRY / SL / TP</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
@@ -176,10 +177,11 @@
                             </td>
                             <td class="px-2 py-2 text-[10px] whitespace-nowrap">
                                 {% if r.mss %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-blue bg-accent-blue/10" title="Reversal zone: leg-out broke the last swing (market structure shift)">MSS</span>{% elif r.bos %}<span class="px-1.5 py-0.5 rounded font-bold text-gray-300 bg-dark-600" title="Continuation zone: leg-out broke the last swing">BOS</span>{% endif %}
-                                {% if r.sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="Base took the main liquidity: {{ r.sweep_kind or 'major' }}">Sweep{% if r.sweep_kind and r.sweep_kind not in ('swing', 'major') %} {{ r.sweep_kind|upper }}{% endif %}</span>{% endif %}
+                                {% if r.sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="HTF sweep — base took the main liquidity: {{ r.sweep_kind or 'major' }}">HTF sweep</span>{% endif %}
+                                {% if r.ltf_sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="LTF sweep — the pullback took {{ r.ltf_sweep }} LTF swing(s) formed since the base: {{ r.ltf_swept|join(' · ') }}">LTF sweep</span>{% endif %}
                                 {% if r.pd_ok == 1 %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10" title="Demand in discount / supply in premium of the last 72 candles (position {{ r.pd_pos }})">{{ 'Discount' if r.direction == 'LONG' else 'Premium' }}</span>{% endif %}
                                 {% if r.fvg %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10">FVG</span>{% endif %}
-                                {% if not (r.bos or r.sweep or r.fvg or r.pd_ok == 1) %}<span class="text-gray-600">—</span>{% endif %}
+                                {% if not (r.bos or r.sweep or r.ltf_sweep or r.fvg or r.pd_ok == 1) %}<span class="text-gray-600">—</span>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from app import sd_confirm
 from app import sd_engine as sde
 from app import setup_journal as journal
 from app.crt_engine import compute_daily_bias, compute_weekly_bias
@@ -153,6 +154,8 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
             # ("kapi koruyor mu" olcumu); NZDUSD 1H 04.11: low_rr aninda donan TP (RR 1.1) ile dolup sonra sd_ready oldu --
             # Signals'ta RR 1.1'lik "sinyal". Kapida kalan bolge artik seviyesiz (asama kaydi var, sonuc yok).
             has_levels = plan.tp is not None and stage in ("sd_ready", NEAR_STAGE)
+            if has_levels:
+                _seed_ltf_liq(strategy, feats, z, df15, now, ltf_delta)
             # Ilk gorus geri doldurmasi (03.11, kullanici: XAUUSD "neden Waiting? retest ve TP oldu"): restart / ilk calismada
             # bolge olusumundan sonra goruluyor; Journal yalniz donmadan SONRA kapanan 15m mumlarini izledigi icin aradaki
             # dolum/TP kayboluyordu. Yeni satirda seviyeler olusum anina (formed mumunun kapanisi) tarihlenir ve store'daki
@@ -189,6 +192,7 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
                     "fvg": bool(z.fvg), "bos": bool(z.bos), "mss": bool(z.mss), "sweep": bool(z.sweep), "sweep_kind": z.sweep_kind,
                     "dist_atr": feats.get("dist_atr"), "target_kind": plan.target_kind, "rr_struct": plan.rr_struct,
                     "zone_atr": round(float(z.height_atr), 2), "n_live": n_live, "n_zones": len(zones),
+                    "ltf_sweep": _ltf_sweep_n(strategy, display, z),
                 },
             )
         row["sd"] = {**(row.get("sd") or {}), "n_live": n_live, "n_zones": len(zones)}
@@ -230,6 +234,8 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
             feats_at["near"] = 1
         skip_note = near and stage_at != NEAR_STAGE and not journal.has_record(strategy, display, twin.direction, twin.base_start)
         t_close = (t + delta).to_pydatetime()
+        if lv:
+            _seed_ltf_liq(strategy, feats_at, twin, df15, t_close, ltf_delta)
         if not skip_note:
             journal.note(
                 strategy, display, market, stage_at,
@@ -247,6 +253,27 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
         prev_close = t + delta
         if twin.dead:
             break
+
+
+def _ltf_sweep_n(strategy, display, z) -> int:
+    """Radar: Journal satirinin LTF onay kolunda dokunustan sonra alinan LTF swing sayisi (yoksa 0)."""
+    try:
+        rec = journal._CACHE.get(journal._key(strategy, display, z.direction, z.base_start)) or {}
+        return int(((rec.get("entries") or {}).get(sd_confirm.SDC_KEY) or {}).get("sw") or 0)
+    except Exception:
+        return 0
+
+
+def _seed_ltf_liq(strategy, feats: dict, z, df_ltf, now, ltf_delta) -> None:
+    """LTF onay kolunun sweep tohumu (05.11): base'ten bu ana kadar kapanmis LTF mumlarindaki swing dip / tepeler ve ilk alindiklari
+    mum (`sd_confirm.ltf_liq`). Dokunusta 'alinmamis' olanlar, dip onlari alirsa LTF sweep sayilir."""
+    if strategy not in sd_confirm.STRATEGIES or df_ltf is None or not len(df_ltf):
+        return
+    try:
+        feats["ltf_liq"] = sd_confirm.ltf_liq(df_ltf, z.base_start, now - ltf_delta + timedelta(seconds=1),
+                                              z.direction == "LONG")
+    except Exception:
+        log.exception("ltf_liq seed failed")
 
 
 def _entry_cands(z, plan, last_close: float) -> dict:

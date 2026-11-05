@@ -239,7 +239,8 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
         "_sort": (-(int(r.score) if r.score is not None else -1), -(r.best_stage_at.timestamp() if r.best_stage_at else 0)),
         "fresh": None if touches is None else int(touches) == 0,
         "bos": bool(f.get("bos")), "sweep": bool(f.get("sweep")), "fvg": bool(f.get("fvg")),
-        "mss": bool(f.get("mss")), "sweep_kind": f.get("sweep_kind"), "pd_ok": f.get("pd_ok"), "pd_pos": f.get("pd_pos"),
+        "mss": bool(f.get("mss")), "sweep_kind": f.get("sweep_kind"),
+        "ltf_sweep": int(sdc.get("sw") or 0), "ltf_swept": sdc.get("swp") or [], "pd_ok": f.get("pd_ok"), "pd_pos": f.get("pd_pos"),
         "score": int(r.score) if r.score is not None else None,
         "entry": entry, "sl": sl, "tp": tp, "rr": rr, "rr_struct": f.get("rr_struct"), "target_kind": f.get("target_kind"),
         "price": price, "live_r": live_r, "dist_r": dist_r, "final_r": final_r,
@@ -301,11 +302,8 @@ async def build_sd_signals(
         views = [v for v in views if v["outcome"] in _RESULT_SET[result]]
     if confirm != "all":
         views = [v for v in views if v["confirm_o"] in _CONFIRM_SET[confirm]]
-    counts = {k: 0 for k, _ in STATUS_FILTERS}
     summary = {}
     for v in views:
-        counts["all"] += 1
-        counts[v["tab"]] += 1
         s = summary.setdefault(v["tf"], {"label": v["tf_label"], "n": 0, "tp": 0, "sl": 0, "r": 0.0, "open": 0, "no_trade": 0,
                                          "confirm_main": v["confirm_main"], "l_tp": 0, "l_sl": 0, "l_r": 0.0})
         s["n"] += 1
@@ -334,6 +332,16 @@ async def build_sd_signals(
         s["wr"] = round(100 * s["tp"] / n) if n else None
         s["r"] = round(s["r"], 2)
         s["l_r"] = round(s["l_r"], 2)
+    # 06.11 (kullanici): islemsiz satirlar (CHOCH'tan once bolge bozuldu / retest gelmedi) tabloda kalabalik -- gizli; ozet onlari
+    # sayar (bolge limiti kiyasi), Result = No trade ya da LTF confirm = Zone failed / No retest secilince gorunur.
+    hidden = 0
+    if result != "no_trade" and confirm not in ("failed", "no_retest"):
+        shown = [v for v in views if v["outcome"] not in ("failed", "missed")]
+        hidden, views = len(views) - len(shown), shown
+    counts = {k: 0 for k, _ in STATUS_FILTERS}
+    for v in views:
+        counts["all"] += 1
+        counts[v["tab"]] += 1
     if status != "all":
         views = [v for v in views if v["tab"] == status]
     pages = max(1, (len(views) + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -342,7 +350,7 @@ async def build_sd_signals(
         "rows": views[(page - 1) * PAGE_SIZE: page * PAGE_SIZE], "page": page, "pages": pages,
         "counts": counts, "summary": [summary[k] for k in STRATEGIES if k in summary], "error": error,
         "tf": tf, "status": status, "market": market, "direction": direction, "date_from": date_from, "date_to": date_to,
-        "result": result, "confirm": confirm,
+        "result": result, "confirm": confirm, "hidden_no_trade": hidden,
         "tf_filters": TF_FILTERS, "market_filters": MARKET_FILTERS, "direction_filters": DIRECTION_FILTERS,
         "status_filters": STATUS_FILTERS, "result_filters": RESULT_FILTERS, "confirm_filters": CONFIRM_FILTERS,
     }

@@ -11,6 +11,10 @@ Akis (LONG; SHORT simetrik):
   1. Dokunus (satirin `entry_touched_at`) -> `wait_choch`. Dokunustan beri en dusuk dip = `lo`.
   2. CHOCH seviyesi = `lo`'dan ONCEKI son swing tepe (her yanda CHOCH_SWING_K mum -- 05.11: 3'lu fraktal yukselis icindeki minik
      duraklamayi CHOCH sayiyordu, KAS 4H; tampon dokunus oncesini de kapsar).
+     LTF sweep + kisa swing (05.11, kullanici: XRP 4H -- dusus selale gibi indi, 3'lu ara tepe yok, CHOCH dususun basina
+     kaydi, giris en tepeden RR 0.56): dip, bolgenin base'inden beri olusmus ve dokunusa kadar alinmamis LTF swing dip(ler)ini
+     aldiysa (`ltf_sweep`, her yanda CHOCH_SWING_K mum; tohum `features.ltf_liq`, sd_scanner) VE 3'lu swing'in MSS girisi
+     RR < SHORT_SWING_RR veriyorsa CHOCH seviyesi dipten onceki son 1'li tepe olur (`st["kk"]` = 1).
      Bir LTF kapanisi bu seviyenin ustunde -> CHOCH. Dip satirin SL'ini once gecerse: `failed` (zone failed before CHOCH).
   3. CHOCH aninda giris adaylari (hepsi `lo` ile CHOCH kapanisi arasinda), her biri ayri limit emri:
        fvg  -- dip -> CHOCH hamlesinin biraktigi yukselis FVG'si, ust kenar (fiyata en yakini)
@@ -34,6 +38,9 @@ PRE_BARS = 40                    # dokunus oncesi tutulan LTF mumu
 MAX_BUFFER = 400
 SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (MSS seviyesi - dip)
 CHOCH_SWING_K = 3                # CHOCH swing'i: her yanda bu kadar mum (05.11; once 1)
+SHORT_SWING_K = 1                # LTF sweep varken 3'lu swing RR'yi oldururse dusulen kisa swing (05.11)
+SHORT_SWING_RR = 2.0             # 3'lu swing'in MSS girisi bu RR'nin altindaysa "swing cok yukarida"
+LIQ_SEED_CAP = 40                # features.ltf_liq: en fazla bu kadar swing (en yenileri)
 MIN_GAP_FRAC = 0.15              # FVG / IFVG en kucuk bosluk: son 20 LTF mumunun ort. boyu x bu (05.11)
 GAP_AVG_BARS = 20
 VARIANTS = ("fvg", "ifvg", "cisd", "mss")
@@ -83,6 +90,67 @@ def _swing_before(bars: list, end: int, long: bool, k: int = CHOCH_SWING_K) -> f
         if not long and all(bars[i][2] < x[2] for x in side):
             return bars[i][2]
     return None
+
+
+def _fractals(bars: list, long: bool, k: int = CHOCH_SWING_K) -> list:
+    """Tampondaki LTF likiditesi: LONG'da swing dipler (her yanda k mum daha yuksek dip), SHORT'ta swing tepeler -> [(i, fiyat)]."""
+    out = []
+    for i in range(k, len(bars) - k):
+        side = bars[i - k:i] + bars[i + 1:i + k + 1]
+        if long and all(bars[i][2] < x[2] for x in side):
+            out.append((i, bars[i][2]))
+        if not long and all(bars[i][1] > x[1] for x in side):
+            out.append((i, bars[i][1]))
+    return out
+
+
+def ltf_liq(df, start, until, long: bool, k: int = CHOCH_SWING_K) -> list:
+    """sd_scanner tohumu (features.ltf_liq): `start` (bolgenin base'i) ile `until` arasinda kapanmis LTF mumlarindan swing dip (LONG) /
+    tepe (SHORT) -> [[iso, fiyat, ilk_alan_mum_iso | None]]. Tampon dokunustan yalniz PRE_BARS once basladigi icin base icindeki
+    swing'ler buradan gelir (XRP: 1.2440 / 1.2444 / 1.2468 base'te, dokunustan ~1 gun once)."""
+    if df is None or len(df) == 0:
+        return []
+    import pandas as pd
+    idx = df.index.tz_convert(None) if getattr(df.index, "tz", None) is not None else df.index
+    m = (idx >= pd.Timestamp(_naive(start))) & (idx < pd.Timestamp(_naive(until)))
+    if not m.any():
+        return []
+    sub_idx, hi, lw = idx[m], df["high"].to_numpy()[m], df["low"].to_numpy()[m]
+    bars = [[t.isoformat(), float(h), float(l), 0.0] for t, h, l in zip(sub_idx.to_pydatetime(), hi, lw)]
+    out = []
+    for i, p in _fractals(bars, long, k):
+        tk = next((b[0] for b in bars[i + 1:] if ((b[2] < p) if long else (b[1] > p))), None)
+        out.append([bars[i][0], round(p, 10), tk])
+    return out[-LIQ_SEED_CAP:]
+
+
+def _ltf_sweep(rec: dict, st: dict, long: bool) -> list:
+    """Dokunustan sonra alinan LTF swing'leri (fiyatlar): base'ten beri olusmus, dokunusa kadar alinmamis. Tohum + tampon."""
+    bars = st["b"]
+    if not bars or rec.get("entry_touched_at") is None:
+        return []
+    touch, b0 = _iso(rec["entry_touched_at"]), bars[0][0]
+    bk = bars[min(CHOCH_SWING_K, len(bars) - 1)][0]   # tamponun ilk k mumunda sol kanat yok -> oradaki swing tohumdan
+    swings = {}
+    for item in (rec.get("features") or {}).get("ltf_liq") or []:
+        ts, p, tk = item[0], float(item[1]), item[2]
+        if ts < bk:
+            swings[ts] = (p, tk if (tk is not None and tk < b0) else "scan")
+    for i, p in _fractals(bars, long):
+        swings[bars[i][0]] = (float(p), "scan")
+    out = []
+    for ts, (p, tk) in sorted(swings.items()):
+        if tk != "scan":                          # tamponun basindan once alinmis -> dokunustan once
+            continue
+        first = next((b[0] for b in bars if b[0] > ts and ((b[2] < p) if long else (b[1] > p))), None)
+        if first is not None and first >= touch:
+            out.append(p)
+    return out
+
+
+def _mss_rr(lvl: float, lo: float, tp: float) -> float | None:
+    risk = abs(lvl - lo) * (1 + SL_BUFFER_FRAC)
+    return abs(tp - lvl) / risk if risk > 0 else None
 
 
 def _candidates(bars: list, lo_i: int, ci: int, long: bool, lvl: float, close: float, lo: float) -> dict:
@@ -156,8 +224,17 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
         ext = low if long else high
         if st["lo"] is None or ((ext < st["lo"]) if long else (ext > st["lo"])):
             st["lo"], st["lo_i"] = float(ext), len(bars) - 1
-        st["lvl"] = _swing_before(bars, st["lo_i"], long)
-        lvl, ci = st["lvl"], len(bars) - 1
+        swept = _ltf_sweep(rec, st, long)
+        st["sw"], st["swp"] = len(swept), [round(p, 10) for p in swept[-8:]]
+        lvl, st["kk"] = _swing_before(bars, st["lo_i"], long), CHOCH_SWING_K
+        if swept:
+            rr3 = _mss_rr(lvl, st["lo"], tp) if lvl is not None else None
+            if rr3 is None or rr3 < SHORT_SWING_RR:
+                short = _swing_before(bars, st["lo_i"], long, k=SHORT_SWING_K)
+                if short is not None and (lvl is None or ((short < lvl) if long else (short > lvl))):
+                    lvl, st["kk"] = short, SHORT_SWING_K
+        st["lvl"] = lvl
+        ci = len(bars) - 1
         if lvl is not None and st["lo_i"] < ci and ((close > lvl) if long else (close < lvl)):
             cands = _candidates(bars, st["lo_i"], ci, long, lvl, close, st["lo"])
             ref = abs(lvl - st["lo"])
@@ -221,8 +298,10 @@ def describe(st: dict | None, ltf: str) -> dict:
         return v.strftime("%H:%M") if hasattr(v, "strftime") else str(v)[11:16]
 
     parts = []
+    if st.get("sw"):
+        parts.append(f"LTF sweep ×{st['sw']}")
     if st.get("ct"):
-        parts.append(f"CHOCH {hhmm(st['ct'])}")
+        parts.append(f"CHOCH {hhmm(st['ct'])}" + (" (short swing)" if st.get("kk") == SHORT_SWING_K else ""))
     if via:
         parts.append(f"retest {via_label} {hhmm(st.get('t'))}")
     label = LABELS.get(o, o)
