@@ -710,6 +710,14 @@ class BingXMarketData:
                             await scanner.close_session_positions(db, self.store)
                     except Exception:
                         log.exception("Cuma kapanisi basarisiz")
+                    try:
+                        # S/D olcumu (05.11): dolmus kripto disi kollar da haftanin son fiyatiyla kapanir
+                        from app import sd_scanner, setup_journal
+                        if sd_scanner.week_close(self.store):
+                            async with async_session() as db:
+                                await setup_journal.flush(db)
+                    except Exception:
+                        log.exception("S/D Cuma kapanisi basarisiz")
 
                 # Sonra forming fiyat guncellemeleri (coalesced).
                 if self._pending_price:

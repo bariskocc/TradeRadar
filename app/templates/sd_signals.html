@@ -54,7 +54,7 @@
             </div>
 
             <!-- Filtreler -->
-            {% set n_filters = (1 if tf != 'all' else 0) + (1 if market != 'all' else 0) + (1 if direction != 'all' else 0) + (1 if date_to else 0) %}
+            {% set n_filters = (1 if tf != 'all' else 0) + (1 if market != 'all' else 0) + (1 if direction != 'all' else 0) + (1 if date_to else 0) + (1 if result != 'all' else 0) + (1 if confirm != 'all' else 0) %}
             <form method="GET" action="{{ sb }}" class="mb-5 p-3 md:p-4 bg-dark-800 rounded-xl border border-dark-600">
                 <button type="button" id="sd-filters-toggle" aria-expanded="false" aria-controls="sd-filters-body"
                     class="md:hidden w-full flex items-center justify-between gap-2 text-sm text-gray-300">
@@ -87,6 +87,18 @@
                         </select>
                     </div>
                     <div>
+                        <label class="block text-xs text-gray-500 mb-1" title="Limit order result (closed rows)">RESULT</label>
+                        <select name="result" class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, label in result_filters %}<option value="{{ key }}" {% if result == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1" title="LTF CHOCH + retest arm result">LTF CONFIRM</label>
+                        <select name="confirm" class="w-36 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
+                            {% for key, label in confirm_filters %}<option value="{{ key }}" {% if confirm == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div>
                         <label class="block text-xs text-gray-500 mb-1" title="When the zone passed every gate (TSİ)">READY FROM</label>
                         <input type="date" name="date_from" value="{{ date_from }}" class="px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
                     </div>
@@ -96,7 +108,7 @@
                     </div>
                     <input type="hidden" name="status" value="{{ status }}">
                     <button type="submit" class="px-5 py-2 bg-accent-blue hover:bg-accent-blue/80 text-white text-sm font-medium rounded-lg transition">Filter</button>
-                    <a href="{{ sb }}?{{ sq }}tf={{ tf }}&market={{ market }}&direction={{ direction }}&status={{ status }}&date_from=" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">All dates</a>
+                    <a href="{{ sb }}?{{ sq }}tf={{ tf }}&market={{ market }}&direction={{ direction }}&result={{ result }}&confirm={{ confirm }}&status={{ status }}&date_from=" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">All dates</a>
                     <a href="{{ sb }}{% if sd_hub %}?view=signals&tf={{ tf }}{% endif %}" class="px-5 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition">Reset</a>
                 </div>
                 </div>

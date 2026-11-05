@@ -36,6 +36,15 @@ TF_FILTERS = [("all", "All"), ("sd", "S/D 4H"), ("sd1h", "S/D 1H"), ("sd15m", "S
 MARKET_FILTERS = [("all", "All"), ("crypto", "Crypto"), ("fx", "FX")]
 DIRECTION_FILTERS = [("all", "All"), ("long", "Long"), ("short", "Short")]
 STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), ("closed", "Closed")]
+# 05.11 (kullanici): sonuc ve LTF onay sonucu filtreleri -- filtre -> eslesen outcome kumesi
+RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("week_close", "Week close"), ("expired", "Expired"),
+                  ("other", "Same bar / missed")]
+_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "week_close": {"week_close"}, "expired": {"no_touch", "open"},
+               "other": {"ambiguous", "tp_before_entry"}}
+CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_retest", "No retest"),
+                   ("waiting", "Waiting / in trade"), ("none", "No touch yet")]
+_CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
+                "waiting": {"wait_choch", "wait_retest", "filled"}, "none": {None}}
 
 # outcome -> (durum sekmesi, etiket, renk, "sonuc" etiketi, sonuc rengi)
 _OUTCOME = {
@@ -48,6 +57,8 @@ _OUTCOME = {
     "ambiguous":       ("closed",  "Closed",          "gray",   "Same bar (?)",    "yellow"),
     "no_touch":        ("closed",  "Expired",         "gray",   "No entry",        "gray"),
     "open":            ("closed",  "Expired",         "gray",   "Open at horizon", "gray"),
+    # 05.11 (kullanici): kripto disi dolmus islem Cuma 17:00 NY'de haftanin son fiyatiyla kapanir
+    "week_close":      ("closed",  "Closed",          "gray",   "Week close",      "gray"),
 }
 
 
@@ -129,6 +140,12 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
         final_r = -1.0
     elif oc in ("ambiguous", "no_touch", "open"):
         final_r = 0.0
+    elif oc == "week_close":
+        try:
+            wc = (json.loads(r.entries) if r.entries else {}).get("_wc") or {}
+        except Exception:
+            wc = {}
+        final_r = sd_confirm.week_close_r(entry, sl, wc.get("px"), r.direction)
     touches = f.get("touches")
     zt = r.model or f.get("zone_type") or "?"
     try:
@@ -168,12 +185,14 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
 
 async def build_sd_signals(
     db: AsyncSession, *, tf: str = "all", status: str = "all", market: str = "all", direction: str = "all",
-    date_from: str = "", date_to: str = "", page: int = 1, price_fn=None,
+    date_from: str = "", date_to: str = "", page: int = 1, price_fn=None, result: str = "all", confirm: str = "all",
 ) -> dict:
     tf = tf if tf in STRATEGIES else "all"
     status = status if status in dict(STATUS_FILTERS) else "all"
     market = market if market in ("crypto", "fx") else "all"
     direction = direction if direction in ("long", "short") else "all"
+    result = result if result in _RESULT_SET else "all"
+    confirm = confirm if confirm in _CONFIRM_SET else "all"
     price_fn = price_fn or _live_price
     t = SetupJournal
     where = [t.strategy.in_(STRATEGIES), t.best_stage == "sd_ready", t.entry.is_not(None)]
@@ -203,6 +222,11 @@ async def build_sd_signals(
             cache[r.symbol] = price_fn(r.symbol) if (r.outcome or "pending") in ("pending", "filled") else None
         views.append(_row_view(r, cache[r.symbol]))
     views.sort(key=lambda v: v["_sort"])      # 03.11 (kullanici): skor azalan, esitte en yeni (CRT sayfalari gibi)
+    # Sonuc / LTF onay filtresi sekme sayaclarina ve ozete de uyar (Signals sayfasi sozlesmesi)
+    if result != "all":
+        views = [v for v in views if v["outcome"] in _RESULT_SET[result]]
+    if confirm != "all":
+        views = [v for v in views if v["confirm_o"] in _CONFIRM_SET[confirm]]
     counts = {k: 0 for k, _ in STATUS_FILTERS}
     summary = {}
     for v in views:
@@ -225,6 +249,8 @@ async def build_sd_signals(
         elif v["outcome"] == "loss":
             s["sl"] += 1
             s["r"] -= 1.0
+        elif v["outcome"] == "week_close":
+            s["r"] += float(v["final_r"] or 0)
         elif v["tab"] != "closed":
             s["open"] += 1
     for s in summary.values():
@@ -240,6 +266,7 @@ async def build_sd_signals(
         "rows": views[(page - 1) * PAGE_SIZE: page * PAGE_SIZE], "page": page, "pages": pages,
         "counts": counts, "summary": [summary[k] for k in STRATEGIES if k in summary], "error": error,
         "tf": tf, "status": status, "market": market, "direction": direction, "date_from": date_from, "date_to": date_to,
+        "result": result, "confirm": confirm,
         "tf_filters": TF_FILTERS, "market_filters": MARKET_FILTERS, "direction_filters": DIRECTION_FILTERS,
-        "status_filters": STATUS_FILTERS,
+        "status_filters": STATUS_FILTERS, "result_filters": RESULT_FILTERS, "confirm_filters": CONFIRM_FILTERS,
     }

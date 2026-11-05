@@ -96,6 +96,7 @@ OUTCOME_LABELS = {
     "open": "Entry, no TP/SL in horizon",
     "ambiguous": "Same bar (order unknown)",
     "signal": "Became a signal",
+    "week_close": "Closed at week end (FX)",
 }
 TRACKING = ("pending", "filled")
 # 1W (28.09): 9 gun -- C2'nin kalani + C3 haftasi; KEEP'in (10 gun, restart'ta yuklenen pencere)
@@ -198,7 +199,8 @@ BREAK_SEED = "_brk"
 # siklikta olusmadigi da olcumun parcasi. Motor KULLANMAZ. Rapor `scripts/retest_ifvg_stat.py`.
 RFVG_STATE = "_rfvg"
 RFVG_VARIANTS = ("rfvg_near", "rfvg_mid", "rfvg_far")
-_STATE_KEYS = (CFVG_STATE, RFVG_STATE, "sdc", "tpz")   # "sdc": S/D LTF onay, "tpz": S/D karsi-bolge hedefi (app/sd_confirm.py)
+# "sdc": S/D LTF onay, "tpz": S/D karsi-bolge hedefi (app/sd_confirm.py), "_wc": S/D hafta kapanisi (son kapanis + kapanis fiyati)
+_STATE_KEYS = (CFVG_STATE, RFVG_STATE, "sdc", "tpz", "_wc")
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -1477,6 +1479,85 @@ def _apply_bar(rec: dict, bar_ts, high: float, low: float) -> None:
         _final(rec, "no_touch" if rec["outcome"] == "pending" else "open", bar_ts)
 
 
+# --- S/D hafta kapanisi (05.11, kullanici: "hafta bitmeden kripto harici islemler kapansin") -----------------------------
+# Motorun Cuma 17:00 NY kurali (scanner.close_session_positions) S/D olcumune de: dolmus kollar haftanin son fiyatiyla kapanir
+# (outcome `week_close`, fiyat entries["_wc"]["px"]). Dolmamis bolge beklemeye devam eder (bolge gunlerce gecerli bir HTF yapisi).
+# Iki yol: canli Cuma kapanisi (market_data -> sd_scanner.week_close) ve izleme sirasinda hafta kapanisini asan mum (restart /
+# ilk gorus geri doldurmasi) -- ikisi de `sd_week_close`.
+def _is_session_display(symbol: str) -> bool:
+    hit = _SESSION_DISPLAY.get(symbol)
+    if hit is None:
+        try:
+            from app.exchange import from_display_symbol, is_session_symbol
+            hit = bool(is_session_symbol(from_display_symbol(symbol)[0]))
+        except Exception:
+            hit = False
+        _SESSION_DISPLAY[symbol] = hit
+    return hit
+
+
+_SESSION_DISPLAY: dict[str, bool] = {}
+
+
+def sd_week_close(rec: dict, px: float, ts) -> bool:
+    """Dolmus S/D kollarini (ana satir, giris varyantlari, golge stoplar, LTF onay kolu, karsi-bolge hedefi) `px`'ten kapat."""
+    if rec.get("levels_at") is None or px is None:
+        return False
+    ts = _naive_utc(ts)
+    ents = rec.get("entries")
+    if ents is None:
+        ents = rec["entries"] = {}
+    wc = ents.setdefault("_wc", {"lc": None, "until": None, "px": None, "at": None})
+    if wc.get("at") is not None and wc["at"] >= ts:
+        return False
+    changed = False
+    if rec.get("outcome") == "filled":
+        _final(rec, "week_close", ts)
+        changed = True
+    for name, v in ents.items():
+        if name in _STATE_KEYS or not isinstance(v, dict):
+            continue
+        if v.get("o") == "filled":
+            v["o"], v["at"], v["px"] = "week_close", ts, float(px)
+            changed = True
+    for v in (rec.get("shadow") or {}).values():
+        if v.get("o") == "filled":
+            v["o"], v["at"], v["px"] = "week_close", ts, float(px)
+            changed = True
+    sdc = ents.get("sdc")
+    if sdc and sdc.get("o") == "filled":
+        sdc["o"], sdc["at"], sdc["px"] = "week_close", ts, float(px)
+        for vv in (sdc.get("vars") or {}).values():
+            if vv.get("o") == "filled":
+                vv["o"], vv["at"] = "week_close", ts.isoformat()
+        changed = True
+    tpz = ents.get("tpz")
+    if tpz and tpz.get("o") == "pending":
+        tpz["o"], tpz["at"], tpz["px"] = "week_close", ts, float(px)
+        changed = True
+    wc["px"], wc["at"] = float(px), ts
+    return changed
+
+
+def _sd_week_gap(rec: dict, bar_ts, close: float | None) -> bool:
+    """Bu mum ile onceki izlenen mum arasinda Cuma kapanisi var mi? Varsa onceki mumun kapanisiyla kapat; sonra son kapanisi tut."""
+    from app.session import last_week_close
+    ents = rec.get("entries")
+    if ents is None:
+        ents = rec["entries"] = {}
+    wc = ents.setdefault("_wc", {"lc": None, "until": None, "px": None, "at": None})
+    changed = False
+    prev = wc.get("until")
+    if prev is not None and wc.get("lc") is not None and bar_ts > prev:
+        close_at = _naive_utc(last_week_close(bar_ts))
+        if close_at is not None and prev < close_at <= bar_ts and (wc.get("at") is None or wc["at"] < close_at):
+            changed = sd_week_close(rec, wc["lc"], close_at) or changed
+    if close is not None and (prev is None or bar_ts > prev):
+        wc["lc"], wc["until"] = float(close), bar_ts
+        changed = True
+    return changed
+
+
 def _is_tracking(rec: dict, bar_ts) -> bool:
     if rec.get("outcome") not in TRACKING or rec.get("levels_at") is None:
         return False
@@ -1493,6 +1574,9 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float, close
             if key[0] != strategy or key[1] != symbol:
                 continue
             touched = False
+            if (strategy in SD_FILL_REQUIRED_STRATEGIES and rec.get("levels_at") is not None
+                    and not _bar_before_levels(rec, bar_ts) and _is_session_display(symbol)):
+                touched = _sd_week_gap(rec, bar_ts, float(close) if close is not None else None)
             if _is_tracking(rec, bar_ts):
                 _apply_bar(rec, bar_ts, float(high), float(low))
                 touched = True

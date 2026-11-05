@@ -1429,6 +1429,8 @@ async def sd_signals_page(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     page: int = Query(default=1),
+    result: str = Query(default="all"),
+    confirm: str = Query(default="all"),
 ):
     """S/D Signals (03.11, kullanici): olcum modundaki S/D bolgelerinden butun kapilari gecenler, Open Signals diliyle
     (Waiting / Filled / Closed, anlik fiyat + canli R). Veri app/sd_signals.py (Setup Journal `sd_ready` satirlari).
@@ -1440,8 +1442,9 @@ async def sd_signals_page(
     if "date_from" not in request.query_params:
         date_from = week_start_tsi()
     data = await build_sd_signals(db, tf=tf, status=status, market=market, direction=direction,
-                                  date_from=date_from, date_to=date_to, page=page)
+                                  date_from=date_from, date_to=date_to, page=page, result=result, confirm=confirm)
     base_qs = urlencode({"tf": data["tf"], "market": data["market"], "direction": data["direction"],
+                         "result": data["result"], "confirm": data["confirm"],
                          "date_from": data["date_from"], "date_to": data["date_to"]})
     return templates.TemplateResponse(request=request, name="sd_signals.html", context={
         "user": user,
@@ -1664,8 +1667,10 @@ async def sd_hub_page(request: Request, db: AsyncSession = Depends(get_db)):
         date_from = q.get("date_from") if "date_from" in q else week_start_tsi()
         data = await build_sd_signals(db, tf=tf, status=q.get("status") or "all", market=q.get("market") or "all",
                                       direction=q.get("direction") or "all", date_from=date_from or "",
-                                      date_to=q.get("date_to") or "", page=int(q.get("page") or 1))
+                                      date_to=q.get("date_to") or "", page=int(q.get("page") or 1),
+                                      result=q.get("result") or "all", confirm=q.get("confirm") or "all")
         base_qs = urlencode({"tf": data["tf"], "market": data["market"], "direction": data["direction"],
+                             "result": data["result"], "confirm": data["confirm"],
                              "date_from": data["date_from"], "date_to": data["date_to"]})
         return templates.TemplateResponse(request=request, name="sd_signals.html", context={
             "user": user, "active_page": "sd", "sd_hub": True, "sd_view": "signals", "base_qs": base_qs,

@@ -33,12 +33,12 @@ MAX_BUFFER = 400
 SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (MSS seviyesi - dip)
 VARIANTS = ("fvg", "ifvg", "cisd", "mss")
 VARIANT_LABEL = {"fvg": "FVG", "ifvg": "IFVG", "cisd": "CISD", "mss": "MSS level"}
-FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open")
+FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open", "week_close")
 LABELS = {
     "pre": "—", "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — waiting retest", "filled": "Retest — in trade",
     "win": "Worked", "loss": "Zone failed after CHOCH", "ambiguous": "Same bar (?)", "missed": "No retest — price left",
     "failed": "Zone failed before CHOCH", "no_touch": "No retest in horizon", "no_choch": "No CHOCH in horizon",
-    "open": "Open at horizon",
+    "open": "Open at horizon", "week_close": "Closed at week end",
 }
 
 
@@ -278,4 +278,15 @@ def final_r(st: dict | None) -> float | None:
         return -1.0
     if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "open"):
         return 0.0
+    if st.get("o") == "week_close":
+        return week_close_r(st.get("e"), st.get("sl"), st.get("px"), st.get("dir"))
     return None
+
+
+def week_close_r(e, sl, px, direction: str | None = None) -> float | None:
+    """Hafta kapanisi R'si: (kapanis - giris) / risk, yon SL'nin tarafindan (direction verilmezse)."""
+    if e is None or sl is None or px is None or abs(float(e) - float(sl)) <= 0:
+        return None
+    long = (direction == "LONG") if direction else float(sl) < float(e)
+    risk = abs(float(e) - float(sl))
+    return round(((float(px) - float(e)) if long else (float(e) - float(px))) / risk, 2)

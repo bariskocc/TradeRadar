@@ -43,6 +43,32 @@ ALL = tuple(SD_CFG)
 _STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_ready": 5}
 
 
+def week_close(store, now=None) -> int:
+    """Cuma 17:00 NY (market_data, motorun hafta kapanisiyla ayni an): kripto disi S/D satirlarinin dolmus kollarini haftanin son
+    fiyatiyla kapat (setup_journal.sd_week_close). Dolmamis bolge beklemeye devam eder. Kapanan satir sayisi."""
+    from app.exchange import from_display_symbol, is_session_symbol
+    from app.session import last_week_close
+    ts = last_week_close(now or datetime.now(timezone.utc))
+    n = 0
+    for key, rec in list(journal._CACHE.items()):
+        if key[0] not in SD_CFG or rec.get("levels_at") is None:
+            continue
+        try:
+            bingx = from_display_symbol(key[1])[0]
+            if not is_session_symbol(bingx):
+                continue
+            df = store.get_df(bingx, "1h") if store is not None else None
+            px = float(df.iloc[-1]["close"]) if df is not None and not df.empty else None
+        except Exception:
+            continue
+        if px is not None and journal.sd_week_close(rec, px, ts):
+            journal._DIRTY.add(key)
+            n += 1
+    if n:
+        log.info("SD WEEK CLOSE: %d S/D satiri haftanin son fiyatiyla kapandi", n)
+    return n
+
+
 def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
     if z.dead:
         return "sd_dead"
