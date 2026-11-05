@@ -17,5 +17,125 @@
 </head>
 <body class="h-full bg-dark-900 text-gray-200">
     {% block body %}{% endblock %}
+    {# Tablo basligina tiklayip siralama (05.11, kullanici). Istemci tarafi, butun sayfalarda: varsayilan sira sunucunun sirasidir
+       (S/D ve Radar'da skor) -- tiklanmadikca dokunulmaz, sayfa yenilenince varsayilana doner. Sayfali tablolarda yalniz ekrandaki
+       sayfa siralanir. JS ile yenilenen tablolarda (Radar 30 sn, Open Signals) secili siralama yenilemeden sonra yeniden uygulanir
+       (MutationObserver). Sayi / yuzde / "+1.25R" / virgullu fiyat / "05.11 14:30" tarih / "1:2.43" RR tanir; bos ("-", "—") en altta.
+       Baslikta link / form ogesi ya da data-nosort varsa o sutun siralanmaz. #}
+    <style>
+        th.tr-sortable { cursor: pointer; user-select: none; }
+        th.tr-sortable:hover { color: rgb(var(--tr-fg)); }
+        th .tr-sort-ind { font-size: 9px; margin-left: 3px; opacity: .85; }
+    </style>
+    <script>
+    (function () {
+        var state = {};                       // baslik imzasi -> {col, dir}
+        var busy = false, mainObs = null;
+        function sig(table) {
+            var ths = table.tHead ? table.tHead.rows[table.tHead.rows.length - 1].cells : [];
+            return Array.prototype.map.call(ths, function (c) { return (c.dataset.label || c.textContent).trim(); }).join("|");
+        }
+        function cellText(td) {
+            if (!td) return "";
+            var t = (td.innerText || td.textContent || "").trim();
+            return t.split("\n")[0].trim();
+        }
+        function key(text) {
+            var t = text.replace(/−/g, "-").trim();
+            if (!t || t === "-" || t === "—" || t === "–") return null;
+            var m = t.match(/^(\d{2})\.(\d{2})(?:\.(\d{2,4}))?(?:\s+(\d{2}):(\d{2}))?/);
+            if (m && (m[4] !== undefined || /^\d{2}\.\d{2}$/.test(t) || m[3] !== undefined)) {
+                var y = m[3] ? parseInt(m[3].slice(-2), 10) : 0;
+                return { n: ((y * 100 + parseInt(m[2], 10)) * 100 + parseInt(m[1], 10)) * 10000 + (m[4] ? parseInt(m[4], 10) * 100 + parseInt(m[5], 10) : 0) };
+            }
+            var rr = t.match(/^1:(\d+(?:[.,]\d+)?)/);
+            if (rr) return { n: parseFloat(rr[1].replace(",", ".")) };
+            var s = t.replace(/^[^\d+\-.,%]*?(?=[+\-]?\d)/, "");
+            var num = s.match(/^[+\-]?[\d.,\s]*\d/);
+            if (num) {
+                var raw = num[0].replace(/\s/g, "");
+                if (raw.indexOf(",") >= 0 && raw.indexOf(".") >= 0) raw = raw.replace(/\./g, "").replace(",", ".");
+                else if (raw.indexOf(",") >= 0) raw = raw.replace(",", ".");
+                var v = parseFloat(raw);
+                if (!isNaN(v) && /^[^A-Za-z]*\d/.test(t)) return { n: v };
+            }
+            return { s: t.toLowerCase() };
+        }
+        function sortTable(table, col, dir) {
+            var body = table.tBodies[0];
+            if (!body) return;
+            var rows = Array.prototype.slice.call(body.rows);
+            var data = [], tail = [];
+            rows.forEach(function (r, i) {
+                if (r.cells.length <= col || (r.cells.length === 1 && r.cells[0].colSpan > 1)) { tail.push(r); return; }
+                data.push({ r: r, k: key(cellText(r.cells[col])), i: i });
+            });
+            data.sort(function (a, b) {
+                if (a.k === null && b.k === null) return a.i - b.i;
+                if (a.k === null) return 1;
+                if (b.k === null) return -1;
+                var x, y;
+                if (a.k.n !== undefined && b.k.n !== undefined) { x = a.k.n; y = b.k.n; }
+                else { x = a.k.s !== undefined ? a.k.s : String(a.k.n); y = b.k.s !== undefined ? b.k.s : String(b.k.n); }
+                if (x < y) return -dir;
+                if (x > y) return dir;
+                return a.i - b.i;
+            });
+            busy = true;
+            data.forEach(function (d) { body.appendChild(d.r); });
+            tail.forEach(function (r) { body.appendChild(r); });
+            // Gozlemci geri cagrisi asenkron: kendi yeniden dizmemizin kayitlarini at, yoksa sonsuz dongu
+            if (table._trObs) table._trObs.takeRecords();
+            if (mainObs) mainObs.takeRecords();
+            busy = false;
+        }
+        function mark(table, col, dir) {
+            var hr = table.tHead.rows[table.tHead.rows.length - 1];
+            Array.prototype.forEach.call(hr.cells, function (c, i) {
+                var ind = c.querySelector(".tr-sort-ind");
+                if (ind) ind.remove();
+                if (i === col) {
+                    var s = document.createElement("span");
+                    s.className = "tr-sort-ind"; s.textContent = dir > 0 ? "▲" : "▼";
+                    c.appendChild(s);
+                }
+            });
+            if (mainObs) mainObs.takeRecords();
+        }
+        function init(table) {
+            if (table.dataset.trSort || !table.tHead || !table.tBodies.length) return;
+            table.dataset.trSort = "1";
+            var hr = table.tHead.rows[table.tHead.rows.length - 1];
+            Array.prototype.forEach.call(hr.cells, function (th, col) {
+                if (th.colSpan > 1 || th.hasAttribute("data-nosort") || th.querySelector("a, input, select, button")) return;
+                if (!th.dataset.label) th.dataset.label = th.textContent.trim();
+                th.classList.add("tr-sortable");
+                th.addEventListener("click", function () {
+                    var k = sig(table), cur = state[k];
+                    var dir = cur && cur.col === col ? -cur.dir : (key(cellText(table.tBodies[0].rows[0] && table.tBodies[0].rows[0].cells[col])) || {}).n !== undefined ? -1 : 1;
+                    state[k] = { col: col, dir: dir };
+                    sortTable(table, col, dir); mark(table, col, dir);
+                });
+            });
+            var st = state[sig(table)];
+            if (st) { sortTable(table, st.col, st.dir); mark(table, st.col, st.dir); }
+            table._trObs = new MutationObserver(function () {
+                if (busy) return;
+                var s2 = state[sig(table)];
+                if (s2) { sortTable(table, s2.col, s2.dir); mark(table, s2.col, s2.dir); }
+            });
+            table._trObs.observe(table.tBodies[0], { childList: true });
+        }
+        function scan() { Array.prototype.forEach.call(document.querySelectorAll("main table"), init); }
+        document.addEventListener("DOMContentLoaded", function () {
+            scan();
+            var main = document.querySelector("main");
+            if (main) {
+                mainObs = new MutationObserver(function () { if (!busy) scan(); });
+                mainObs.observe(main, { childList: true, subtree: true });
+            }
+        });
+    })();
+    </script>
 </body>
 </html>

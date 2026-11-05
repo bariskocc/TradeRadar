@@ -22,6 +22,9 @@ log = logging.getLogger(__name__)
 TSI = timezone(timedelta(hours=3))
 PAGE_SIZE = 50
 STRATEGIES = ("sd", "sd1h", "sd15m")
+# Onay kolunun LTF'si (Journal izleme serisi): 4H bolge 15m, 1H/15m bolge 5m (SD_5M_ENABLED).
+from app.config import SD_5M_ENABLED  # noqa: E402
+LTF_LABEL = {"sd": "15m", "sd1h": "5m" if SD_5M_ENABLED else "15m", "sd15m": "5m" if SD_5M_ENABLED else "15m"}
 TF_LABELS = {"sd": "4H", "sd1h": "1H", "sd15m": "15m"}   # 03.11 (kullanici): sutunda yalniz TF
 # Bolge tipi acik adiyla (kullanici: "DBD'nin ne oldugunu anlamiyorum"): leg-in · Base · leg-out, devam / donus.
 ZONE_NAMES = {
@@ -143,14 +146,13 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
         "direction": r.direction, "zone_type": zt, "bias": r.htf_bias,
         "zone_label": ("Demand" if long else "Supply") + " · " + ZONE_NAMES.get(zt, zt),
         "entry_s": _fmt_p(entry), "sl_s": _fmt_p(sl), "tp_s": _fmt_p(tp),
-        "confirm_o": c_o, "confirm_label": sd_confirm.LABELS.get(c_o, "—") if c_o else None,
-        "confirm_e": _fmt_p(sdc.get("e")) if sdc.get("e") else None, "confirm_sl": _fmt_p(sdc.get("sl")) if sdc.get("sl") else None,
-        "confirm_rr": sdc.get("rr"), "confirm_r": sd_confirm.final_r(sdc) if c_o else None, "confirm_live": c_live,
-        "confirm_at": _fmt_tsi(datetime.fromisoformat(sdc["ct"])) if sdc.get("ct") else None,
+        "confirm_o": c_o if c_o != "pre" else None, "confirm_rr": sdc.get("rr"), "confirm_live": c_live,
+        **{f"confirm_{k}": v for k, v in sd_confirm.describe(sdc, LTF_LABEL.get(r.strategy, "15m")).items()},
         "setup_at": _fmt_tsi(r.purge_time), "retest_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
         "_sort": (-(int(r.score) if r.score is not None else -1), -(r.best_stage_at.timestamp() if r.best_stage_at else 0)),
         "fresh": None if touches is None else int(touches) == 0,
         "bos": bool(f.get("bos")), "sweep": bool(f.get("sweep")), "fvg": bool(f.get("fvg")),
+        "mss": bool(f.get("mss")), "sweep_kind": f.get("sweep_kind"), "pd_ok": f.get("pd_ok"), "pd_pos": f.get("pd_pos"),
         "score": int(r.score) if r.score is not None else None,
         "entry": entry, "sl": sl, "tp": tp, "rr": rr, "rr_struct": f.get("rr_struct"), "target_kind": f.get("target_kind"),
         "price": price, "live_r": live_r, "dist_r": dist_r, "final_r": final_r,

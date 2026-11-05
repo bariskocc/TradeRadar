@@ -26,8 +26,11 @@ ITEMS = [
     ("htf", "1D bias", "işlem yönünde +2 · ters −2 · NEUTRAL 0 (hard kapı yok, 04.11)", "−2 / 0 / +2"),
 ]
 CANDIDATES = [
-    ("bos", "BOS (leg-out yapıyı kırdı)", "puansız ölçüm"),
-    ("sweep", "Sweep (base önceki swing'i süpürdü)", "puansız ölçüm"),
+    ("sweep", "Likidite sweep'i (SSL / BSL)", "base: son swing, eşit dipler/tepeler ya da önceki gün ucu alındı (05.11'den beri EQ + PDL dahil)"),
+    ("mss", "Gerçek MSS", "dönüş bölgesi (DBR / RBD) + sweep + leg-out yapıyı kırdı (05.11)"),
+    ("bos", "BOS (kaba kırılım)", "leg-out base öncesi son swing'i kırdı — devam bölgesinde de olur"),
+    ("pd_ok", "Premium / Discount uygun", f"demand son {sde.PD_RANGE_BARS} mumluk aralığın alt yarısında, supply üst yarısında (05.11)"),
+    ("strong", "Çok sert çıkış (≥ 3 ATR)", "ilk okumada ters (05.11) — 'strength' +2'si buna veriliyor"),
 ]
 GATES = [
     ("sd_dead", "Ölü bölge", "2+ dokunuş ya da distal kırıldı"),
@@ -35,7 +38,7 @@ GATES = [
     ("sd_no_target", "Hedef yok", "fiyatın ötesinde karşı bölge / swing yok (son kapanıştan ≥ 0,5 ATR)"),
     ("sd_far", "Fiyata uzak", f"giriş > {sde.MAX_DIST_R:g}R uzak — seviye yazılmaz"),
     ("sd_low_rr", "RR düşük", f"RR < {sde.MIN_RR:g} (hedef en yakın engel, tavan {sde.MAX_RR:g}R)"),
-    ("sd_ready", "Hazır (sinyal)", "bütün kapılar geçildi"),
+    ("sd_ready", "Hazır (sinyal)", "bütün kapılar geçildi — seviye ve sonuç yalnız burada (04.11)"),
 ]
 
 
@@ -68,7 +71,10 @@ async def build_sd_score_table(db: AsyncSession, tf: str) -> dict:
                 f = json.loads(r.features_at_levels or r.features or "{}")
             except Exception:
                 continue
-            val = p.get(key) if key in ("strength", "base", "fvg", "fresh", "htf") else f.get(key)
+            if key == "strong":
+                val = None if f.get("legout_atr") is None else int(float(f["legout_atr"]) >= sde.STRENGTH_STRONG_ATR)
+            else:
+                val = p.get(key) if key in ("strength", "base", "fvg", "fresh", "htf") else f.get(key)
             if val is None:
                 continue
             g = groups.setdefault(int(val), [0, 0])
@@ -102,7 +108,7 @@ async def build_sd_score_table(db: AsyncSession, tf: str) -> dict:
     return {
         "tf": tf, "tfs": TFS, "tf_label": dict(TFS)[tf], "items": item_rows, "total": total, "gates": gate_rows,
         "n_rows": len(rows), "n_resolved": len(resolved),
-        "plan": {"entry": "proximal kenar (limit); ölçümde %50 ve distal da izlenir", "sl": f"distal + {sde.SL_BUFFER_ATR:g} ATR, risk ≥ {sde.MIN_RISK_ATR:g} ATR",
+        "plan": {"entry": "proximal kenar (limit); ölçümde %50 ve distal da izlenir", "sl": f"distal + {sde.SL_BUFFER_ATR:g} ATR, risk en az {sde.MIN_RISK_ATR:g} ATR (ATR = pariteye göre ölçek); gölgede 1,0 / 2,0 ATR ve bölge stopu",
                  "tp": f"en yakın engel (karşı bölge / swing, son kapanıştan ≥ {sde.TARGET_MIN_BEYOND_ATR:g} ATR), tavan {sde.MAX_RR:g}R; dolum öncesi güncellenir",
                  "base": f"≤ {sde.BASE_MAX_BARS} mum, gövde ≤ {sde.BASE_MAX_BODY_ATR:g} ATR", "legout": f"ilk mum gövdesi ≥ {sde.LEG_BODY_MIN_ATR:g} ATR, {sde.LEG_OUT_BARS} mumda ≥ {sde.LEG_OUT_MIN_ATR:g} ATR",
                  "age": f"base ≤ {sde.MAX_AGE_BARS} mum", "touch": f"dokunuş koşusu {sde.TOUCH_EXIT_ATR:g} ATR uzaklaşınca biter; 2+ dokunuş ölü"},

@@ -1809,6 +1809,7 @@ async def _p_sd_score_items(db: AsyncSession) -> Progress:
         win = r["outcome"] == "win"
         items = [("strength", p.get("strength")), ("base", p.get("base")), ("fvg", p.get("fvg")), ("fresh", p.get("fresh")),
                  ("htf (1D bias)", p.get("htf")), ("bos", f.get("bos")), ("sweep", f.get("sweep")),
+                 ("mss (dönüş+sweep+kırılım)", f.get("mss")), ("PD uygun", f.get("pd_ok")),
                  ("skor", int(p.get("score")) if p.get("score") is not None else None)]
         for name, val in items:
             if val is None:
@@ -1820,6 +1821,42 @@ async def _p_sd_score_items(db: AsyncSession) -> Progress:
         n = w + l
         table.append([f"{name} = {val}", str(w), str(l), f"%{100 * w / n:.0f}"])
     return Progress(table=table, note=f"{len(rows)} çözülmüş S/D bölgesi (üç TF birlikte, kapıdan bağımsız) · seviye andaki kalemler")
+
+
+async def _p_sd_target_model(db: AsyncSession) -> Progress:
+    """05.11 (kullanici): hedef en yakin engel (bugunku; RR >= 2 veren ilk engel, 4R tavan) mi, karsi S/D bolgesi mi? Ayni dolum,
+    ayni SL; karsi-bolge kolu `entries.tpz` (app/sd_confirm.tpz_step). Tablo: strateji x hedef -> TP / SL / R/islem; karsi bolge
+    olmayan satirlar ('none') ayri sayilir. Tetik: iki kolu da cozulmus 60 bolge."""
+    from app import sd_confirm
+    t = _journal_table()
+    rows = (await db.execute(select(t).where(t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.entry_touched_at.is_not(None)))).mappings().all()
+    acc: dict[tuple, list] = {}
+    pairs = 0
+    none_n = 0
+    for r in rows:
+        try:
+            st = (json.loads(r["entries"] or "{}")).get(sd_confirm.TPZ_KEY) or {}
+        except Exception:
+            st = {}
+        lo, zo = r["outcome"], st.get("o")
+        if zo == "none":
+            none_n += 1
+        if lo in ("win", "loss"):
+            g = acc.setdefault((r["strategy"], "en yakın engel (bugünkü)"), [0, 0, 0.0])
+            g[0 if lo == "win" else 1] += 1
+            g[2] += float(r["rr"] or 0) if lo == "win" else -1.0
+        if zo in ("win", "loss"):
+            g = acc.setdefault((r["strategy"], "karşı S/D bölgesi"), [0, 0, 0.0])
+            g[0 if zo == "win" else 1] += 1
+            g[2] += float(st.get("rr") or 0) if zo == "win" else -1.0
+        if lo in ("win", "loss") and zo in ("win", "loss"):
+            pairs += 1
+    table = [["Strateji · hedef", "TP", "SL", "R/işlem"]]
+    for (st_, label), (w, l, rs) in sorted(acc.items()):
+        n = w + l
+        table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H', 'sd15m': 'S/D 15m'}.get(st_, st_) } · {label}", str(w), str(l), f"{rs / n:+.2f}" if n else "-"])
+    return Progress(bars=[Bar("iki hedef kolu da çözülmüş bölge", pairs, 60)], table=table,
+                    note=f"aynı dolum ve SL, yalnız hedef farklı · karşı bölgesi olmayan {none_n} satır karşı-bölge kolunda yok")
 
 
 async def _p_sd_stop_width(db: AsyncSession) -> Progress:
@@ -1834,7 +1871,7 @@ async def _p_sd_stop_width(db: AsyncSession) -> Progress:
             sh = json.loads(r["shadow"] or "{}")
         except Exception:
             continue
-        for k, label in (("1", "1.5 ATR (ana)"), ("0.667", "~1.0 ATR"), ("1.333", "~2.0 ATR")):
+        for k, label in (("1", "1,5 ATR (ana)"), ("0.667", "~1,0 ATR"), ("1.333", "~2,0 ATR"), ("c1", "bölge stopu (distal + 0,1 ATR)")):
             v = sh.get(k) or {}
             if v.get("o") not in ("win", "loss"):
                 continue
@@ -1851,7 +1888,7 @@ async def _p_sd_stop_width(db: AsyncSession) -> Progress:
     for (st, label), (w, l, rs) in sorted(acc.items()):
         n = w + l
         table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H'}.get(st, st) } · {label}", str(w), str(l), f"%{100 * w / n:.0f}", f"{rs / n:+.2f}"])
-    return Progress(bars=[Bar("S/D ana stop (1.5 ATR) — çözülmüş", base_n, 60)], table=table,
+    return Progress(bars=[Bar("S/D ana stop (1,5 ATR) — çözülmüş", base_n, 60)], table=table,
                     note="aynı setup, aynı giriş/TP; yalnız stop farklı — düz TP/SL (Journal gölgesi)")
 
 
@@ -2881,10 +2918,19 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_score_items,
     ),
     WatchItem(
+        key="sd_target_model", status="open", started="05.11", onem=1, group="sd",
+        title="S/D hedef: en yakın engel mi, karşı S/D bölgesi mi?",
+        trigger="iki kolu da çözülmüş 60 bölge: karşı-bölge kolu R/işlemde ≥ +0,15 ileride VE iki yarıda aynı yön → hedef karşı bölge "
+                "(bölge yoksa bugünkü kural); aksi halde en yakın engel kalır",
+        measure="/sd-izleme tablosu (Journal entries.tpz, features.tp_zone)",
+        md="S/D hedef: en yakın engel mi, karşı S/D bölgesi mi? (05.11.2026)",
+        progress_fn=_p_sd_target_model,
+    ),
+    WatchItem(
         key="sd_stop_width", status="open", started="03.11", onem=1, group="sd",
-        title="S/D stop genişliği — 1,5 ATR taban mı, 1,0 / 2,0 ATR mı?",
-        trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR ya da 2,0 ATR gölgesi R/işlemde ≥ +0,15 ileride VE "
-                "iki yarıda aynı yönde → taban o değere; aksi halde 1,5 kalır",
+        title="S/D stop genişliği — 1,5 ATR mı, 1,0 / 2,0 ATR mı, bölge stopu mu?",
+        trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR / 2,0 ATR / bölge stopu gölgesi R/işlemde ≥ +0,15 ileride VE "
+                "iki yarıda aynı yönde → ana stop o kurala; aksi halde 1,5 ATR kalır (ATR pariteye göre ölçeklenir, ayrı çarpan yok)",
         measure="/izleme tablosu (Journal shadow k=1 / 0.667 / 1.333) · python tmp/tmp_sd_check.py",
         md="S/D stop genişliği — 1,5 ATR taban mı, 1,0 / 2,0 ATR mı? (03.11.2026)",
         progress_fn=_p_sd_stop_width,

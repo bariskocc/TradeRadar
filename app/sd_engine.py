@@ -52,7 +52,7 @@ LEG_BODY_MIN_ATR = 1.0
 LEG_IN_BARS = 3
 LEG_IN_MIN_ATR = 1.0
 SL_BUFFER_ATR = 0.1
-MIN_RISK_ATR = 1.5           # stop mesafesi en az bu kadar ATR (bolge dar olsa da)
+MIN_RISK_ATR = 1.5           # stop mesafesi en az bu kadar ATR (05.11 kullanici: 1.5 dogruydu; bolge stopu golgede olculur)
 TOUCH_EXIT_ATR = 0.5         # dokunus kosusu: fiyat proximal'den bu kadar uzaklasinca biter
 MAX_TOUCHES = 1              # bu kadar dokunusa kadar canli; fazlasi olu
 LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
@@ -68,6 +68,9 @@ MAX_DIST_R = 3.0
 # 15m mumunda 'TP before entry' yazildi): aday engel son kapanistan en az bu kadar ATR otede olmali.
 TARGET_MIN_BEYOND_ATR = 0.5
 SWING_LOOKBACK = 30          # bos / sweep icin base'den onceki swing aramasi (mum)
+# 05.11 (kullanici: 1H kaliteli bolge kriterleri -- sweep, displacement + MSS, fresh, premium/discount). Hepsi OLCUM, puan/kapi yok.
+PD_RANGE_BARS = 72          # premium/discount araligi: base'e kadarki son 72 HTF mumu (demand alt yari, supply ust yari)
+EQ_TOL_ATR = 0.2            # esit dip/tepe toleransi (CRT key level ile ayni)
 BOS_EXTRA_BARS = 2           # bos: formed mumundan sonra bu kadar mum daha bakilir
 
 # Skor kalemleri (olcum; esik yok -- hangisinin kazandirdigi Journal'dan okunur).
@@ -98,6 +101,9 @@ class SDZone:
     # (SMC "yapiyi kiran hamlenin kaynagi"), base/leg-in onceki swing'i supurdu mu (likidite temizligi).
     bos: bool = False
     sweep: bool = False
+    sweep_kind: Optional[str] = None   # swing / eq / pdl (pdh) -- base hangi likiditeyi aldi (ilk bulunan; 05.11)
+    mss: bool = False                  # gercek MSS: donus bolgesi (DBR/RBD) + sweep + kirilim (05.11)
+    pd_pos: Optional[float] = None     # proximal'in PD_RANGE_BARS araligindaki yeri: 0 = dip, 1 = tepe (05.11)
     touches: int = 0
     last_touch: Optional[pd.Timestamp] = None
     broken_at: Optional[pd.Timestamp] = None
@@ -125,6 +131,7 @@ class SDPlan:
     target_kind: Optional[str]   # zone | swing | cap | None
     tp_struct: Optional[float] = None   # tavan uygulanmadan onceki yapisal hedef
     sl_zone: Optional[float] = None     # taban uygulanmadan onceki bolge stopu (distal + tampon)
+    tp_zone: Optional[float] = None     # fiyatin otesindeki ilk karsi canli bolge (olcum: 'hedef karsi bolge olsa?')
     rr_struct: Optional[float] = None
     dist_r: Optional[float] = None      # son kapanisin girise uzakligi, R cinsinden (pozitif = giris henuz dolmadi)
 
@@ -236,6 +243,21 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
         else:
             sweep = sw_hi is not None and base_hi > sw_hi
             bos = sw_lo is not None and bool((c[j:bos_end] < sw_lo).any())
+        # Genis likidite (05.11): son swing'e ek olarak esit dipler / tepeler ve onceki gunun ucu (UTC gunu).
+        sweep_kind = "swing" if sweep else None
+        if not sweep:
+            eq = _equal_level_before(l if up else h, bs, "low" if up else "high", EQ_TOL_ATR * a)
+            if eq is not None and ((base_lo < eq) if up else (base_hi > eq)):
+                sweep, sweep_kind = True, "eq"
+        if not sweep:
+            pdx = _prev_day_extreme(idx, l if up else h, bs, "low" if up else "high")
+            if pdx is not None and ((base_lo < pdx) if up else (base_hi > pdx)):
+                sweep, sweep_kind = True, ("pdl" if up else "pdh")
+        reversal = zone_type[0] != "?" and zone_type[0] != zone_type[2]
+        mss = bool(reversal and sweep and bos)
+        w0 = max(0, bs - PD_RANGE_BARS + 1)
+        rng_hi, rng_lo = float(h[w0:bs + 1].max()), float(l[w0:bs + 1].min())
+        pd_pos = round((proximal - rng_lo) / (rng_hi - rng_lo), 3) if rng_hi > rng_lo else None
         z = SDZone(
             side="demand" if up else "supply",
             direction="LONG" if up else "SHORT",
@@ -245,6 +267,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             legout_atr=round(float(legout / a), 3), legin_atr=round(float(legin), 3),
             base_bars=int(j - bs), base_max_atr=round(float((h[bs:j] - l[bs:j]).max() / a), 3),
             fvg=bool(fvg), formed_iloc=int(formed), bos=bool(bos), sweep=bool(sweep),
+            sweep_kind=sweep_kind, mss=mss, pd_pos=pd_pos,
         )
         _walk_after(z, h, l, idx)
         zones.append(z)
@@ -290,6 +313,39 @@ def _last_swing_before(vals: np.ndarray, end: int, kind: str, k: int = TARGET_SW
     return None
 
 
+def _equal_level_before(vals: np.ndarray, end: int, kind: str, tol: float, k: int = TARGET_SWING_K,
+                        lookback: int = SWING_LOOKBACK) -> Optional[float]:
+    """`end`'den onceki pencerede birbirine `tol` kadar yakin iki fraktal dip/tepe (esit dipler = SSL havuzu). Havuzun ucu."""
+    piv = []
+    for i in range(max(k, end - lookback), end - k):
+        left, right = vals[i - k:i], vals[i + 1:i + k + 1]
+        if kind == "low" and vals[i] < left.min() and vals[i] < right.min():
+            piv.append(float(vals[i]))
+        elif kind == "high" and vals[i] > left.max() and vals[i] > right.max():
+            piv.append(float(vals[i]))
+    best = None
+    for a_i in range(len(piv)):
+        for b_i in range(a_i + 1, len(piv)):
+            if abs(piv[a_i] - piv[b_i]) <= tol:
+                lvl = min(piv[a_i], piv[b_i]) if kind == "low" else max(piv[a_i], piv[b_i])
+                best = lvl if best is None else (min(best, lvl) if kind == "high" else max(best, lvl))
+    return best
+
+
+def _prev_day_extreme(idx, vals: np.ndarray, end: int, kind: str) -> Optional[float]:
+    """Base'in gununden bir onceki UTC gunun dibi / tepesi (seans hizasi yok -- olcum icin yeterli)."""
+    try:
+        day = pd.Timestamp(idx[end]).normalize()
+        days = pd.DatetimeIndex(idx[:end]).normalize()
+        prev = days[days < day]
+        if len(prev) == 0:
+            return None
+        sel = vals[:end][days == prev.max()]
+        return float(sel.min() if kind == "low" else sel.max()) if len(sel) else None
+    except Exception:
+        return None
+
+
 def _swing_levels(df: pd.DataFrame, kind: str, k: int = TARGET_SWING_K) -> list[float]:
     vals = (df["high"] if kind == "high" else df["low"]).to_numpy(dtype=float)
     out: list[float] = []
@@ -319,10 +375,20 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     cands = [(o.proximal, "zone") for o in zones
              if o.side != z.side and o.broken_at is None and ((o.proximal > ref) if long else (o.proximal < ref))]
     cands += [(s, "swing") for s in _swing_levels(df, "high" if long else "low") if ((s > ref) if long else (s < ref))]
-    if cands:
-        tp, kind = min(cands) if long else max(cands)   # fiyata en yakin engel (bolge ya da swing)
-    rr = None
     risk = abs(entry - sl)
+    zone_lvls = [lvl for lvl, k in cands if k == "zone"]
+    tp_zone = (min(zone_lvls) if long else max(zone_lvls)) if zone_lvls else None
+    if cands:
+        # Fiyata en yakin engel; ama MIN_RR'nin altinda kalan ara engel hedef degil (04.11, kullanici: NZDUSD 1H TP 0.56091 /
+        # RR 1.1 -- 17 pip otedeki kucuk swing). Sirayla ilk RR >= MIN_RR veren engel alinir; hicbiri vermiyorsa en yakini
+        # (satir `sd_low_rr` kalir).
+        ordered = sorted(cands, reverse=not long)
+        tp, kind = ordered[0]
+        for lvl, k in ordered:
+            if risk > 0 and abs(lvl - entry) / risk >= MIN_RR:
+                tp, kind = lvl, k
+                break
+    rr = None
     tp_struct, rr_struct = tp, None
     dist_r = round(((last_close - entry) if long else (entry - last_close)) / risk, 2) if risk > 0 else None
     if tp is not None and risk > 0:
@@ -332,7 +398,8 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
             kind = "cap"
         rr = round(abs(tp - entry) / risk, 2)
     return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind,
-                  tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r, sl_zone=float(sl_zone))
+                  tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r, sl_zone=float(sl_zone),
+                  tp_zone=float(tp_zone) if tp_zone is not None else None)
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -367,6 +434,11 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         "fvg": 1 if z.fvg else 0,
         "bos": 1 if z.bos else 0,
         "sweep": 1 if z.sweep else 0,
+        "sweep_kind": z.sweep_kind,
+        "mss": 1 if z.mss else 0,
+        "pd_pos": z.pd_pos,
+        # demand alt yarida (discount), supply ust yarida (premium)
+        "pd_ok": None if z.pd_pos is None else (1 if ((z.pd_pos < 0.5) if z.side == "demand" else (z.pd_pos > 0.5)) else 0),
         "touches": z.touches,
         "in_zone": 1 if z.in_zone else 0,
         "dist_atr": round(float(dist), 3) if dist is not None else None,
@@ -378,6 +450,7 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         out["dist_r"] = plan.dist_r
         out["risk_atr"] = round(abs(plan.entry - plan.sl) / z.atr, 2) if z.atr else None
         out["sl_zone"] = plan.sl_zone
+        out["tp_zone"] = plan.tp_zone
     return out
 
 

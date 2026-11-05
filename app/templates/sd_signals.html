@@ -133,9 +133,9 @@
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">SYMBOL</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">TF</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">DIRECTION</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out: R = rally, D = drop (RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in) · hover for the full name · Fresh = untouched when the signal formed">ZONE</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="BOS = leg-out broke structure · Sweep = base took prior liquidity · FVG left by the leg-out">CONTEXT</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="1D bias at the last evaluation">1D BIAS</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out: R = rally, D = drop (RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in) · hover for the full name · Fresh = untouched when the signal formed">ZONE</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="MSS = reversal zone + sweep + structure break · BOS = break only · Sweep = base took liquidity (swing / EQ = equal lows-highs / PDL-PDH) · Discount / Premium = zone in the lower / upper half of the last 72 candles · FVG left by the leg-out">KEY LEVEL</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Entry = proximal edge · SL = distal edge + 0.1 ATR · TP = nearest obstacle, capped at 4R">ENTRY / SL / TP</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
@@ -155,17 +155,18 @@
                             <td class="px-2 py-2 whitespace-nowrap">
                                 <span class="inline-flex px-2 py-0.5 rounded text-[10px] font-bold {% if r.direction == 'LONG' %}bg-green-500/15 text-green-400{% else %}bg-red-500/15 text-red-400{% endif %}">{{ r.direction }}</span>
                             </td>
+                            <td class="px-2 py-2 text-xs whitespace-nowrap">{% if r.bias == 'BULLISH' %}<span class="text-green-400">BULLISH</span>{% elif r.bias == 'BEARISH' %}<span class="text-red-400">BEARISH</span>{% elif r.bias %}<span class="text-gray-400">{{ r.bias }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
                             <td class="px-2 py-2 text-xs whitespace-nowrap">
                                 <span class="font-bold text-gray-300" title="{{ r.zone_label }}">{{ r.zone_type }}</span>
                                 {% if r.fresh is true %}<span class="ml-1 text-[10px] text-emerald-400">fresh</span>{% elif r.fresh is false %}<span class="ml-1 text-[10px] text-amber-400">tested</span>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-[10px] whitespace-nowrap">
-                                {% if r.bos %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-blue bg-accent-blue/10">BOS</span>{% endif %}
-                                {% if r.sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10">Sweep</span>{% endif %}
+                                {% if r.mss %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-blue bg-accent-blue/10" title="Reversal zone + liquidity sweep + structure break">MSS</span>{% elif r.bos %}<span class="px-1.5 py-0.5 rounded font-bold text-gray-300 bg-dark-600" title="Leg-out broke the last swing (continuation-type break)">BOS</span>{% endif %}
+                                {% if r.sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="Base took liquidity: {{ r.sweep_kind or 'swing' }}">Sweep{% if r.sweep_kind and r.sweep_kind != 'swing' %} {{ r.sweep_kind|upper }}{% endif %}</span>{% endif %}
+                                {% if r.pd_ok == 1 %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10" title="Demand in discount / supply in premium of the last 72 candles (position {{ r.pd_pos }})">{{ 'Discount' if r.direction == 'LONG' else 'Premium' }}</span>{% endif %}
                                 {% if r.fvg %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10">FVG</span>{% endif %}
-                                {% if not (r.bos or r.sweep or r.fvg) %}<span class="text-gray-600">—</span>{% endif %}
+                                {% if not (r.bos or r.sweep or r.fvg or r.pd_ok == 1) %}<span class="text-gray-600">—</span>{% endif %}
                             </td>
-                            <td class="px-2 py-2 text-xs whitespace-nowrap">{% if r.bias == 'BULLISH' %}<span class="text-green-400">BULLISH</span>{% elif r.bias == 'BEARISH' %}<span class="text-red-400">BEARISH</span>{% elif r.bias %}<span class="text-gray-400">{{ r.bias }}</span>{% else %}<span class="text-gray-600">—</span>{% endif %}</td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
                                 {{ r.entry_s }} / <span class="text-red-400/80">{{ r.sl_s }}</span> / <span class="text-green-400/80">{{ r.tp_s }}</span>
@@ -186,11 +187,10 @@
                                 {% if r.closed_at %}<div class="text-[10px] text-gray-500 mt-0.5">{{ r.closed_at }}{% if r.hours is not none %} · {{ r.hours }}h{% endif %}</div>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-xs whitespace-nowrap">
-                                {% if r.confirm_o %}
-                                <span class="{% if r.confirm_o == 'win' %}text-green-400 font-bold{% elif r.confirm_o == 'loss' %}text-red-400 font-bold{% elif r.confirm_o in ('filled', 'wait_retest') %}text-accent-blue{% else %}text-gray-400{% endif %}">{{ r.confirm_label }}</span>
-                                {% if r.confirm_live is not none %}<span class="ml-1 font-mono {% if r.confirm_live > 0 %}text-green-400{% elif r.confirm_live < 0 %}text-red-400{% endif %}">{{ '%+.2f'|format(r.confirm_live) }}R</span>
-                                {% elif r.confirm_r is not none and r.confirm_o in ('win', 'loss') %}<span class="ml-1 font-mono">{{ '%+.2f'|format(r.confirm_r) }}R</span>{% endif %}
-                                {% if r.confirm_e %}<div class="text-[10px] text-gray-500 mt-0.5 font-mono" title="Confirm entry / SL · RR">{{ r.confirm_e }} / {{ r.confirm_sl }}{% if r.confirm_rr %} · {{ '%.2f'|format(r.confirm_rr) }}{% endif %}{% if r.confirm_at %} · {{ r.confirm_at }}{% endif %}</div>{% endif %}
+                                {% if r.confirm_label %}
+                                <span class="{% if r.confirm_o == 'win' %}text-green-400 font-bold{% elif r.confirm_o in ('loss', 'failed') %}text-red-400{% elif r.confirm_o in ('filled', 'wait_retest') %}text-accent-blue{% else %}text-gray-400{% endif %}" {% if r.confirm_tip %}title="Candidates: {{ r.confirm_tip }}"{% endif %}>{{ r.confirm_label }}</span>
+                                {% if r.confirm_live is not none %}<span class="ml-1 font-mono {% if r.confirm_live > 0 %}text-green-400{% elif r.confirm_live < 0 %}text-red-400{% endif %}">{{ '%+.2f'|format(r.confirm_live) }}R</span>{% endif %}
+                                {% if r.confirm_path %}<div class="text-[10px] text-gray-500 mt-0.5">{{ r.confirm_path }}</div>{% endif %}
                                 {% else %}<span class="text-gray-600">—</span>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-xs text-gray-400 whitespace-nowrap" title="Zone qualified {{ r.ready_at }}">{{ r.setup_at }}</td>
@@ -219,9 +219,11 @@
                 profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days). Entry and SL are frozen when the zone first
                 qualifies; the target follows the nearest obstacle until the fill. <b>Setup</b> = open time of the zone's first base candle
                 (4H or 1H candle); <b>Retest</b> = the 15m candle that touched the entry. Rows are sorted by score.
-                <b>LTF Confirm</b> is the alternative entry measured on the same zone: after the touch, wait for an LTF CHOCH (close beyond the
-                last lower-high / higher-low of the move into the zone), then a <b>limit order at that level</b> — filled only on its retest, stop just
-                beyond the pullback extreme. "Missed" = price left without a retest, "Zone failed" = the zone's stop was hit before any CHOCH.
+                <b>LTF Confirm</b> is the alternative entry measured on the same zone (LTF = 15m for 4H zones, 5m for 1H): after the touch, an
+                LTF <b>CHOCH</b> = a close beyond the last swing high (3-candle fractal) before the pullback's extreme. Then limit orders on four
+                candidates — the CHOCH leg's FVG, an inverted FVG of the drop, the CISD (open of the last opposite block) and the broken swing (MSS);
+                the column names the first one retested ("retest 5m FVG 12:45"). "No retest — price left" = target reached without any retest;
+                "Zone failed before / after CHOCH" = the stop was hit. Hover the label for each candidate's level and result.
             </p>
         </div>
     </main>

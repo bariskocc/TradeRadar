@@ -1,18 +1,26 @@
-"""S/D "LTF onay + retest" giris varyanti (03.11, kullanici) -- OLCUM, motor karari degil.
+"""S/D "LTF onay + retest" giris varyanti (03.11; 05.11'de yeniden yazildi -- kullanici) -- OLCUM, motor karari degil.
 
-Soru: bolgeye dokununca dogrudan limit (bugunku kural) mi, yoksa 15m'de CHOCH/MSB bekleyip kirilan seviyenin
-retestinde mi girmeli? Ayni Journal satirinda ikisi paralel izlenir; bu modul ikinci kolu yurutur. Durum
-`setup_journal` kaydinin `entries["sdc"]` sozlugunde tutulur (`o` = asama; varyant donguleri `_STATE_KEYS` ile atlar).
+Soru: bolgeye dokununca dogrudan limit (bugunku kural) mi, yoksa LTF'de CHOCH bekleyip bir LTF bolgesinin retestinde mi girmeli?
+Ayni Journal satirinda izlenir; durum `entries["sdc"]` (varyant donguleri `_STATE_KEYS` ile atlar). LTF = Journal'in izleme serisi
+(4H bolge -> 15m, 1H bolge -> 5m; `setup_journal.LTF_OF`). Journal mumlari open tasimaz: open ~ onceki kapanis.
 
-Akis (LONG icin; SHORT simetrik):
-  1. Dokunus: satirin `entry_touched_at`'i (fiyat proximal'e degdi) -> tampon baslar, `o = "wait_choch"`.
-  2. Bolgeye gelen dususun son dibi (`lo`) ve o dipten ONCEKI son pivot tepe (k=1; yoksa dipten onceki en yuksek high) =
-     CHOCH seviyesi (`lvl`). Dip satirin SL'ini (distal + taban) gecerse bolge basarisiz: `o = "failed"`.
-  3. Bir 15m kapanisi `lvl` ustunde -> onay: giris = `lvl` (kirilan yapinin retesti), SL = dip - %10 risk, TP satirin
-     TP'si; `o = "wait_retest"`.
-  4. Fiyat girise donmeden TP'ye giderse `o = "missed"` (islem yok); girise gelirse `filled`, sonra `win` / `loss`
-     (ayni mumda ikisi: `ambiguous`). Ufuk satirin ufku: dolmadan biterse `no_touch`, onay gelmeden biterse `no_choch`.
-Not: 1H bolgeleri 03.11'den beri 5m ile izlenir (config.SD_5M_ENABLED, 1D evreni); 5m yoksa 15m.
+Akis (LONG; SHORT simetrik):
+  0. Dokunustan ONCE de son PRE_BARS mum tamponda tutulur (05.11: bolgeye gelen dususun yapisi gerekli -- V donusunde dip
+     dokunus mumunun kendisiydi, oncesinde mum olmadigi icin swing bulunamiyor, CHOCH hic tetiklenmiyordu; TP olan islemlerde
+     "Waiting CHOCH" yaziyordu).
+  1. Dokunus (satirin `entry_touched_at`) -> `wait_choch`. Dokunustan beri en dusuk dip = `lo`.
+  2. CHOCH seviyesi = `lo`'dan ONCEKI son swing tepe (3'lu fraktal: iki komsusundan yuksek; tampon dokunus oncesini de kapsar).
+     Bir LTF kapanisi bu seviyenin ustunde -> CHOCH. Dip satirin SL'ini once gecerse: `failed` (zone failed before CHOCH).
+  3. CHOCH aninda giris adaylari (hepsi `lo` ile CHOCH kapanisi arasinda), her biri ayri limit emri:
+       fvg  -- dip -> CHOCH hamlesinin biraktigi yukselis FVG'si, ust kenar (fiyata en yakini)
+       ifvg -- dususun biraktigi dusus FVG'si, CHOCH kapanisi ust kenarinin ustunde (invert), ust kenar (en yakini)
+       cisd -- `lo`'ya inen son dusus blogunun ilk mumunun acilisi
+       mss  -- kirilan swing tepe
+     Ortak SL = lo - SL_BUFFER_FRAC x (mss - lo); TP satirin TP'si.
+  4. Her aday: girise donmeden TP -> kacti; dolum -> TP / SL. Sayfadaki hikaye "ilk dolan" adaydan (ayni mumda sira fvg, ifvg,
+     cisd, mss): hangi bolgeden retest geldi, sonra ne oldu. Hicbir aday dolmadan TP -> `missed` (no retest, price left).
+     Ufukta: `no_touch` / `no_choch` / `open`.
+Not: sd15m'de bu kol yok (kullanici 04.11: "CHOCH + retest 1H ve 4H icin").
 """
 from __future__ import annotations
 
@@ -20,12 +28,15 @@ from datetime import datetime, timedelta, timezone
 
 SDC_KEY = "sdc"
 STRATEGIES = ("sd", "sd1h")
-MAX_BUFFER = 400                 # 15m mum (~4 gun); daha eskisi CHOCH icin gerekmez
-SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (seviye - dip)
+PRE_BARS = 40                    # dokunus oncesi tutulan LTF mumu
+MAX_BUFFER = 400
+SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (MSS seviyesi - dip)
+VARIANTS = ("fvg", "ifvg", "cisd", "mss")
+VARIANT_LABEL = {"fvg": "FVG", "ifvg": "IFVG", "cisd": "CISD", "mss": "MSS level"}
 FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open")
 LABELS = {
-    "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — limit resting", "filled": "Filled on retest",
-    "win": "TP", "loss": "SL", "ambiguous": "Same bar (?)", "missed": "Missed (no retest)",
+    "pre": "—", "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — waiting retest", "filled": "Retest — in trade",
+    "win": "Worked", "loss": "Zone failed after CHOCH", "ambiguous": "Same bar (?)", "missed": "No retest — price left",
     "failed": "Zone failed before CHOCH", "no_touch": "No retest in horizon", "no_choch": "No CHOCH in horizon",
     "open": "Open at horizon",
 }
@@ -46,38 +57,196 @@ def _iso(ts) -> str | None:
     return ts.isoformat() if ts is not None else None
 
 
-def _init(rec: dict) -> dict:
-    return {"o": "wait_choch", "t0": _iso(rec.get("entry_touched_at")), "b": [], "lo": None, "lo_i": None,
-            "lvl": None, "e": None, "sl": None, "rr": None, "ct": None, "t": None, "at": None, "until": None}
-
-
-def _choch_level(bars: list, lo_i: int, long: bool) -> float | None:
-    """Dipten (lo_i) onceki son pivot tepe (k=1); yoksa dipten onceki en uc nokta. Dip ilk mumdaysa None."""
-    if lo_i <= 0:
-        return None
-    hi = [b[1] for b in bars]
-    lo = [b[2] for b in bars]
-    vals = hi if long else lo
-    for i in range(lo_i - 1, 0, -1):
-        if long and vals[i] > vals[i - 1] and vals[i] > vals[i + 1]:
-            return vals[i]
-        if not long and vals[i] < vals[i - 1] and vals[i] < vals[i + 1]:
-            return vals[i]
-    seg = vals[:lo_i]
-    return max(seg) if long else min(seg)
-
-
-def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: timedelta) -> bool:
-    """Kapanan 15m mumunu uygula. Degisiklik olduysa True."""
-    if rec.get("strategy") not in STRATEGIES or rec.get("levels_at") is None or rec.get("entry_touched_at") is None:
-        return False
+def _state(rec: dict) -> dict:
     ents = rec.get("entries")
     if ents is None:
         ents = rec["entries"] = {}
     st = ents.get(SDC_KEY)
-    if st is None:
-        st = ents[SDC_KEY] = _init(rec)
+    if st is None or "vars" not in st:          # 05.11 oncesi durum bicimi -> bastan
+        st = ents[SDC_KEY] = {"o": "pre", "b": [], "lo": None, "lo_i": None, "lvl": None, "ct": None, "vars": {},
+                              "via": None, "e": None, "sl": None, "rr": None, "t": None, "at": None, "until": None}
+    return st
+
+
+def _swing_before(bars: list, end: int, long: bool) -> float | None:
+    """`end`'den (haric) onceki son 3'lu fraktal tepe (LONG) / dip (SHORT)."""
+    for i in range(min(end, len(bars) - 1) - 1, 0, -1):
+        a, b, c = bars[i - 1], bars[i], bars[i + 1]
+        if long and b[1] > a[1] and b[1] > c[1]:
+            return b[1]
+        if not long and b[2] < a[2] and b[2] < c[2]:
+            return b[2]
+    return None
+
+
+def _candidates(bars: list, lo_i: int, ci: int, long: bool, lvl: float, close: float, lo: float) -> dict:
+    """CHOCH aninda giris adaylari (fiyat: lo ile CHOCH kapanisi arasinda)."""
+    out: dict[str, float] = {"mss": float(lvl)}
+
+    def opn(i: int) -> float:                     # open ~ onceki kapanis
+        return bars[i - 1][3] if i > 0 else bars[i][3]
+
+    def against(i: int) -> bool:                  # LONG: dususle kapanan mum
+        return bars[i][3] < opn(i) if long else bars[i][3] > opn(i)
+
+    j = lo_i
+    while j > 0 and against(j - 1):
+        j -= 1
+    if against(lo_i) or j < lo_i:
+        out["cisd"] = float(opn(j))
+    gaps = []                                     # dip -> CHOCH hamlesinin FVG'si
+    for i in range(max(lo_i, 1), ci):
+        if long and bars[i + 1][2] > bars[i - 1][1]:
+            gaps.append(bars[i + 1][2])
+        if not long and bars[i + 1][1] < bars[i - 1][2]:
+            gaps.append(bars[i + 1][1])
+    if gaps:
+        out["fvg"] = float(max(gaps) if long else min(gaps))
+    inv = []                                      # dususun FVG'si, CHOCH kapanisiyla invert
+    for i in range(1, lo_i):
+        if long and bars[i + 1][1] < bars[i - 1][2] and close > bars[i - 1][2]:
+            inv.append(bars[i - 1][2])
+        if not long and bars[i + 1][2] > bars[i - 1][1] and close < bars[i - 1][1]:
+            inv.append(bars[i - 1][1])
+    if inv:
+        out["ifvg"] = float(max(inv) if long else min(inv))
+    return {k: v for k, v in out.items() if ((lo < v < close) if long else (close < v < lo))}
+
+
+def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: timedelta) -> bool:
+    """Kapanan LTF mumunu uygula (dokunus oncesi dahil). Degisiklik olduysa True."""
+    if rec.get("strategy") not in STRATEGIES or rec.get("levels_at") is None or rec.get("entry") is None:
+        return False
+    st = _state(rec)
     if st["o"] in FINAL:
+        return False
+    ts = _naive(bar_ts)
+    if ts is None or (st.get("until") is not None and ts <= _naive(st["until"])):
+        return False
+    st["until"] = ts
+    long = rec.get("direction") == "LONG"
+    bars = st["b"]
+    touched = rec.get("entry_touched_at") is not None and ts >= _naive(rec["entry_touched_at"])
+    if st["o"] == "pre":
+        bars.append([_iso(ts), float(high), float(low), float(close)])
+        if not touched:
+            del bars[:-PRE_BARS]
+            return True
+        st["o"] = "wait_choch"
+    sl_row, tp = float(rec["sl"]), float(rec["tp"])
+    if st["o"] == "wait_choch":
+        if bars[-1][0] != _iso(ts):
+            bars.append([_iso(ts), float(high), float(low), float(close)])
+        if len(bars) > MAX_BUFFER:
+            drop = len(bars) - MAX_BUFFER
+            del bars[:drop]
+            if st["lo_i"] is not None:
+                st["lo_i"] = max(0, st["lo_i"] - drop)
+        if (low <= sl_row) if long else (high >= sl_row):
+            st["o"], st["at"] = "failed", ts
+            return True
+        ext = low if long else high
+        if st["lo"] is None or ((ext < st["lo"]) if long else (ext > st["lo"])):
+            st["lo"], st["lo_i"] = float(ext), len(bars) - 1
+        st["lvl"] = _swing_before(bars, st["lo_i"], long)
+        lvl, ci = st["lvl"], len(bars) - 1
+        if lvl is not None and st["lo_i"] < ci and ((close > lvl) if long else (close < lvl)):
+            cands = _candidates(bars, st["lo_i"], ci, long, lvl, close, st["lo"])
+            ref = abs(lvl - st["lo"])
+            sl = st["lo"] - SL_BUFFER_FRAC * ref if long else st["lo"] + SL_BUFFER_FRAC * ref
+            st["sl"], st["ct"], st["o"] = float(sl), _iso(ts), "wait_retest"
+            st["vars"] = {k: {"e": e, "rr": round(abs(tp - e) / abs(e - sl), 4) if abs(e - sl) > 0 else None,
+                              "o": "pending", "t": None, "at": None} for k, e in cands.items()}
+            st["b"] = []                          # tampon artik gerekmez (JSON kucuk kalsin)
+        elif ts >= rec["levels_at"] + horizon:
+            st["o"], st["at"] = "no_choch", ts
+        return True
+    # CHOCH sonrasi: her aday ayri limit emri
+    sl = float(st["sl"])
+    hit_tp = high >= tp if long else low <= tp
+    hit_sl = low <= sl if long else high >= sl
+    for v in st["vars"].values():
+        if v["o"] == "pending":
+            hit_e = low <= v["e"] if long else high >= v["e"]
+            if hit_tp and not hit_e:
+                v["o"], v["at"] = "missed", _iso(ts)
+            elif hit_e:
+                v["t"] = _iso(ts)
+                v["o"] = "ambiguous" if hit_tp else ("loss" if hit_sl else "filled")
+                if v["o"] != "filled":
+                    v["at"] = _iso(ts)
+        elif v["o"] == "filled":
+            if hit_tp and hit_sl:
+                v["o"], v["at"] = "ambiguous", _iso(ts)
+            elif hit_tp:
+                v["o"], v["at"] = "win", _iso(ts)
+            elif hit_sl:
+                v["o"], v["at"] = "loss", _iso(ts)
+    filled = [v["t"] for v in st["vars"].values() if v.get("t")]
+    if filled:
+        t0 = min(filled)
+        via = next(k for k in VARIANTS if st["vars"].get(k, {}).get("t") == t0)
+        v = st["vars"][via]
+        # ust duzey t/at/until datetime (Journal `_ENTRY_TS` donusumu); adaylarin (vars) zamanlari ISO metin
+        st["via"], st["e"], st["rr"], st["t"] = via, v["e"], v["rr"], datetime.fromisoformat(v["t"])
+        st["o"] = v["o"] if v["o"] in ("win", "loss", "ambiguous") else "filled"
+        if st["o"] != "filled":
+            st["at"] = ts
+    elif (st["vars"] and all(v["o"] == "missed" for v in st["vars"].values())) or (not st["vars"] and hit_tp):
+        st["o"], st["at"] = "missed", ts
+    if st["o"] in ("wait_retest", "filled") and ts >= rec["levels_at"] + horizon:
+        st["o"], st["at"] = ("no_touch" if st["o"] == "wait_retest" else "open"), ts
+    return True
+
+
+def describe(st: dict | None, ltf: str) -> dict:
+    """Sayfa icin: kisa etiket + hikaye satiri + ipucu (her adayin seviyesi ve sonucu)."""
+    if not st or st.get("o") in (None, "pre") or "vars" not in st:
+        return {"label": None, "path": None, "tip": None}
+    o = st["o"]
+    via = st.get("via")
+    via_label = f"{ltf} {VARIANT_LABEL.get(via, via)}" if via else None
+
+    def hhmm(v):
+        if not v:
+            return "?"
+        return v.strftime("%H:%M") if hasattr(v, "strftime") else str(v)[11:16]
+
+    parts = []
+    if st.get("ct"):
+        parts.append(f"CHOCH {hhmm(st['ct'])}")
+    if via:
+        parts.append(f"retest {via_label} {hhmm(st.get('t'))}")
+    label = LABELS.get(o, o)
+    if o == "win" and via_label:
+        label = f"Worked — retest {via_label}"
+    tip = " · ".join(f"{VARIANT_LABEL[k]} {v['e']:.6g} → {v['o']}" for k, v in (st.get("vars") or {}).items())
+    return {"label": label, "path": " · ".join(parts) or None, "tip": tip or None}
+
+
+# --- Karsi-bolge hedefi (05.11, kullanici): "TP bir sonraki S/D bolgesi olsa daha garanti olabilir" --------------------------
+TPZ_KEY = "tpz"
+
+
+def tpz_step(rec: dict, bar_ts, high: float, low: float, horizon: timedelta) -> bool:
+    """Ayni dolum (satirin girisi) ve ayni SL ile hedef = seviye andaki en yakin karsi canli bolge (`features.tp_zone`).
+    Durum entries["tpz"]: o = pending (dolum var, hedef bekliyor) | win | loss | open (ufuk) | none (karsi bolge yoktu)."""
+    if rec.get("strategy") not in ("sd", "sd1h", "sd15m") or rec.get("levels_at") is None or rec.get("entry_touched_at") is None:
+        return False
+    ents = rec.get("entries")
+    if ents is None:
+        ents = rec["entries"] = {}
+    st = ents.get(TPZ_KEY)
+    if st is None:
+        f = rec.get("features_at_levels") or rec.get("features") or {}
+        tpz = f.get("tp_zone")
+        e, sl = rec.get("entry"), rec.get("sl")
+        if tpz is None or e is None or sl is None or abs(float(e) - float(sl)) <= 0:
+            st = ents[TPZ_KEY] = {"o": "none", "tp": None, "rr": None, "at": None, "until": None}
+            return True
+        st = ents[TPZ_KEY] = {"o": "pending", "tp": float(tpz), "rr": round(abs(float(tpz) - float(e)) / abs(float(e) - float(sl)), 4),
+                              "at": None, "until": None}
+    if st["o"] != "pending":
         return False
     ts = _naive(bar_ts)
     if ts is None or ts < _naive(rec["entry_touched_at"]):
@@ -86,65 +255,18 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
         return False
     st["until"] = ts
     long = rec.get("direction") == "LONG"
-    e_row, sl_row, tp = float(rec["entry"]), float(rec["sl"]), float(rec["tp"])
-    hit_sl_row = low <= sl_row if long else high >= sl_row
-    if st["o"] == "wait_choch":
-        bars = st["b"]
-        bars.append([_iso(ts), float(high), float(low), float(close)])
-        if len(bars) > MAX_BUFFER:
-            drop = len(bars) - MAX_BUFFER
-            del bars[:drop]
-            if st["lo_i"] is not None:
-                st["lo_i"] = max(0, st["lo_i"] - drop)
-        if hit_sl_row:
-            st["o"], st["at"] = "failed", ts
-            return True
-        ext = low if long else high
-        if st["lo"] is None or ((ext < st["lo"]) if long else (ext > st["lo"])):
-            st["lo"], st["lo_i"] = float(ext), len(bars) - 1
-        st["lvl"] = _choch_level(bars, st["lo_i"], long)
-        lvl = st["lvl"]
-        if lvl is not None and st["lo_i"] < len(bars) - 1 and ((close > lvl) if long else (close < lvl)):
-            risk = abs(lvl - st["lo"])
-            if risk <= 0:
-                return True
-            st["e"] = float(lvl)
-            st["sl"] = float(st["lo"] - SL_BUFFER_FRAC * risk) if long else float(st["lo"] + SL_BUFFER_FRAC * risk)
-            st["rr"] = round(abs(tp - st["e"]) / abs(st["e"] - st["sl"]), 4)
-            st["ct"], st["o"] = _iso(ts), "wait_retest"
-            st["b"] = []                         # tampon artik gerekmez (JSON kucuk kalsin)
-        elif ts >= rec["levels_at"] + horizon:
-            st["o"], st["at"] = "no_choch", ts
-        return True
-    e, sl = float(st["e"]), float(st["sl"])
-    hit_e = low <= e if long else high >= e
-    hit_tp = high >= tp if long else low <= tp
+    sl = float(rec["sl"])
+    hit_tp = high >= st["tp"] if long else low <= st["tp"]
     hit_sl = low <= sl if long else high >= sl
-    if st["o"] == "wait_retest":
-        if hit_tp and not hit_e:
-            st["o"], st["at"] = "missed", ts
-        elif hit_e:
-            st["t"] = ts
-            if hit_tp:
-                st["o"], st["at"] = "ambiguous", ts
-            elif hit_sl:
-                st["o"], st["at"] = "loss", ts
-            else:
-                st["o"] = "filled"
-        elif ts >= rec["levels_at"] + horizon:
-            st["o"], st["at"] = "no_touch", ts
-        return True
-    if st["o"] == "filled":
-        if hit_tp and hit_sl:
-            st["o"], st["at"] = "ambiguous", ts
-        elif hit_tp:
-            st["o"], st["at"] = "win", ts
-        elif hit_sl:
-            st["o"], st["at"] = "loss", ts
-        elif ts >= rec["levels_at"] + horizon:
-            st["o"], st["at"] = "open", ts
-        return True
-    return False
+    if hit_tp and hit_sl:
+        st["o"], st["at"] = "ambiguous", ts
+    elif hit_tp:
+        st["o"], st["at"] = "win", ts
+    elif hit_sl:
+        st["o"], st["at"] = "loss", ts
+    elif ts >= rec["levels_at"] + horizon:
+        st["o"], st["at"] = "open", ts
+    return True
 
 
 def final_r(st: dict | None) -> float | None:

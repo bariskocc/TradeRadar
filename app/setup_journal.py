@@ -118,7 +118,8 @@ _TOUCH_EVERY = timedelta(minutes=30)
 # IZLEME.md "Dar stop — golge izleme".
 SHADOW_SL = {"4h": (1.0, 0.75, 0.5), "1d": (1.0, 0.75, 0.5), "1h": (1.0, 0.75, 0.5),
              "1w": (1.0, 0.75, 0.5),
-             # S/D (03.11, kullanici): ana stop 1.5 ATR taban; k=0.667 ~ 1.0 ATR, k=1.333 ~ 2.0 ATR (taban bagladiginda)
+             # S/D (05.11): ana stop 1.5 ATR taban; k=0.667 ~ 1.0 ATR, k=1.333 ~ 2.0 ATR; bolge stopu (distal + tampon) "c1"
+             # varyantinda (scanner `c1=plan.sl_zone` verir -- CRT'deki C1 ucu stop mekanizmasinin aynisi, acik SL seviyesi)
              "sd": (1.0, 0.667, 1.333), "sd1h": (1.0, 0.667, 1.333), "sd15m": (1.0, 0.667, 1.333)}
 # JSON'a yazilirken/okunurken datetime'a cevrilecek alanlar. Golgede "e" dolum ani; entry
 # varyantlarinda "e" ENTRY FIYATI olduğu icin dolum ani ayri alanda ("t") tutulur.
@@ -197,7 +198,7 @@ BREAK_SEED = "_brk"
 # siklikta olusmadigi da olcumun parcasi. Motor KULLANMAZ. Rapor `scripts/retest_ifvg_stat.py`.
 RFVG_STATE = "_rfvg"
 RFVG_VARIANTS = ("rfvg_near", "rfvg_mid", "rfvg_far")
-_STATE_KEYS = (CFVG_STATE, RFVG_STATE, "sdc")   # "sdc": S/D LTF onay varyanti (app/sd_confirm.py)
+_STATE_KEYS = (CFVG_STATE, RFVG_STATE, "sdc", "tpz")   # "sdc": S/D LTF onay, "tpz": S/D karsi-bolge hedefi (app/sd_confirm.py)
 
 _CACHE: dict[tuple, dict] = {}
 _DIRTY: set[tuple] = set()
@@ -1512,11 +1513,17 @@ def track_bar(strategy: str, symbol: str, bar_ts, high: float, low: float, close
             if _pre_c2_active(rec, bar_ts):
                 _apply_pre_c2(rec, bar_ts, float(high), float(low))
                 touched = True
-            if strategy in SD_FILL_REQUIRED_STRATEGIES and rec.get("entry_touched_at") is not None:
-                # S/D LTF onay + retest varyanti (03.11): dokunustan sonra 15m CHOCH, kirilan seviyenin retesti.
+            if strategy in SD_FILL_REQUIRED_STRATEGIES and rec.get("levels_at") is not None and not _bar_before_levels(rec, bar_ts):
+                # S/D LTF onay + retest (05.11): dokunus ONCESI mumlar da tampona girer (bolgeye gelen dususun swing'i);
+                # dokunustan sonra CHOCH, sonra FVG / IFVG / CISD / MSS adaylarinin retesti (app/sd_confirm.py).
                 from app import sd_confirm
                 if sd_confirm.step(rec, bar_ts, float(high), float(low),
                                    float(close) if close is not None else float(high), _horizon(rec)):
+                    touched = True
+            if strategy in SD_FILL_REQUIRED_STRATEGIES and rec.get("entry_touched_at") is not None:
+                from app import sd_confirm
+                # S/D karsi-bolge hedefi (05.11, kullanici: "TP bir sonraki S/D bolgesi olsa daha garanti"): ayni dolum, SL ayni.
+                if sd_confirm.tpz_step(rec, bar_ts, float(high), float(low), _horizon(rec)):
                     touched = True
             if touched:
                 _DIRTY.add(key)
