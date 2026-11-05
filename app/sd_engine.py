@@ -49,6 +49,13 @@ BASE_MAX_RANGE_ATR = 1.5
 LEG_OUT_MIN_ATR = 2.0
 LEG_OUT_BARS = 3
 LEG_BODY_MIN_ATR = 1.0
+# 05.11 (kullanici, KAS 4H 02.11 15:00 TSI doji base'i: cikis mumu govdesi 0.91 ATR, bolge goruldu ama sayilmadi): govdesi
+# NEAR_LEG_BODY_ATR..LEG_BODY_MIN_ATR arasi cikislar ayri "yakin kacan bolge" (Journal `sd_near`) -- Signals'a girmez, olcum.
+NEAR_LEG_BODY_ATR = 0.8
+# 05.11 (kullanici, KAS: stop 0.03273, 4 tick ustundeki 02.11 15:00 tepesi 0.03279; fiyat 0.03277'ye dokunup dondu): stopun
+# otesinde STOP_LIQ_ATR icinde alinmamis tepe/dip varsa (base oncesi SWING_LOOKBACK mum, fraktal sarti yok) stop onun otesine --
+# yalniz OLCUM (Journal golge stop "liq", plan.sl degismez).
+STOP_LIQ_ATR = 0.5
 LEG_IN_BARS = 3
 LEG_IN_MIN_ATR = 1.0
 SL_BUFFER_ATR = 0.1
@@ -106,6 +113,7 @@ class SDZone:
     sweep: bool = False
     sweep_kind: Optional[str] = None   # major / eq / pdl (pdh) -- base hangi likiditeyi aldi (ilk bulunan; 05.11)
     sweep_minor: bool = False          # yalniz ara swing (5'li fraktal) alindi -- sweep sayilmaz, olcum (05.11)
+    legout_body_atr: float = 0.0       # leg-out ilk mumunun govdesi / ATR (05.11, yakin kacan bolge olcumu)
     mss: bool = False                  # MSS: donus bolgesinin (DBR/RBD) kirilimi; devam bolgesinde ayni kirilim BOS (05.11)
     pd_pos: Optional[float] = None     # proximal'in PD_RANGE_BARS araligindaki yeri: 0 = dip, 1 = tepe (05.11)
     touches: int = 0
@@ -138,6 +146,7 @@ class SDPlan:
     tp_zone: Optional[float] = None     # fiyatin otesindeki ilk karsi canli bolge (olcum: 'hedef karsi bolge olsa?')
     rr_struct: Optional[float] = None
     dist_r: Optional[float] = None      # son kapanisin girise uzakligi, R cinsinden (pozitif = giris henuz dolmadi)
+    sl_liq: Optional[float] = None      # stopu iten alinmamis tepe/dip (05.11; None = itilmedi)
 
 
 def closed_bars(df: pd.DataFrame, now=None, delta: timedelta = HTF_DELTA) -> pd.DataFrame:
@@ -163,7 +172,7 @@ def _legin_letter(legin_atr: float) -> str:
     return "?"
 
 
-def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone]:
+def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: float = LEG_BODY_MIN_ATR) -> list[SDZone]:
     """Kapanmis HTF serisinden bolgeler (zaman sirali). Dokunus/kirilma da burada hesaplanir."""
     if df is None or len(df) < ATR_PERIOD + LEG_IN_BARS + BASE_MAX_BARS + 2:
         return []
@@ -183,7 +192,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             j += 1
             continue
         body = c[j] - o[j]
-        if abs(body) < LEG_BODY_MIN_ATR * a:
+        if abs(body) < leg_body_min * a:
             j += 1
             continue
         up = body > 0
@@ -284,6 +293,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             base_bars=int(j - bs), base_max_atr=round(float((h[bs:j] - l[bs:j]).max() / a), 3),
             fvg=bool(fvg), formed_iloc=int(formed), bos=bool(bos), sweep=bool(sweep),
             sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos,
+            legout_body_atr=round(float(abs(body) / a), 3),
         )
         _walk_after(z, h, l, idx)
         zones.append(z)
@@ -377,6 +387,30 @@ def _swing_levels(df: pd.DataFrame, kind: str, k: int = TARGET_SWING_K) -> list[
     return out
 
 
+def _liq_beyond_stop(z: SDZone, df: pd.DataFrame, sl: float) -> Optional[float]:
+    """Stopun otesinde STOP_LIQ_ATR icindeki en uzak alinmamis tepe (supply) / dip (demand): base'den onceki SWING_LOOKBACK mum
+    (her mum, fraktal sarti yok -- KAS'ta seviye bir doji base'in tepesiydi), sonrasinda bugune kadar asilmamis."""
+    try:
+        bs = int(df.index.get_loc(z.base_start))
+    except Exception:
+        return None
+    long = z.direction == "LONG"
+    vals = (df["low"] if long else df["high"]).to_numpy(dtype=float)
+    band = STOP_LIQ_ATR * z.atr
+    best = None
+    for i in range(max(0, bs - SWING_LOOKBACK), bs):
+        v = vals[i]
+        inside = (sl - band <= v < sl) if long else (sl < v <= sl + band)
+        if not inside:
+            continue
+        later = vals[i + 1:]
+        if len(later) and ((later.min() < v) if long else (later.max() > v)):
+            continue                                  # sonradan alinmis -> likidite degil
+        if best is None or ((v < best) if long else (v > best)):
+            best = float(v)
+    return best
+
+
 def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: float | None = None) -> SDPlan:
     """Giris / SL / TP: TP = en yakin engel (karsi canli bolgenin proximal'i ya da fiyatin otesindeki ilk swing), MAX_RR tavani."""
     buf = SL_BUFFER_ATR * z.atr
@@ -385,6 +419,9 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     sl_zone = z.distal - buf if long else z.distal + buf
     floor = MIN_RISK_ATR * z.atr
     sl = min(sl_zone, entry - floor) if long else max(sl_zone, entry + floor)
+    # Olcum (05.11): stopu otesindeki alinmamis tepe/dibin otesine itmek ana stopa UYGULANMAZ -- onbellekteki 4H/1H serilerinde
+    # canli bolgelerin %58'inde (3 mumluk pencerede bile %29) stop degisiyordu; Journal golgesi "liq" ile olculur.
+    sl_liq = _liq_beyond_stop(z, df, sl)
     if last_close is None:
         last_close = float(df["close"].iloc[-1])
     ref = max(entry, last_close) if long else min(entry, last_close)
@@ -417,7 +454,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
         rr = round(abs(tp - entry) / risk, 2)
     return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind,
                   tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r, sl_zone=float(sl_zone),
-                  tp_zone=float(tp_zone) if tp_zone is not None else None)
+                  tp_zone=float(tp_zone) if tp_zone is not None else None, sl_liq=sl_liq)
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -454,6 +491,7 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         "sweep": 1 if z.sweep else 0,
         "sweep_kind": z.sweep_kind,
         "sweep_minor": 1 if z.sweep_minor else 0,
+        "legout_body_atr": z.legout_body_atr,
         "mss": 1 if z.mss else 0,
         "pd_pos": z.pd_pos,
         # demand alt yarida (discount), supply ust yarida (premium)
@@ -470,6 +508,10 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         out["risk_atr"] = round(abs(plan.entry - plan.sl) / z.atr, 2) if z.atr else None
         out["sl_zone"] = plan.sl_zone
         out["tp_zone"] = plan.tp_zone
+        out["sl_liq"] = plan.sl_liq
+        if plan.sl_liq is not None and z.atr:
+            b = SL_BUFFER_ATR * z.atr
+            out["sl_liq_stop"] = plan.sl_liq - b if z.direction == "LONG" else plan.sl_liq + b
     return out
 
 

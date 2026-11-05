@@ -1733,6 +1733,29 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
                     note=f"{n_all} çözülmüş bölge · {len(rows)} seviyeli satır · düz TP/SL, sinyal yok")
 
 
+async def _p_sd_near(db: AsyncSession) -> Progress:
+    """05.11 (kullanici, KAS 4H): cikis govdesi 0.8-1 ATR'lik yakin kacan bolgeler (`sd_near`) ana kuralin bolgeleri (`sd_ready`)
+    kadar calisiyor mu? Cozulmus = dolumdan sonra TP / SL. Tetik: 4H'te sd_near 30 cozulmus."""
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.best_stage, t.c.outcome).where(
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage.in_(("sd_near", "sd_ready")),
+        t.c.outcome.in_(("win", "loss"))))).all()
+    acc: dict[tuple, list[int]] = {}
+    for st, stage, o in rows:
+        g = acc.setdefault((st, stage), [0, 0])
+        g[0 if o == "win" else 1] += 1
+    table = [["Strateji · bölge", "TP", "SL", "WR"]]
+    for st in ("sd", "sd1h", "sd15m"):
+        for stage, label in (("sd_ready", "ana kural (gövde ≥ 1 ATR)"), ("sd_near", "yakın kaçan (0,8–1 ATR)")):
+            w, l = acc.get((st, stage), [0, 0])
+            if w + l:
+                table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H', 'sd15m': 'S/D 15m'}[st] } · {label}", str(w), str(l),
+                              f"%{100 * w / (w + l):.0f}"])
+    n = sum(acc.get(("sd", "sd_near"), [0, 0]))
+    return Progress(bars=[Bar("4H yakın kaçan bölge — çözülmüş", n, 30)], table=table,
+                    note="dolumdan sonra TP / SL; yakın kaçan bölgeler Signals'a girmez")
+
+
 async def _p_sd1h_outcomes(db: AsyncSession) -> Progress:
     return await _p_sd_outcomes(db, "sd1h")
 
@@ -1871,7 +1894,8 @@ async def _p_sd_stop_width(db: AsyncSession) -> Progress:
             sh = json.loads(r["shadow"] or "{}")
         except Exception:
             continue
-        for k, label in (("1", "1,5 ATR (ana)"), ("0.667", "~1,0 ATR"), ("1.333", "~2,0 ATR"), ("c1", "bölge stopu (distal + 0,1 ATR)")):
+        for k, label in (("1", "1,5 ATR (ana)"), ("0.667", "~1,0 ATR"), ("1.333", "~2,0 ATR"), ("c1", "bölge stopu (distal + 0,1 ATR)"),
+                         ("liq", "yakın tepe/dibin ötesi (≤ 0,5 ATR)")):
             v = sh.get(k) or {}
             if v.get("o") not in ("win", "loss"):
                 continue
@@ -2927,9 +2951,18 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_target_model,
     ),
     WatchItem(
+        key="sd_near_legout", status="open", started="05.11", onem=1, group="sd",
+        title="S/D çıkış mumu: gövdesi 0,8–1 ATR olan yakın kaçan bölgeler de çalışıyor mu?",
+        trigger="4H'te yakın kaçan bölge (sd_near) 30 çözülmüş: WR'si ana kuralınkinden en fazla 5 puan geride VE iki yarıda aynı "
+                "→ çıkış gövdesi eşiği 0,8 ATR'ye iner; 10 puandan fazla gerideyse 1 ATR kalır",
+        measure="/sd-izleme tablosu (Journal best_stage sd_near / sd_ready)",
+        md="S/D çıkış mumu gövdesi — 0,8–1 ATR yakın kaçan bölgeler (05.11.2026)",
+        progress_fn=_p_sd_near,
+    ),
+    WatchItem(
         key="sd_stop_width", status="open", started="03.11", onem=1, group="sd",
-        title="S/D stop genişliği — 1,5 ATR mı, 1,0 / 2,0 ATR mı, bölge stopu mu?",
-        trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR / 2,0 ATR / bölge stopu gölgesi R/işlemde ≥ +0,15 ileride VE "
+        title="S/D stop genişliği — 1,5 ATR mı, 1,0 / 2,0 ATR mı, bölge stopu mu, yakın tepe/dibin ötesi mi?",
+        trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR / 2,0 ATR / bölge stopu / yakın tepe-dip ötesi gölgesi R/işlemde ≥ +0,15 ileride VE "
                 "iki yarıda aynı yönde → ana stop o kurala; aksi halde 1,5 ATR kalır (ATR pariteye göre ölçeklenir, ayrı çarpan yok)",
         measure="/izleme tablosu (Journal shadow k=1 / 0.667 / 1.333) · python tmp/tmp_sd_check.py",
         md="S/D stop genişliği — 1,5 ATR taban mı, 1,0 / 2,0 ATR mı? (03.11.2026)",

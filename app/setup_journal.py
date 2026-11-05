@@ -78,6 +78,8 @@ STAGES: list[tuple[str, str]] = [
     ("sd_no_target", "S/D: no target (zone / swing)"),
     ("sd_far", "S/D: zone too far (> 4R from price)"),
     ("sd_low_rr", "S/D: RR < 2"),
+    # 05.11: cikis govdesi 0.8-1 ATR (kural disi, kapilari gecti) -- olcum, Signals'a girmez
+    ("sd_near", "S/D: near-miss zone (leg-out body 0.8–1 ATR)"),
     ("sd_ready", "S/D: zone ready (all gates)"),
 ]
 STAGE_LABELS = dict(STAGES)
@@ -221,6 +223,12 @@ def _shadow_init(rec: dict) -> dict | None:
     c1 = _shadow_c1(rec, e, sl, tp, risk)
     if c1 is not None:
         out[SHADOW_C1] = c1
+    # S/D (05.11, KAS 4H): stop, otesindeki alinmamis tepe/dibin otesinde olsa (sd_engine.STOP_LIQ_ATR) -- olcum
+    liq = (rec.get("features") or {}).get("sl_liq_stop") if rec.get("strategy") in SD_FILL_REQUIRED_STRATEGIES else None
+    if liq is not None and ((float(liq) < sl) if rec.get("direction") == "LONG" else (float(liq) > sl)):
+        d = abs(e - float(liq))
+        out["liq"] = {"k": round(d / risk, 4), "sl": float(liq), "rr": round(abs(tp - e) / d, 4),
+                      "o": "pending", "e": None, "at": None, "until": None}
     return out
 
 
@@ -1305,7 +1313,7 @@ def note(
                 changed = True
         if (
             key[0] in SD_TP_UPDATE_STRATEGIES and tp is not None and rec.get("levels_at") is not None
-            and stage == "sd_ready"      # yalniz kapilari gecen plan (RR >= 2, hedef fiyatin otesinde); low_rr hedefi TP yapmaz
+            and stage in ("sd_ready", "sd_near")   # yalniz kapilari gecen plan (RR >= 2, hedef fiyatin otesinde); low_rr hedefi TP yapmaz
             and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None
             and rec.get("tp") is not None and abs(float(tp) - float(rec["tp"])) > 1e-9 * max(1.0, abs(float(tp)))
             and entry is not None and sl is not None

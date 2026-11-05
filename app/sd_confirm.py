@@ -9,14 +9,16 @@ Akis (LONG; SHORT simetrik):
      dokunus mumunun kendisiydi, oncesinde mum olmadigi icin swing bulunamiyor, CHOCH hic tetiklenmiyordu; TP olan islemlerde
      "Waiting CHOCH" yaziyordu).
   1. Dokunus (satirin `entry_touched_at`) -> `wait_choch`. Dokunustan beri en dusuk dip = `lo`.
-  2. CHOCH seviyesi = `lo`'dan ONCEKI son swing tepe (3'lu fraktal: iki komsusundan yuksek; tampon dokunus oncesini de kapsar).
+  2. CHOCH seviyesi = `lo`'dan ONCEKI son swing tepe (her yanda CHOCH_SWING_K mum -- 05.11: 3'lu fraktal yukselis icindeki minik
+     duraklamayi CHOCH sayiyordu, KAS 4H; tampon dokunus oncesini de kapsar).
      Bir LTF kapanisi bu seviyenin ustunde -> CHOCH. Dip satirin SL'ini once gecerse: `failed` (zone failed before CHOCH).
   3. CHOCH aninda giris adaylari (hepsi `lo` ile CHOCH kapanisi arasinda), her biri ayri limit emri:
        fvg  -- dip -> CHOCH hamlesinin biraktigi yukselis FVG'si, ust kenar (fiyata en yakini)
        ifvg -- dususun biraktigi dusus FVG'si, CHOCH kapanisi ust kenarinin ustunde (invert), ust kenar (en yakini)
        cisd -- `lo`'ya inen son dusus blogunun ilk mumunun acilisi
        mss  -- kirilan swing tepe
-     Ortak SL = lo - SL_BUFFER_FRAC x (mss - lo); TP satirin TP'si.
+     Ortak SL = lo - SL_BUFFER_FRAC x (mss - lo); TP satirin TP'si. FVG / IFVG boslugu >= MIN_GAP_FRAC x son 20 LTF mumunun
+     ortalama boyu (05.11 -- CRT'deki MIN_IFVG_GAP_RANGE_FRAC; INJ / KAS'ta tek tick'lik bosluk aday oluyordu).
   4. Her aday: girise donmeden TP -> kacti; dolum -> TP / SL. Sayfadaki hikaye "ilk dolan" adaydan (ayni mumda sira fvg, ifvg,
      cisd, mss): hangi bolgeden retest geldi, sonra ne oldu. Hicbir aday dolmadan TP -> `missed` (no retest, price left).
      Ufukta: `no_touch` / `no_choch` / `open`.
@@ -31,6 +33,9 @@ STRATEGIES = ("sd", "sd1h")
 PRE_BARS = 40                    # dokunus oncesi tutulan LTF mumu
 MAX_BUFFER = 400
 SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (MSS seviyesi - dip)
+CHOCH_SWING_K = 3                # CHOCH swing'i: her yanda bu kadar mum (05.11; once 1)
+MIN_GAP_FRAC = 0.15              # FVG / IFVG en kucuk bosluk: son 20 LTF mumunun ort. boyu x bu (05.11)
+GAP_AVG_BARS = 20
 VARIANTS = ("fvg", "ifvg", "cisd", "mss")
 VARIANT_LABEL = {"fvg": "FVG", "ifvg": "IFVG", "cisd": "CISD", "mss": "MSS level"}
 FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open", "week_close")
@@ -68,14 +73,15 @@ def _state(rec: dict) -> dict:
     return st
 
 
-def _swing_before(bars: list, end: int, long: bool) -> float | None:
-    """`end`'den (haric) onceki son 3'lu fraktal tepe (LONG) / dip (SHORT)."""
-    for i in range(min(end, len(bars) - 1) - 1, 0, -1):
-        a, b, c = bars[i - 1], bars[i], bars[i + 1]
-        if long and b[1] > a[1] and b[1] > c[1]:
-            return b[1]
-        if not long and b[2] < a[2] and b[2] < c[2]:
-            return b[2]
+def _swing_before(bars: list, end: int, long: bool, k: int = CHOCH_SWING_K) -> float | None:
+    """`end`'den (haric) onceki son fraktal tepe (LONG) / dip (SHORT): her yanda `k` mum; sag kanat en fazla `end` mumuna uzanir."""
+    last = min(end, len(bars) - 1)
+    for i in range(last - k, k - 1, -1):
+        side = bars[i - k:i] + bars[i + 1:i + k + 1]
+        if long and all(bars[i][1] > x[1] for x in side):
+            return bars[i][1]
+        if not long and all(bars[i][2] < x[2] for x in side):
+            return bars[i][2]
     return None
 
 
@@ -94,19 +100,21 @@ def _candidates(bars: list, lo_i: int, ci: int, long: bool, lvl: float, close: f
         j -= 1
     if against(lo_i) or j < lo_i:
         out["cisd"] = float(opn(j))
+    rng = [b[1] - b[2] for b in bars[max(0, ci - GAP_AVG_BARS + 1):ci + 1]]
+    min_gap = MIN_GAP_FRAC * (sum(rng) / len(rng)) if rng else 0.0
     gaps = []                                     # dip -> CHOCH hamlesinin FVG'si
     for i in range(max(lo_i, 1), ci):
-        if long and bars[i + 1][2] > bars[i - 1][1]:
+        if long and bars[i + 1][2] - bars[i - 1][1] >= max(min_gap, 1e-12):
             gaps.append(bars[i + 1][2])
-        if not long and bars[i + 1][1] < bars[i - 1][2]:
+        if not long and bars[i - 1][2] - bars[i + 1][1] >= max(min_gap, 1e-12):
             gaps.append(bars[i + 1][1])
     if gaps:
         out["fvg"] = float(max(gaps) if long else min(gaps))
     inv = []                                      # dususun FVG'si, CHOCH kapanisiyla invert
     for i in range(1, lo_i):
-        if long and bars[i + 1][1] < bars[i - 1][2] and close > bars[i - 1][2]:
+        if long and bars[i - 1][2] - bars[i + 1][1] >= max(min_gap, 1e-12) and close > bars[i - 1][2]:
             inv.append(bars[i - 1][2])
-        if not long and bars[i + 1][2] > bars[i - 1][1] and close < bars[i - 1][1]:
+        if not long and bars[i + 1][2] - bars[i - 1][1] >= max(min_gap, 1e-12) and close < bars[i - 1][1]:
             inv.append(bars[i - 1][1])
     if inv:
         out["ifvg"] = float(max(inv) if long else min(inv))

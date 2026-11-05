@@ -39,6 +39,7 @@ GATES = [
     ("sd_no_target", "Hedef yok", "fiyatın ötesinde karşı bölge / swing yok (son kapanıştan ≥ 0,5 ATR)"),
     ("sd_far", "Fiyata uzak", f"giriş > {sde.MAX_DIST_R:g}R uzak — seviye yazılmaz"),
     ("sd_low_rr", "RR düşük", f"RR < {sde.MIN_RR:g} (hedef en yakın engel, tavan {sde.MAX_RR:g}R)"),
+    ("sd_near", "Yakın kaçan bölge", "çıkış gövdesi 0,8–1 ATR, kapıları geçti — ölçüm, Signals'a girmez (05.11)"),
     ("sd_ready", "Hazır (sinyal)", "bütün kapılar geçildi — seviye ve sonuç yalnız burada (04.11)"),
 ]
 
