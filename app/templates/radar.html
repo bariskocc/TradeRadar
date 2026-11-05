@@ -108,7 +108,7 @@
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="0 touches = fresh, 1 = tested">Fresh</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Leg-out distance from the proximal edge, in HTF ATR">Leg-out</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Base candles / FVG left by the leg-out">Base</th>
-                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="BOS = leg-out closed beyond the last swing before the base · Sweep = base took out the prior swing (liquidity). Measured only, no points">Key Level</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="MSS = reversal zone (DBR / RBD) whose leg-out closed beyond the last swing before the base · BOS = the same break in a continuation zone · Sweep = base took the main liquidity (wide swing low / high, equal lows-highs, previous day). Measured only, no points">Key Level</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">1D Bias</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="strength + base + fvg + fresh + 1D bias (max 9) — measurement only">Score</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Entry = proximal edge, SL = distal edge + 0.1 ATR">Entry / SL</th>
@@ -233,8 +233,9 @@ function sdRow(s, badge) {
         + (d.in_zone ? ' <span class="text-[10px] text-accent-blue" title="Price is inside the zone now">in zone</span>' : '');
     const legout = d.legout_atr != null ? `${d.legout_atr.toFixed(1)}×` : dash;
     const base = d.base_bars != null ? `${d.base_bars}${d.fvg ? ' <span class="text-[10px] text-accent-purple" title="Leg-out left an FVG">FVG</span>' : ''}` : dash;
-    const ctx = idle ? dash : ([d.bos ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="Leg-out broke structure">BOS</span>' : '',
-                               d.sweep ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="Base swept the prior swing">Sweep</span>' : ''].filter(Boolean).join(' ') || dash);
+    const ctx = idle ? dash : ([d.mss ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="Reversal zone: leg-out broke the last swing (market structure shift)">MSS</span>'
+                                     : (d.bos ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-gray-300 bg-dark-600" title="Continuation zone: leg-out broke the last swing">BOS</span>' : ''),
+                               d.sweep ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="Base took the main liquidity: ${d.sweep_kind || 'major'}">Sweep${d.sweep_kind && d.sweep_kind !== 'major' ? ' ' + d.sweep_kind.toUpperCase() : ''}</span>` : ''].filter(Boolean).join(' ') || dash);
     const score = s.score != null ? `${s.score}` : dash;
     const lv = s.entry ? `<span class="text-white">${s.entry}</span> / <span class="text-red-400">${s.sl}</span>` : dash;
     const target = s.tp ? `<span class="text-green-400">${s.tp}</span> <span class="text-[10px] text-gray-500" title="${d.target_kind === 'cap' ? 'Structural target beyond 4R — TP capped at 4R (structural RR ' + d.rr_struct + ')' : (d.target_kind === 'zone' ? 'Nearest opposite live zone' : 'Nearest swing beyond price')}">${d.target_kind || ''}</span>` : dash;

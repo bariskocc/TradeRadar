@@ -72,6 +72,9 @@ SWING_LOOKBACK = 30          # bos / sweep icin base'den onceki swing aramasi (m
 PD_RANGE_BARS = 72          # premium/discount araligi: base'e kadarki son 72 HTF mumu (demand alt yari, supply ust yari)
 EQ_TOL_ATR = 0.2            # esit dip/tepe toleransi (CRT key level ile ayni)
 BOS_EXTRA_BARS = 2           # bos: formed mumundan sonra bu kadar mum daha bakilir
+# 05.11 (kullanici, INJ 4H 02.11 demand): asil likidite = genis fraktal dip/tepe (her yanda MAJOR_SWING_K mum). INJ'de base 5'li
+# fraktal 7.001'i (ara dip) degil, haftanin dibi 6.868'i supurmustu. Yalniz ara swing alindiysa sweep sayilmaz, `sweep_minor` olcumu.
+MAJOR_SWING_K = 5
 
 # Skor kalemleri (olcum; esik yok -- hangisinin kazandirdigi Journal'dan okunur).
 SCORE_KEYS = ("strength", "base", "fvg", "fresh", "htf")
@@ -101,8 +104,9 @@ class SDZone:
     # (SMC "yapiyi kiran hamlenin kaynagi"), base/leg-in onceki swing'i supurdu mu (likidite temizligi).
     bos: bool = False
     sweep: bool = False
-    sweep_kind: Optional[str] = None   # swing / eq / pdl (pdh) -- base hangi likiditeyi aldi (ilk bulunan; 05.11)
-    mss: bool = False                  # gercek MSS: donus bolgesi (DBR/RBD) + sweep + kirilim (05.11)
+    sweep_kind: Optional[str] = None   # major / eq / pdl (pdh) -- base hangi likiditeyi aldi (ilk bulunan; 05.11)
+    sweep_minor: bool = False          # yalniz ara swing (5'li fraktal) alindi -- sweep sayilmaz, olcum (05.11)
+    mss: bool = False                  # MSS: donus bolgesinin (DBR/RBD) kirilimi; devam bolgesinde ayni kirilim BOS (05.11)
     pd_pos: Optional[float] = None     # proximal'in PD_RANGE_BARS araligindaki yeri: 0 = dip, 1 = tepe (05.11)
     touches: int = 0
     last_touch: Optional[pd.Timestamp] = None
@@ -233,18 +237,27 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             if not up and h[k + 1] < l[k - 1]:
                 fvg = True
                 break
-        # bos / sweep: base'den onceki son swing (5'li fraktal, SWING_LOOKBACK icinde)
-        sw_hi = _last_swing_before(h, bs, "high")
-        sw_lo = _last_swing_before(l, bs, "low")
+        # bos / sweep: base'den onceki son swing (SWING_LOOKBACK icinde). Swing'in kendisi base'den once, sag kanadi base
+        # mumlarina tasabilir (05.11, INJ 4H: 02.11 08:00 UTC tepesi 7.307'nin ikinci sag mumu base'in ilk mumuydu, kod 7.55'e
+        # kadar geri gidip BOS'u kaciriyordu; base mumlari leg-out'tan once kapanmis).
         bos_end = min(n, formed + BOS_EXTRA_BARS + 1)
         if up:
-            sweep = sw_lo is not None and base_lo < sw_lo
+            sw_hi = _last_swing_before(h, bs, "high", wing_end=j - 1)
             bos = sw_hi is not None and bool((c[j:bos_end] > sw_hi).any())
         else:
-            sweep = sw_hi is not None and base_hi > sw_hi
+            sw_lo = _last_swing_before(l, bs, "low", wing_end=j - 1)
             bos = sw_lo is not None and bool((c[j:bos_end] < sw_lo).any())
-        # Genis likidite (05.11): son swing'e ek olarak esit dipler / tepeler ve onceki gunun ucu (UTC gunu).
-        sweep_kind = "swing" if sweep else None
+        # sweep: asil swing (genis fraktal) alindi mi; yalniz ara swing alindiysa `sweep_minor`
+        side_vals, side_kind = (l, "low") if up else (h, "high")
+        mj = _last_swing_before(side_vals, bs, side_kind, k=MAJOR_SWING_K, wing_end=j - 1)
+        mn = _last_swing_before(side_vals, bs, side_kind, wing_end=j - 1)
+
+        def _took(v):
+            return v is not None and ((base_lo < v) if up else (base_hi > v))
+        sweep = _took(mj)
+        sweep_minor = not sweep and _took(mn)
+        # Genis likidite (05.11): asil swing'e ek olarak esit dipler / tepeler ve onceki gunun ucu (UTC gunu).
+        sweep_kind = "major" if sweep else None
         if not sweep:
             eq = _equal_level_before(l if up else h, bs, "low" if up else "high", EQ_TOL_ATR * a)
             if eq is not None and ((base_lo < eq) if up else (base_hi > eq)):
@@ -253,8 +266,11 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             pdx = _prev_day_extreme(idx, l if up else h, bs, "low" if up else "high")
             if pdx is not None and ((base_lo < pdx) if up else (base_hi > pdx)):
                 sweep, sweep_kind = True, ("pdl" if up else "pdh")
+        if sweep:
+            sweep_minor = False
+        # Kirilim donus bolgesinde MSS, devam bolgesinde BOS (05.11, kullanici; SMC kullanimi). Sweep ayri etiket, MSS'e girmez.
         reversal = zone_type[0] != "?" and zone_type[0] != zone_type[2]
-        mss = bool(reversal and sweep and bos)
+        mss = bool(reversal and bos)
         w0 = max(0, bs - PD_RANGE_BARS + 1)
         rng_hi, rng_lo = float(h[w0:bs + 1].max()), float(l[w0:bs + 1].min())
         pd_pos = round((proximal - rng_lo) / (rng_hi - rng_lo), 3) if rng_hi > rng_lo else None
@@ -267,7 +283,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS) -> list[SDZone
             legout_atr=round(float(legout / a), 3), legin_atr=round(float(legin), 3),
             base_bars=int(j - bs), base_max_atr=round(float((h[bs:j] - l[bs:j]).max() / a), 3),
             fvg=bool(fvg), formed_iloc=int(formed), bos=bool(bos), sweep=bool(sweep),
-            sweep_kind=sweep_kind, mss=mss, pd_pos=pd_pos,
+            sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos,
         )
         _walk_after(z, h, l, idx)
         zones.append(z)
@@ -302,9 +318,11 @@ def _walk_after(z: SDZone, h: np.ndarray, l: np.ndarray, idx) -> None:
 
 
 def _last_swing_before(vals: np.ndarray, end: int, kind: str, k: int = TARGET_SWING_K,
-                       lookback: int = SWING_LOOKBACK) -> Optional[float]:
-    """`end`'den (haric) onceki son fraktal tepe/dip; sag kanadi da `end`'den once kapanmis olmali."""
-    for i in range(end - 1 - k, max(k, end - lookback) - 1, -1):
+                       lookback: int = SWING_LOOKBACK, wing_end: Optional[int] = None) -> Optional[float]:
+    """`end`'den (haric) onceki son fraktal tepe/dip. Sag kanat en fazla `wing_end` mumuna (dahil) uzanir; verilmezse
+    `end`'den once kapanmis olmali (eski davranis)."""
+    last = (end - 1) if wing_end is None else min(int(wing_end), len(vals) - 1)
+    for i in range(min(end - 1, last - k), max(k, end - lookback) - 1, -1):
         left, right = vals[i - k:i], vals[i + 1:i + k + 1]
         if kind == "high" and vals[i] > left.max() and vals[i] > right.max():
             return float(vals[i])
@@ -435,6 +453,7 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         "bos": 1 if z.bos else 0,
         "sweep": 1 if z.sweep else 0,
         "sweep_kind": z.sweep_kind,
+        "sweep_minor": 1 if z.sweep_minor else 0,
         "mss": 1 if z.mss else 0,
         "pd_pos": z.pd_pos,
         # demand alt yarida (discount), supply ust yarida (premium)

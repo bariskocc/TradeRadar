@@ -147,7 +147,7 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
                 sd={   # JSON'a gidecek: numpy tipleri duz Python'a
                     "zone_type": z.zone_type, "touches": int(z.touches), "fresh": bool(z.fresh),
                     "in_zone": bool(z.in_zone), "legout_atr": float(z.legout_atr), "base_bars": int(z.base_bars),
-                    "fvg": bool(z.fvg), "bos": bool(z.bos), "sweep": bool(z.sweep),
+                    "fvg": bool(z.fvg), "bos": bool(z.bos), "mss": bool(z.mss), "sweep": bool(z.sweep), "sweep_kind": z.sweep_kind,
                     "dist_atr": feats.get("dist_atr"), "target_kind": plan.target_kind, "rr_struct": plan.rr_struct,
                     "zone_atr": round(float(z.height_atr), 2), "n_live": n_live, "n_zones": len(zones),
                 },

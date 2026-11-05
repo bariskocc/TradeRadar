@@ -1809,7 +1809,7 @@ async def _p_sd_score_items(db: AsyncSession) -> Progress:
         win = r["outcome"] == "win"
         items = [("strength", p.get("strength")), ("base", p.get("base")), ("fvg", p.get("fvg")), ("fresh", p.get("fresh")),
                  ("htf (1D bias)", p.get("htf")), ("bos", f.get("bos")), ("sweep", f.get("sweep")),
-                 ("mss (dönüş+sweep+kırılım)", f.get("mss")), ("PD uygun", f.get("pd_ok")),
+                 ("mss (dönüş kırılımı)", f.get("mss")), ("ara swing sweep'i", f.get("sweep_minor")), ("PD uygun", f.get("pd_ok")),
                  ("skor", int(p.get("score")) if p.get("score") is not None else None)]
         for name, val in items:
             if val is None:

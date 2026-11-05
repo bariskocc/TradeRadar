@@ -26,9 +26,10 @@ ITEMS = [
     ("htf", "1D bias", "işlem yönünde +2 · ters −2 · NEUTRAL 0 (hard kapı yok, 04.11)", "−2 / 0 / +2"),
 ]
 CANDIDATES = [
-    ("sweep", "Likidite sweep'i (SSL / BSL)", "base: son swing, eşit dipler/tepeler ya da önceki gün ucu alındı (05.11'den beri EQ + PDL dahil)"),
-    ("mss", "Gerçek MSS", "dönüş bölgesi (DBR / RBD) + sweep + leg-out yapıyı kırdı (05.11)"),
-    ("bos", "BOS (kaba kırılım)", "leg-out base öncesi son swing'i kırdı — devam bölgesinde de olur"),
+    ("sweep", "Likidite sweep'i (SSL / BSL)", "base asıl likiditeyi aldı: geniş swing (her yanda 5 mum), eşit dipler/tepeler ya da önceki gün ucu (05.11; yalnız ara swing sayılmaz)"),
+    ("sweep_minor", "Yalnız ara swing sweep'i", "base yalnız küçük swing'i (her yanda 2 mum) aldı, asıl likidite alınmadı (05.11)"),
+    ("mss", "MSS (dönüş kırılımı)", "dönüş bölgesi (DBR / RBD) ve leg-out base öncesi son swing'i kırdı (05.11)"),
+    ("bos", "Kırılım (BOS + MSS)", "leg-out base öncesi son swing'i kırdı — bölge tipinden bağımsız"),
     ("pd_ok", "Premium / Discount uygun", f"demand son {sde.PD_RANGE_BARS} mumluk aralığın alt yarısında, supply üst yarısında (05.11)"),
     ("strong", "Çok sert çıkış (≥ 3 ATR)", "ilk okumada ters (05.11) — 'strength' +2'si buna veriliyor"),
 ]
