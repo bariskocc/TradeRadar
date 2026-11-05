@@ -1695,7 +1695,10 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
     """03.11 (kullanici): Supply/Demand 4H olcumu. Journal `sd` satirlari (sinyal yok, duz TP/SL, seviye = proximal /
     distal + tampon / hedef). Cozulmus = DOLUMDAN sonra TP mi SL mi (win / loss; dolumsuz TP sayilmaz -- 03.11 kullanici). Tablo: tazelik
     (seviye andaki `touches`) ve bolge tipi (devam RBR/DBD, donus DBR/RBD, leg-in zayif ?) x TP/SL; kapi gecen vs gecmeyen.
-    Tetik 100 cozulmus kapi gecmis (sd_ready) bolge."""
+    Tetik 100 cozulmus kapi gecmis (sd_ready) bolge. 05.11 (kullanici): 4H / 1H'te ana giris LTF onay + retest -> sonuc ve RR onay
+    kolundan (entries.sdc; CHOCH'tan once stop / retest yok = islem yok, sayilmaz); 15m'de bolge limiti."""
+    from app import sd_confirm
+    confirm_main = strategy in sd_confirm.STRATEGIES
     t = _journal_table()
     rows = (await db.execute(select(t).where(t.c.strategy == strategy, t.c.entry.is_not(None)))).mappings().all()
     groups: dict[str, list[int]] = {}
@@ -1706,7 +1709,13 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
 
     ready = 0
     for r in rows:
-        o = r["outcome"]
+        o, rr = r["outcome"], r["rr"]
+        if confirm_main:
+            try:
+                sdc = (json.loads(r["entries"] or "{}")).get(sd_confirm.SDC_KEY) or {}
+            except Exception:
+                sdc = {}
+            o, rr = sdc.get("o"), sdc.get("rr")
         if o not in ("win", "loss"):
             continue
         tp = o == "win"
@@ -1723,14 +1732,15 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
         _add("Kapıyı geçen (sd_ready)" if gate else "Kapıda elenen", tp)
         _add("Taze" if fresh else "Test edilmiş", tp)
         _add(fam, tp)
-        _add(f"RR {'≥ 3' if (r['rr'] or 0) >= 3 else '2–3' if (r['rr'] or 0) >= 2 else '< 2'}", tp)
+        _add(f"RR {'≥ 3' if (rr or 0) >= 3 else '2–3' if (rr or 0) >= 2 else '< 2'}", tp)
     table = [["Dilim", "TP", "SL", "WR"]]
     for name, (w, l) in groups.items():
         n = w + l
         table.append([name, str(w), str(l), f"%{100 * w / n:.0f}" if n else "-"])
     n_all = sum(w + l for w, l in groups.values()) // 4 if groups else 0
     return Progress(bars=[Bar("S/D kapıyı geçen bölge — çözülmüş", ready, 100)], table=table,
-                    note=f"{n_all} çözülmüş bölge · {len(rows)} seviyeli satır · düz TP/SL, sinyal yok")
+                    note=f"{n_all} çözülmüş bölge · {len(rows)} seviyeli satır · düz TP/SL, sinyal yok"
+                         + (" · giriş = LTF onay + retest (işlemsiz bölge sayılmaz)" if confirm_main else ""))
 
 
 async def _p_sd_near(db: AsyncSession) -> Progress:
@@ -2925,7 +2935,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd1h_outcomes,
     ),
     WatchItem(
-        key="sd_entry_model", status="open", started="03.11", onem=1, group="sd",
+        key="sd_entry_model", status="done", started="03.11", onem=1, group="sd",
+        result="(05.11) KULLANICI KARARI (tetik dolmadan): 4H ve 1H'te ana giriş LTF onay + retest — limit kayıplarının çoğu CHOCH'tan "
+               "önce stop (4H limit 5 TP / 20 SL −7,8R, onay 5 / 3 +11,6R; 1H limit −9,0R, onay −1,0R); örneklem ~5–6 bağımsız olay. "
+               "Bölge limiti ölçüm kolu olarak sürüyor (Signals 'Zone limit').",
         title="S/D giriş: limit (proximal / %50 / distal) mi, 15m CHOCH + retest mi?",
         trigger="iki kolu da çözülmüş 60 bölge: onay kolu R/işlemde ≥ +0,15 ileride VE kaçırdığı (retest gelmeyen) bölgeler "
                 "hesaba katılınca toplam R de ileride VE iki yarıda aynı yön → canlıda onaylı giriş; aksi halde limit",

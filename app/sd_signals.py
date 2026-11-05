@@ -3,7 +3,12 @@
 Olcum modunda gercek sinyal yok; "sinyal" = Setup Journal'da butun kapilari gecen S/D bolgesi (`best_stage == "sd_ready"`,
 strateji `sd` / `sd1h`). Sayfa Journal satirini Open Signals diliyle gosterir: Waiting (giris dolmadi) / Filled (dolum var,
 sonuc yok) / Closed (TP, SL, dolmadan TP, dokunus yok, ufuk doldu). Anlik fiyat ve canli R WS store'undan (REST yok).
-Sonuc kurali CRT'dekiyle ayni: TP once mi SL once mi -- `win` + `tp_before_entry` = TP, `loss` = SL; duz TP/SL, kismi kar/BE yok.
+Sonuc: dolumdan sonra TP mi SL mi (03.11, S/D dolum ister); duz TP/SL, kismi kar/BE yok.
+
+05.11 (kullanici): 4H ve 1H'te ANA GIRIS = LTF onay + retest (`sd_confirm`, Journal entries["sdc"]). Bolgeye dokunus emir degil
+uyaridir; islem CHOCH'tan sonra ilk dolan adaydan (FVG / IFVG / CISD / MSS) acilir, SL = geri cekilmenin ucu + tampon. Ilk Journal
+okumasi: 4H limit 5 TP / 20 SL (-7.8R), onay 5 TP / 3 SL (+11.6R); kayiplarin 27/31'i CHOCH'tan once stop. Bolge limiti (eski ana
+giris) ayni satirda olcum olarak kalir ("Zone limit" sutunu + ozet ikinci satiri). 15m'de onay kolu yok -> ana giris limit.
 """
 from __future__ import annotations
 
@@ -36,11 +41,13 @@ TF_FILTERS = [("all", "All"), ("sd", "S/D 4H"), ("sd1h", "S/D 1H"), ("sd15m", "S
 MARKET_FILTERS = [("all", "All"), ("crypto", "Crypto"), ("fx", "FX")]
 DIRECTION_FILTERS = [("all", "All"), ("long", "Long"), ("short", "Short")]
 STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), ("closed", "Closed")]
+# 05.11 (kullanici): ana giris LTF onay + retest olan stratejiler (sd_confirm kolu olanlar)
+MAIN_CONFIRM = tuple(sd_confirm.STRATEGIES)
 # 05.11 (kullanici): sonuc ve LTF onay sonucu filtreleri -- filtre -> eslesen outcome kumesi
-RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("week_close", "Week close"), ("expired", "Expired"),
-                  ("other", "Same bar / missed")]
-_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "week_close": {"week_close"}, "expired": {"no_touch", "open"},
-               "other": {"ambiguous", "tp_before_entry"}}
+RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / no retest)"),
+                  ("week_close", "Week close"), ("expired", "Expired"), ("other", "Same bar / missed")]
+_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed"}, "week_close": {"week_close"},
+               "expired": {"no_touch", "open", "no_choch"}, "other": {"ambiguous", "tp_before_entry", "unmeasured"}}
 CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_retest", "No retest"),
                    ("waiting", "Waiting / in trade"), ("none", "No touch yet")]
 _CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
@@ -59,7 +66,16 @@ _OUTCOME = {
     "open":            ("closed",  "Expired",         "gray",   "Open at horizon", "gray"),
     # 05.11 (kullanici): kripto disi dolmus islem Cuma 17:00 NY'de haftanin son fiyatiyla kapanir
     "week_close":      ("closed",  "Closed",          "gray",   "Week close",      "gray"),
+    # 05.11: LTF onay ana giris (4H / 1H) -- bolgeye dokunus uyari, islem CHOCH + retest'te
+    "wait_choch":      ("waiting", "Waiting CHOCH",   "blue",   "—",               "gray"),
+    "wait_retest":     ("waiting", "Waiting retest",  "blue",   "—",               "gray"),
+    "failed":          ("closed",  "No trade",        "gray",   "Zone failed",     "gray"),
+    "missed":          ("closed",  "No trade",        "gray",   "No retest",       "yellow"),
+    "no_choch":        ("closed",  "Expired",         "gray",   "No CHOCH",        "gray"),
+    "unmeasured":      ("closed",  "Closed",          "gray",   "Not measured",    "gray"),
 }
+_LIMIT_SHORT = {"pending": "Waiting", "filled": "Filled", "win": "TP", "loss": "SL", "tp_before_entry": "TP before entry",
+                "ambiguous": "Same bar", "no_touch": "No entry", "open": "Open", "week_close": "Week close"}
 
 
 def week_start_tsi(now: datetime | None = None) -> str:
@@ -119,53 +135,107 @@ def _feats(row) -> dict:
         return {}
 
 
-def _row_view(r: SetupJournal, price: float | None) -> dict:
+def _ts(v):
+    """sdc zamanlari: datetime ya da ISO metin (adaylar) -> naive UTC datetime."""
+    if v is None or isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v))
+    except ValueError:
+        return None
+
+
+def _limit_final_r(r: SetupJournal, ents: dict) -> float | None:
+    """Bolge limiti (proximal) kolunun duz R'si -- 05.11'e kadar ana giris, simdi 4H / 1H'te olcum."""
+    oc = r.outcome or "pending"
+    if oc == "win":
+        return r.rr
+    if oc == "loss":
+        return -1.0
+    if oc in ("ambiguous", "no_touch", "open"):
+        return 0.0
+    if oc == "week_close":
+        return sd_confirm.week_close_r(r.entry, r.sl, (ents.get("_wc") or {}).get("px"), r.direction)
+    return None
+
+
+def _confirm_trade(r: SetupJournal, sdc: dict) -> dict:
+    """LTF onay kolundan ana islem: durum anahtari + seviyeler. Bolge dokunulmadan / CHOCH beklerken seviyeler bolgeninkidir."""
+    long = r.direction == "LONG"
+    o = sdc.get("o")
+    row_oc = r.outcome or "pending"
+    zone = {"entry": r.entry, "sl": r.sl, "rr": r.rr, "kind": "zone"}
+    if o in (None, "pre"):
+        oc = row_oc if row_oc in ("pending", "no_touch") else "unmeasured"   # dolmus / kapanmis ama onay izi yok (05.11 oncesi)
+        return {"oc": oc, **zone}
+    if o in ("wait_choch", "failed", "no_choch"):
+        return {"oc": o, **zone}
+    sl = sdc.get("sl")
+    if sdc.get("e") is not None:
+        return {"oc": o, "entry": float(sdc["e"]), "sl": sl, "rr": sdc.get("rr"), "kind": "trade"}
+    pend = [v for v in (sdc.get("vars") or {}).values() if v.get("o") == "pending"] or list((sdc.get("vars") or {}).values())
+    if pend:                                     # CHOCH sonrasi: fiyata en yakin aday ilk dolacak olan
+        v = max(pend, key=lambda x: x["e"]) if long else min(pend, key=lambda x: x["e"])
+        return {"oc": o, "entry": float(v["e"]), "sl": sl, "rr": v.get("rr"), "kind": "trade"}
+    return {"oc": o, **zone}
+
+
+def _row_view(r: SetupJournal, price_fn) -> dict:
     f = _feats(r)
     long = r.direction == "LONG"
-    entry, sl, tp, rr = r.entry, r.sl, r.tp, r.rr
+    try:
+        ents = (json.loads(r.entries) if r.entries else {}) or {}
+    except Exception:
+        ents = {}
+    sdc = ents.get(sd_confirm.SDC_KEY) or {}
+    confirm_main = r.strategy in MAIN_CONFIRM
+    tp = r.tp
+    if confirm_main:
+        ct = _confirm_trade(r, sdc)
+        oc, entry, sl, rr, lv_kind = ct["oc"], ct["entry"], ct["sl"], ct["rr"], ct["kind"]
+        filled_ts = _ts(sdc.get("t")) if lv_kind == "trade" else None
+        closed_ts = _ts(sdc.get("at"))
+    else:
+        oc, entry, sl, rr, lv_kind = r.outcome or "pending", r.entry, r.sl, r.rr, "trade"
+        filled_ts, closed_ts = r.entry_touched_at, r.outcome_at
     risk = abs(entry - sl) if entry is not None and sl is not None else 0.0
-    oc = r.outcome or "pending"
     tab, status_label, status_color, result_label, result_color = _OUTCOME.get(oc, _OUTCOME["pending"])
+    if confirm_main and oc == "pending":
+        status_label = "Waiting zone"            # bolgeye dokunus = uyari, emir degil
+    price = price_fn(r.symbol) if tab in ("waiting", "filled") else None
     live_r = dist_r = None
     if price is not None and entry is not None and risk > 0:
         move = (price - entry) if long else (entry - price)
         if oc == "filled":
             live_r = round(move / risk, 2)
-        elif oc == "pending":
+        elif tab == "waiting":
             dist_r = round(move / risk, 2)           # pozitif = fiyat girise henuz gelmedi (LONG'da ustunde, SHORT'ta altinda)
-    final_r = None
-    if oc == "win":
-        final_r = rr
-    elif oc == "loss":
-        final_r = -1.0
-    elif oc in ("ambiguous", "no_touch", "open"):
-        final_r = 0.0
-    elif oc == "week_close":
-        try:
-            wc = (json.loads(r.entries) if r.entries else {}).get("_wc") or {}
-        except Exception:
-            wc = {}
-        final_r = sd_confirm.week_close_r(entry, sl, wc.get("px"), r.direction)
+    if confirm_main and sdc.get("o") not in (None, "pre"):
+        final_r = sd_confirm.final_r(sdc)
+        if oc in ("wait_choch", "wait_retest", "filled"):
+            final_r = None
+    else:
+        final_r = _limit_final_r(r, ents) if tab == "closed" else None
+        if oc == "unmeasured":
+            final_r = None
     touches = f.get("touches")
     zt = r.model or f.get("zone_type") or "?"
-    try:
-        sdc = (json.loads(r.entries) if r.entries else {}).get(sd_confirm.SDC_KEY) or {}
-    except Exception:
-        sdc = {}
     c_o = sdc.get("o")
-    c_live = None
-    if c_o == "filled" and price is not None and sdc.get("e") and sdc.get("sl"):
-        c_risk = abs(float(sdc["e"]) - float(sdc["sl"]))
-        if c_risk > 0:
-            c_live = round(((price - float(sdc["e"])) if long else (float(sdc["e"]) - price)) / c_risk, 2)
+    # Bolge limiti olcum kolu (4H / 1H); 15m'de ana giris zaten limit
+    lim = None
+    if confirm_main:
+        l_oc = r.outcome or "pending"
+        lim = {"label": _LIMIT_SHORT.get(l_oc, l_oc), "o": l_oc, "r": _limit_final_r(r, ents)}
     return {
         "symbol": r.symbol, "market": r.market_type, "tf": r.strategy, "tf_label": TF_LABELS.get(r.strategy, r.strategy),
         "direction": r.direction, "zone_type": zt, "bias": r.htf_bias,
         "zone_label": ("Demand" if long else "Supply") + " · " + ZONE_NAMES.get(zt, zt),
         "entry_s": _fmt_p(entry), "sl_s": _fmt_p(sl), "tp_s": _fmt_p(tp),
-        "confirm_o": c_o if c_o != "pre" else None, "confirm_rr": sdc.get("rr"), "confirm_live": c_live,
+        "confirm_o": c_o if c_o != "pre" else None, "confirm_rr": sdc.get("rr"), "confirm_main": confirm_main,
         **{f"confirm_{k}": v for k, v in sd_confirm.describe(sdc, LTF_LABEL.get(r.strategy, "15m")).items()},
-        "setup_at": _fmt_tsi(r.purge_time), "retest_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
+        "levels_kind": lv_kind, "limit": lim, "zone_entry_s": _fmt_p(r.entry),
+        "touched_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
+        "setup_at": _fmt_tsi(r.purge_time), "retest_at": _fmt_tsi(filled_ts) if filled_ts else None,
         "_sort": (-(int(r.score) if r.score is not None else -1), -(r.best_stage_at.timestamp() if r.best_stage_at else 0)),
         "fresh": None if touches is None else int(touches) == 0,
         "bos": bool(f.get("bos")), "sweep": bool(f.get("sweep")), "fvg": bool(f.get("fvg")),
@@ -176,10 +246,10 @@ def _row_view(r: SetupJournal, price: float | None) -> dict:
         "tab": tab, "status_label": status_label, "status_color": status_color,
         "result_label": result_label, "result_color": result_color, "outcome": oc,
         "ready_at": _fmt_tsi(r.best_stage_at), "formed": _fmt_tsi(r.purge_time),
-        "filled_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
-        "closed_at": _fmt_tsi(r.outcome_at) if r.outcome_at and tab == "closed" else None,
-        "hours": round((r.outcome_at - (r.entry_touched_at or r.levels_at)).total_seconds() / 3600, 1)
-        if r.outcome_at and (r.entry_touched_at or r.levels_at) and tab == "closed" else None,
+        "filled_at": _fmt_tsi(filled_ts) if filled_ts else None,
+        "closed_at": _fmt_tsi(closed_ts) if closed_ts and tab == "closed" else None,
+        "hours": round((closed_ts - filled_ts).total_seconds() / 3600, 1)
+        if closed_ts and filled_ts and tab == "closed" and oc in ("win", "loss", "ambiguous", "week_close") else None,
     }
 
 
@@ -217,10 +287,14 @@ async def build_sd_signals(
         rows, error = [], True
     views = []
     cache: dict[str, float | None] = {}
+
+    def _price(sym: str) -> float | None:
+        if sym not in cache:
+            cache[sym] = price_fn(sym)
+        return cache[sym]
+
     for r in rows:
-        if r.symbol not in cache:
-            cache[r.symbol] = price_fn(r.symbol) if (r.outcome or "pending") in ("pending", "filled") else None
-        views.append(_row_view(r, cache[r.symbol]))
+        views.append(_row_view(r, _price))
     views.sort(key=lambda v: v["_sort"])      # 03.11 (kullanici): skor azalan, esitte en yeni (CRT sayfalari gibi)
     # Sonuc / LTF onay filtresi sekme sayaclarina ve ozete de uyar (Signals sayfasi sozlesmesi)
     if result != "all":
@@ -232,32 +306,34 @@ async def build_sd_signals(
     for v in views:
         counts["all"] += 1
         counts[v["tab"]] += 1
-        s = summary.setdefault(v["tf"], {"label": v["tf_label"], "n": 0, "tp": 0, "sl": 0, "r": 0.0, "open": 0,
-                                         "c_tp": 0, "c_sl": 0, "c_r": 0.0, "c_missed": 0})
+        s = summary.setdefault(v["tf"], {"label": v["tf_label"], "n": 0, "tp": 0, "sl": 0, "r": 0.0, "open": 0, "no_trade": 0,
+                                         "confirm_main": v["confirm_main"], "l_tp": 0, "l_sl": 0, "l_r": 0.0})
         s["n"] += 1
-        if v["confirm_o"] == "win":
-            s["c_tp"] += 1
-            s["c_r"] += float(v["confirm_rr"] or 0)
-        elif v["confirm_o"] == "loss":
-            s["c_sl"] += 1
-            s["c_r"] -= 1.0
-        elif v["confirm_o"] in ("missed", "failed"):
-            s["c_missed"] += 1
         if v["outcome"] == "win":
             s["tp"] += 1
-            s["r"] += float(v["rr"] or 0)
+            s["r"] += float(v["final_r"] or 0)
         elif v["outcome"] == "loss":
             s["sl"] += 1
             s["r"] -= 1.0
         elif v["outcome"] == "week_close":
             s["r"] += float(v["final_r"] or 0)
+        elif v["outcome"] in ("failed", "missed"):
+            s["no_trade"] += 1
         elif v["tab"] != "closed":
             s["open"] += 1
+        lim = v["limit"]
+        if lim:                                   # bolge limiti olcum kolu
+            if lim["o"] == "win":
+                s["l_tp"] += 1
+            elif lim["o"] == "loss":
+                s["l_sl"] += 1
+            if lim["o"] in ("win", "loss", "week_close"):
+                s["l_r"] += float(lim["r"] or 0)
     for s in summary.values():
         n = s["tp"] + s["sl"]
         s["wr"] = round(100 * s["tp"] / n) if n else None
         s["r"] = round(s["r"], 2)
-        s["c_r"] = round(s["c_r"], 2)
+        s["l_r"] = round(s["l_r"], 2)
     if status != "all":
         views = [v for v in views if v["tab"] == status]
     pages = max(1, (len(views) + PAGE_SIZE - 1) // PAGE_SIZE)
