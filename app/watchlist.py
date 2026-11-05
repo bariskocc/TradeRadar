@@ -1827,6 +1827,100 @@ async def _p_sd_entry_model(db: AsyncSession) -> Progress:
                     note="aynı bölge, SL/TP aynı: limit proximal (bugünkü) / %50 / distal; onay = 15m CHOCH sonrası retest, dar stop (kaçan = dolmadan gitti)")
 
 
+def _sd_htf_gate_fn(strategy: str, feat: str, label: str):
+    """06.11 (kullanici: 1H SSL sweep + displacement/MSS senaryosu, "ilk 2 madde cok onemli"): HTF kriteri (`features.sweep` /
+    `features.mss`) hard filtre mi? Sonuc = ANA GIRIS (LTF onay kolu, entries.sdc) TP / SL; sd_ready satirlari (Signals kumesi).
+    Tablo: kriter var / yok x TP / SL / WR + iki zaman yarisi; yan bilgi LTF sweep'li / sweep'siz. Tetik: taraf basina 30 cozulmus."""
+    async def fn(db: AsyncSession) -> Progress:
+        from app import sd_confirm
+        t = _journal_table()
+        rows = (await db.execute(select(t.c.features_at_levels, t.c.features, t.c.entries, t.c.best_stage_at).where(
+            t.c.strategy == strategy, t.c.best_stage == "sd_ready"))).all()
+        res = []
+        for fal, fe, ents, at in rows:
+            try:
+                f = json.loads(fal or fe or "{}")
+                st = (json.loads(ents or "{}")).get(sd_confirm.SDC_KEY) or {}
+            except Exception:
+                continue
+            if st.get("o") in ("win", "loss") and f.get(feat) is not None:
+                res.append((int(bool(f.get(feat))), st["o"] == "win", int(bool(st.get("sw"))), at))
+        res.sort(key=lambda x: x[3] or datetime.min)
+        half = len(res) // 2
+        table = [["Grup", "TP", "SL", "WR", "1. yarı WR", "2. yarı WR"]]
+
+        def wr(xs):
+            return f"%{100 * sum(1 for x in xs if x[1]) / len(xs):.0f}" if xs else "-"
+
+        for val, name in ((1, f"{label} var"), (0, f"{label} yok")):
+            g = [x for x in res if x[0] == val]
+            table.append([name, str(sum(1 for x in g if x[1])), str(sum(1 for x in g if not x[1])), wr(g),
+                          wr([x for x in res[:half] if x[0] == val]), wr([x for x in res[half:] if x[0] == val])])
+        for val, name in ((1, "yan bilgi: LTF sweep var"), (0, "yan bilgi: LTF sweep yok")):
+            g = [x for x in res if x[2] == val]
+            table.append([name, str(sum(1 for x in g if x[1])), str(sum(1 for x in g if not x[1])), wr(g), "", ""])
+        n1, n0 = sum(1 for x in res if x[0] == 1), sum(1 for x in res if x[0] == 0)
+        return Progress(bars=[Bar(f"{label} var — çözülmüş", n1, 30), Bar(f"{label} yok — çözülmüş", n0, 30)], table=table,
+                        note="ana giriş (LTF onay + retest) sonucu; 'No trade' satırları işlem olmadığı için sayılmaz")
+    return fn
+
+
+def _sd_disp_fvg_fn(strategy: str):
+    """06.11 (kullanici senaryosu: "LTF'de MSS + displacement, sonra FVG retest"): bugunku LTF girisi (CHOCH'ta dort limit, ilk dolan)
+    mi, "displacement >= 1 + yalniz FVG retest" mi? Ayni CHOCH'lu satirlarda iki kol: A = entries.sdc sonucu, B = disp >= DISP_STRONG
+    ve FVG adayi varsa vars["fvg"] sonucu, yoksa islem yok (0R). Yan bilgi: en derin retest (0 = CHOCH kapanisi, 1 = dip)."""
+    async def fn(db: AsyncSession) -> Progress:
+        from app import sd_confirm as sc
+        t = _journal_table()
+        rows = (await db.execute(select(t.c.entries, t.c.direction, t.c.best_stage_at).where(
+            t.c.strategy == strategy, t.c.best_stage == "sd_ready"))).all()
+        done = ("win", "loss", "missed", "no_touch", "open", "ambiguous", "week_close")
+        pairs, b_trades, deep = [], 0, {"win": [], "loss": []}
+        disp_split = {1: [0, 0], 0: [0, 0]}
+        for ents, d, at in rows:
+            try:
+                st = (json.loads(ents or "{}")).get(sc.SDC_KEY) or {}
+            except Exception:
+                continue
+            if not st.get("ct") or st.get("o") not in done:
+                continue
+            a = sc.final_r(st) or 0.0
+            strong = st.get("disp") is not None and float(st["disp"]) >= sc.DISP_STRONG
+            fv = (st.get("vars") or {}).get("fvg")
+            if strong and fv:
+                if fv["o"] in ("pending", "filled"):
+                    continue                      # B kolu cozulmedi
+                b = float(fv.get("rr") or 0) if fv["o"] == "win" else (-1.0 if fv["o"] == "loss" else 0.0)
+                b_trades += fv["o"] in ("win", "loss")
+            else:
+                b = 0.0
+            pairs.append((a, b, at))
+            if st["o"] in ("win", "loss"):
+                disp_split[int(strong)][0 if st["o"] == "win" else 1] += 1
+                rd = sc.retest_depth(st, d)
+                if rd is not None:
+                    deep[st["o"]].append(rd)
+        n = len(pairs)
+
+        def per(xs):
+            return f"{sum(xs) / len(xs):+.2f}" if xs else "-"
+
+        half = n // 2
+        pairs.sort(key=lambda x: x[2] or datetime.min)
+        table = [["Kol", "R/setup", "1. yarı", "2. yarı"]]
+        for i, name in ((0, "A · bugünkü (ilk dolan aday)"), (1, "B · displacement ≥ 1 + yalnız FVG")):
+            table.append([name, per([x[i] for x in pairs]), per([x[i] for x in pairs[:half]]), per([x[i] for x in pairs[half:]])])
+        for k, name in ((1, "A'nın işlemleri · displacement ≥ 1"), (0, "A'nın işlemleri · displacement < 1")):
+            w, l = disp_split[k]
+            table.append([name, f"{w} TP / {l} SL", "", ""])
+        for k, name in (("win", "en derin retest · TP olanlar (medyan)"), ("loss", "en derin retest · SL olanlar (medyan)")):
+            xs = sorted(deep[k])
+            table.append([name, f"{xs[len(xs) // 2]:.2f}" if xs else "-", f"n {len(xs)}", ""])
+        return Progress(bars=[Bar("B kolu işlem (FVG dolup TP / SL)", b_trades, 30)], table=table,
+                        note=f"{n} CHOCH'lu çözülmüş setup · retest derinliği 0 = CHOCH kapanışı, 1 = dip")
+    return fn
+
+
 async def _p_sd_score_items(db: AsyncSession) -> Progress:
     """04.11 (kullanici: "1H sinyallerinin skoru cok dusuk"): S/D skor kalemleri kazanani ayiriyor mu? Cozulmus (win/loss) S/D
     satirlarinda her kalem degeri -> TP / SL / WR; BOS ve sweep (puansiz) da. Surekli tablo, tetik yok; tablo kurulurken okunur."""
@@ -2945,6 +3039,56 @@ ITEMS: list[WatchItem] = [
         measure="/sd-signals CONFIRM sütunu · /izleme tablosu (Journal entries.sdc)",
         md="S/D giriş: limit mi, 15m CHOCH + retest mi? (03.11.2026)",
         progress_fn=_p_sd_entry_model,
+    ),
+    WatchItem(
+        key="sd_htf_sweep_gate_sd", status="open", started="06.11", onem=1, group="sd", pinned=True,
+        title="S/D: HTF sweep hard filtre mi? — 4H",
+        trigger="taraf başına 30 çözülmüş (ana giriş = LTF onay): kriteri taşımayan tarafın WR'si ≥ 10 puan geride VE iki zaman yarısında aynı yön VE tek yönlü p < 0,10 → hard filtre; 5–10 puan → skor kalemi (+2); < 5 puan → yalnız etiket",
+        measure="/sd-izleme tablosu (Journal features.sweep × entries.sdc)",
+        md="S/D: HTF sweep ve HTF MSS hard filtre mi? (06.11.2026)",
+        progress_fn=_sd_htf_gate_fn("sd", "sweep", "HTF sweep"),
+    ),
+    WatchItem(
+        key="sd_htf_sweep_gate_sd1h", status="open", started="06.11", onem=1, group="sd", pinned=True,
+        title="S/D: HTF sweep hard filtre mi? — 1H",
+        trigger="taraf başına 30 çözülmüş (ana giriş = LTF onay): kriteri taşımayan tarafın WR'si ≥ 10 puan geride VE iki zaman yarısında aynı yön VE tek yönlü p < 0,10 → hard filtre; 5–10 puan → skor kalemi (+2); < 5 puan → yalnız etiket",
+        measure="/sd-izleme tablosu (Journal features.sweep × entries.sdc)",
+        md="S/D: HTF sweep ve HTF MSS hard filtre mi? (06.11.2026)",
+        progress_fn=_sd_htf_gate_fn("sd1h", "sweep", "HTF sweep"),
+    ),
+    WatchItem(
+        key="sd_htf_mss_gate_sd", status="open", started="06.11", onem=1, group="sd", pinned=True,
+        title="S/D: HTF MSS hard filtre mi? — 4H",
+        trigger="taraf başına 30 çözülmüş (ana giriş = LTF onay): kriteri taşımayan tarafın WR'si ≥ 10 puan geride VE iki zaman yarısında aynı yön VE tek yönlü p < 0,10 → hard filtre; 5–10 puan → skor kalemi (+2); < 5 puan → yalnız etiket",
+        measure="/sd-izleme tablosu (Journal features.mss × entries.sdc)",
+        md="S/D: HTF sweep ve HTF MSS hard filtre mi? (06.11.2026)",
+        progress_fn=_sd_htf_gate_fn("sd", "mss", "HTF MSS"),
+    ),
+    WatchItem(
+        key="sd_htf_mss_gate_sd1h", status="open", started="06.11", onem=1, group="sd", pinned=True,
+        title="S/D: HTF MSS hard filtre mi? — 1H",
+        trigger="taraf başına 30 çözülmüş (ana giriş = LTF onay): kriteri taşımayan tarafın WR'si ≥ 10 puan geride VE iki zaman yarısında aynı yön VE tek yönlü p < 0,10 → hard filtre; 5–10 puan → skor kalemi (+2); < 5 puan → yalnız etiket",
+        measure="/sd-izleme tablosu (Journal features.mss × entries.sdc)",
+        md="S/D: HTF sweep ve HTF MSS hard filtre mi? (06.11.2026)",
+        progress_fn=_sd_htf_gate_fn("sd1h", "mss", "HTF MSS"),
+    ),
+    WatchItem(
+        key="sd_disp_fvg_sd", status="open", started="06.11", onem=1, group="sd",
+        title="S/D LTF giriş: ilk dolan aday mı, displacement + yalnız FVG retest mi? — 4H",
+        trigger="B kolu (displacement ≥ 1 + FVG) 30 işlem: aynı CHOCH'lu setuplarda B R/setup'ta A'dan ≥ +0,15 ileride VE iki yarıda "
+                "aynı yön → ana giriş B; aksi halde bugünkü kalır (FVG oluşmayan dönüşte B işlem açmaz, kayıp R'ye 0 olarak girer)",
+        measure="/sd-izleme tablosu (Journal entries.sdc: disp, vars.fvg, rt)",
+        md="S/D LTF giriş: displacement + yalnız FVG retest mi? (06.11.2026)",
+        progress_fn=_sd_disp_fvg_fn("sd"),
+    ),
+    WatchItem(
+        key="sd_disp_fvg_sd1h", status="open", started="06.11", onem=1, group="sd",
+        title="S/D LTF giriş: ilk dolan aday mı, displacement + yalnız FVG retest mi? — 1H",
+        trigger="B kolu (displacement ≥ 1 + FVG) 30 işlem: aynı CHOCH'lu setuplarda B R/setup'ta A'dan ≥ +0,15 ileride VE iki yarıda "
+                "aynı yön → ana giriş B; aksi halde bugünkü kalır (FVG oluşmayan dönüşte B işlem açmaz, kayıp R'ye 0 olarak girer)",
+        measure="/sd-izleme tablosu (Journal entries.sdc: disp, vars.fvg, rt)",
+        md="S/D LTF giriş: displacement + yalnız FVG retest mi? (06.11.2026)",
+        progress_fn=_sd_disp_fvg_fn("sd1h"),
     ),
     WatchItem(
         key="sd_score_items", status="open", started="04.11", onem=2, group="sd", continuous=True,

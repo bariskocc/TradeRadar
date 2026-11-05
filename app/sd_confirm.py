@@ -26,6 +26,10 @@ Akis (LONG; SHORT simetrik):
   4. Her aday: girise donmeden TP -> kacti; dolum -> TP / SL. Sayfadaki hikaye "ilk dolan" adaydan (ayni mumda sira fvg, ifvg,
      cisd, mss): hangi bolgeden retest geldi, sonra ne oldu. Hicbir aday dolmadan TP -> `missed` (no retest, price left).
      Ufukta: `no_touch` / `no_choch` / `open`.
+  Olcum (06.11, kullanici -- motor karari degil): `disp` = CHOCH hamlesindeki (dipten sonra, CHOCH mumu dahil) en buyuk islem yonlu
+  govde / son 20 LTF mumunun ort. boyu (CRT'deki cisd_disp gibi; >= DISP_STRONG "displacement"); `cc` = CHOCH kapanisi;
+  `rt` / `rt_t` = CHOCH'tan sonra TP ya da SL'ye kadar fiyatin en derin geri cekilmesi (TP mumu haric -- mum ici sira bilinmez);
+  derinlik `retest_depth` = 0 (CHOCH kapanisi) .. 1 (dip). "Displacement + yalniz FVG retest" modeli vars["fvg"] + disp'ten okunur.
 Not: sd15m'de bu kol yok (kullanici 04.11: "CHOCH + retest 1H ve 4H icin").
 """
 from __future__ import annotations
@@ -40,6 +44,7 @@ SL_BUFFER_FRAC = 0.10            # SL = dip - %10 x (MSS seviyesi - dip)
 CHOCH_SWING_K = 3                # CHOCH swing'i: her yanda bu kadar mum (05.11; once 1)
 SHORT_SWING_K = 1                # LTF sweep varken 3'lu swing RR'yi oldururse dusulen kisa swing (05.11)
 SHORT_SWING_RR = 2.0             # 3'lu swing'in MSS girisi bu RR'nin altindaysa "swing cok yukarida"
+DISP_STRONG = 1.0                # CHOCH displacement esigi (ort. LTF mum boyu kati)
 LIQ_SEED_CAP = 40                # features.ltf_liq: en fazla bu kadar swing (en yenileri)
 MIN_GAP_FRAC = 0.15              # FVG / IFVG en kucuk bosluk: son 20 LTF mumunun ort. boyu x bu (05.11)
 GAP_AVG_BARS = 20
@@ -148,6 +153,27 @@ def _ltf_sweep(rec: dict, st: dict, long: bool) -> list:
     return out
 
 
+def _disp(bars: list, lo_i: int, ci: int, long: bool) -> float | None:
+    """CHOCH hamlesinin en guclu mumu: islem yonlu govde (open ~ onceki kapanis) / son GAP_AVG_BARS mumun ort. boyu."""
+    rng = [b[1] - b[2] for b in bars[max(0, ci - GAP_AVG_BARS + 1):ci + 1]]
+    avg = sum(rng) / len(rng) if rng else 0.0
+    if avg <= 0:
+        return None
+    bodies = [(bars[i][3] - bars[i - 1][3]) * (1 if long else -1) for i in range(max(lo_i + 1, 1), ci + 1)]
+    return round(max(bodies) / avg, 3) if bodies else None
+
+
+def retest_depth(st: dict | None, direction: str | None = None) -> float | None:
+    """CHOCH sonrasi en derin geri cekilme: 0 = CHOCH kapanisi, 1 = dip (lo), > 1 dibin otesi."""
+    if not st or st.get("rt") is None or st.get("cc") is None or st.get("lo") is None:
+        return None
+    span = abs(float(st["cc"]) - float(st["lo"]))
+    if span <= 0:
+        return None
+    long = (direction == "LONG") if direction else float(st["lo"]) < float(st["cc"])
+    return round(((float(st["cc"]) - float(st["rt"])) if long else (float(st["rt"]) - float(st["cc"]))) / span, 3)
+
+
 def _mss_rr(lvl: float, lo: float, tp: float) -> float | None:
     risk = abs(lvl - lo) * (1 + SL_BUFFER_FRAC)
     return abs(tp - lvl) / risk if risk > 0 else None
@@ -240,6 +266,7 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
             ref = abs(lvl - st["lo"])
             sl = st["lo"] - SL_BUFFER_FRAC * ref if long else st["lo"] + SL_BUFFER_FRAC * ref
             st["sl"], st["ct"], st["o"] = float(sl), _iso(ts), "wait_retest"
+            st["cc"], st["disp"] = float(close), _disp(bars, st["lo_i"], ci, long)
             st["vars"] = {k: {"e": e, "rr": round(abs(tp - e) / abs(e - sl), 4) if abs(e - sl) > 0 else None,
                               "o": "pending", "t": None, "at": None} for k, e in cands.items()}
             st["b"] = []                          # tampon artik gerekmez (JSON kucuk kalsin)
@@ -250,6 +277,10 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
     sl = float(st["sl"])
     hit_tp = high >= tp if long else low <= tp
     hit_sl = low <= sl if long else high >= sl
+    if not hit_tp:                                # en derin retest (TP mumu haric)
+        ext = low if long else high
+        if st.get("rt") is None or ((ext < st["rt"]) if long else (ext > st["rt"])):
+            st["rt"], st["rt_t"] = float(ext), _iso(ts)
     for v in st["vars"].values():
         if v["o"] == "pending":
             hit_e = low <= v["e"] if long else high >= v["e"]
@@ -308,6 +339,13 @@ def describe(st: dict | None, ltf: str) -> dict:
     if o == "win" and via_label:
         label = f"Worked — retest {via_label}"
     tip = " · ".join(f"{VARIANT_LABEL[k]} {v['e']:.6g} → {v['o']}" for k, v in (st.get("vars") or {}).items())
+    extra = []
+    if st.get("disp") is not None:
+        extra.append(f"displacement {st['disp']:.2f}×")
+    d = retest_depth(st)
+    if d is not None:
+        extra.append(f"deepest retest {st['rt']:.6g} ({d:.0%} back to the low)")
+    tip = " · ".join(x for x in [tip] + extra if x)
     return {"label": label, "path": " · ".join(parts) or None, "tip": tip or None}
 
 
