@@ -1874,7 +1874,7 @@ def _sd_disp_fvg_fn(strategy: str):
         t = _journal_table()
         rows = (await db.execute(select(t.c.entries, t.c.direction, t.c.best_stage_at).where(
             t.c.strategy == strategy, t.c.best_stage == "sd_ready"))).all()
-        done = ("win", "loss", "missed", "no_touch", "open", "ambiguous", "week_close")
+        done = ("win", "loss", "missed", "no_touch", "open", "ambiguous", "week_close", "low_rr")
         pairs, b_trades, deep = [], 0, {"win": [], "loss": []}
         disp_split = {1: [0, 0], 0: [0, 0]}
         for ents, d, at in rows:
@@ -1887,6 +1887,8 @@ def _sd_disp_fvg_fn(strategy: str):
             a = sc.final_r(st) or 0.0
             strong = st.get("disp") is not None and float(st["disp"]) >= sc.DISP_STRONG
             fv = (st.get("vars") or {}).get("fvg")
+            if fv and float(fv.get("rr") or 0) < sc.MIN_RR:
+                fv = None                         # 06.11: RR < 2 adayla islem acilmaz (iki kolda da)
             if strong and fv:
                 if fv["o"] in ("pending", "filled"):
                     continue                      # B kolu cozulmedi
@@ -1918,6 +1920,50 @@ def _sd_disp_fvg_fn(strategy: str):
             table.append([name, f"{xs[len(xs) // 2]:.2f}" if xs else "-", f"n {len(xs)}", ""])
         return Progress(bars=[Bar("B kolu işlem (FVG dolup TP / SL)", b_trades, 30)], table=table,
                         note=f"{n} CHOCH'lu çözülmüş setup · retest derinliği 0 = CHOCH kapanışı, 1 = dip")
+    return fn
+
+
+def _sd_stop_be_fn(strategy: str):
+    """06.11 (kullanici; 4H / 1H'in ilk 6 islemi 6 stop -- ikisinde bolge ayakta kaldi, ucu +1R ustu gorup dondu): LTF onay
+    isleminde stop dip - %10 mu, bolge stopu mu, ya da +1R / TP yolunun %50'sinde BE mi? Ayni giris + TP, golge kollar
+    entries.sdc.sh (sd_confirm._sh_step). Kol R'si kendi ilk stopunun riskiyle; bolge stopu daha genis degilse = bugunku."""
+    async def fn(db: AsyncSession) -> Progress:
+        from app import sd_confirm as sc
+        t = _journal_table()
+        rows = (await db.execute(select(t.c.entries, t.c.direction, t.c.best_stage_at).where(
+            t.c.strategy == strategy, t.c.best_stage == "sd_ready"))).all()
+        names = (("main", "Bugünkü · dip − %10 stop"), ("zs", "Bölge stopu"), ("be1r", "+1R'de BE"), ("be50", "TP yolunun %50'sinde BE"))
+        trades = []
+        for ents, d, at in rows:
+            try:
+                st = (json.loads(ents or "{}")).get(sc.SDC_KEY) or {}
+            except Exception:
+                continue
+            sh = st.get("sh") or {}
+            if not sh or any(v.get("late") for v in sh.values()) or st.get("o") not in ("win", "loss", "ambiguous", "week_close"):
+                continue
+            if any(v.get("o") == "filled" for v in sh.values()):
+                continue                          # golge kol cozulmedi
+            main = sc.final_r(st) or 0.0
+            rs = {"main": (main, st["o"])}
+            for k in sc.SHADOWS:
+                v = sh.get(k) or {}
+                rs[k] = (main, st["o"]) if v.get("o") in (None, "invalid") else (sc.shadow_r(v, st.get("e"), d) or 0.0, v["o"])
+            trades.append((rs, at))
+        trades.sort(key=lambda x: x[1] or datetime.min)
+        n, half = len(trades), len(trades) // 2
+
+        def per(xs):
+            return f"{sum(xs) / len(xs):+.2f}" if xs else "-"
+
+        table = [["Kol", "TP / SL / BE", "R/işlem", "1. yarı", "2. yarı"]]
+        for k, name in names:
+            os_ = [x[0][k][1] for x in trades]
+            rr = [x[0][k][0] for x in trades]
+            table.append([name, f"{os_.count('win')} / {os_.count('loss')} / {os_.count('be')}", per(rr),
+                          per(rr[:half]), per(rr[half:])])
+        return Progress(bars=[Bar("çözülmüş onay işlemi (gölgeler dahil)", n, 30)], table=table,
+                        note="aynı giriş + TP · R kolun kendi ilk stopuyla · 06.11 öncesi dolan işlemler sayılmaz")
     return fn
 
 
@@ -3089,6 +3135,24 @@ ITEMS: list[WatchItem] = [
         measure="/sd-izleme tablosu (Journal entries.sdc: disp, vars.fvg, rt)",
         md="S/D LTF giriş: displacement + yalnız FVG retest mi? (06.11.2026)",
         progress_fn=_sd_disp_fvg_fn("sd1h"),
+    ),
+    WatchItem(
+        key="sd_stop_be_sd", status="open", started="06.11", onem=1, group="sd",
+        title="S/D LTF onay stopu: dip stopu mu, bölge stopu mu, BE mi? — 4H",
+        trigger="30 çözülmüş onay işlemi: bir kol (bölge stopu / +1R'de BE / %50'de BE) R/işlemde bugünküden ≥ +0,15 ileride VE "
+                "iki yarıda aynı yön → ana işlemin stopu / yönetimi o kol olur; aksi halde dip − %10 stop kalır",
+        measure="/sd-izleme tablosu (Journal entries.sdc.sh)",
+        md="S/D LTF onay stopu: dip stopu mu, bölge stopu mu, BE mi? (06.11.2026)",
+        progress_fn=_sd_stop_be_fn("sd"),
+    ),
+    WatchItem(
+        key="sd_stop_be_sd1h", status="open", started="06.11", onem=1, group="sd",
+        title="S/D LTF onay stopu: dip stopu mu, bölge stopu mu, BE mi? — 1H",
+        trigger="30 çözülmüş onay işlemi: bir kol (bölge stopu / +1R'de BE / %50'de BE) R/işlemde bugünküden ≥ +0,15 ileride VE "
+                "iki yarıda aynı yön → ana işlemin stopu / yönetimi o kol olur; aksi halde dip − %10 stop kalır",
+        measure="/sd-izleme tablosu (Journal entries.sdc.sh)",
+        md="S/D LTF onay stopu: dip stopu mu, bölge stopu mu, BE mi? (06.11.2026)",
+        progress_fn=_sd_stop_be_fn("sd1h"),
     ),
     WatchItem(
         key="sd_score_items", status="open", started="04.11", onem=2, group="sd", continuous=True,

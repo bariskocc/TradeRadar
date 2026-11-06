@@ -44,14 +44,14 @@ STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), 
 # 05.11 (kullanici): ana giris LTF onay + retest olan stratejiler (sd_confirm kolu olanlar)
 MAIN_CONFIRM = tuple(sd_confirm.STRATEGIES)
 # 05.11 (kullanici): sonuc ve LTF onay sonucu filtreleri -- filtre -> eslesen outcome kumesi
-RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / no retest)"),
+RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / no retest / RR < 2)"),
                   ("week_close", "Week close"), ("expired", "Expired"), ("other", "Same bar / missed")]
-_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed"}, "week_close": {"week_close"},
+_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed", "low_rr", "rr_wait"}, "week_close": {"week_close"},
                "expired": {"no_touch", "open", "no_choch"}, "other": {"ambiguous", "tp_before_entry", "unmeasured"}}
-CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_retest", "No retest"),
+CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_retest", "No retest"), ("low_rr", "RR < 2"),
                    ("waiting", "Waiting / in trade"), ("none", "No touch yet")]
 _CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
-                "waiting": {"wait_choch", "wait_retest", "filled"}, "none": {None}}
+                "low_rr": {"low_rr", "rr_wait"}, "waiting": {"wait_choch", "wait_retest", "filled"}, "none": {None}}
 
 # outcome -> (durum sekmesi, etiket, renk, "sonuc" etiketi, sonuc rengi)
 _OUTCOME = {
@@ -72,6 +72,9 @@ _OUTCOME = {
     "failed":          ("closed",  "No trade",        "gray",   "Zone failed",     "gray"),
     "missed":          ("closed",  "No trade",        "gray",   "No retest",       "yellow"),
     "no_choch":        ("closed",  "Expired",         "gray",   "No CHOCH",        "gray"),
+    # 06.11 (kullanici): CHOCH geldi ama hicbir giris adayi RR >= 2 vermedi -- islem yok (adaylar olculmeye devam)
+    "rr_wait":         ("closed",  "No trade",        "gray",   "RR < 2",          "gray"),
+    "low_rr":          ("closed",  "No trade",        "gray",   "RR < 2",          "gray"),
     "unmeasured":      ("closed",  "Closed",          "gray",   "Not measured",    "gray"),
 }
 _LIMIT_SHORT = {"pending": "Waiting", "filled": "Filled", "win": "TP", "loss": "SL", "tp_before_entry": "TP before entry",
@@ -315,7 +318,7 @@ async def build_sd_signals(
             s["r"] -= 1.0
         elif v["outcome"] == "week_close":
             s["r"] += float(v["final_r"] or 0)
-        elif v["outcome"] in ("failed", "missed"):
+        elif v["outcome"] in ("failed", "missed", "low_rr", "rr_wait"):
             s["no_trade"] += 1
         elif v["tab"] != "closed":
             s["open"] += 1
@@ -335,8 +338,8 @@ async def build_sd_signals(
     # 06.11 (kullanici): islemsiz satirlar (CHOCH'tan once bolge bozuldu / retest gelmedi) tabloda kalabalik -- gizli; ozet onlari
     # sayar (bolge limiti kiyasi), Result = No trade ya da LTF confirm = Zone failed / No retest secilince gorunur.
     hidden = 0
-    if result != "no_trade" and confirm not in ("failed", "no_retest"):
-        shown = [v for v in views if v["outcome"] not in ("failed", "missed")]
+    if result != "no_trade" and confirm not in ("failed", "no_retest", "low_rr"):
+        shown = [v for v in views if v["outcome"] not in ("failed", "missed", "low_rr", "rr_wait")]
         hidden, views = len(views) - len(shown), shown
     counts = {k: 0 for k, _ in STATUS_FILTERS}
     for v in views:

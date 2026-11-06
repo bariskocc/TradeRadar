@@ -30,6 +30,11 @@ Akis (LONG; SHORT simetrik):
   govde / son 20 LTF mumunun ort. boyu (CRT'deki cisd_disp gibi; >= DISP_STRONG "displacement"); `cc` = CHOCH kapanisi;
   `rt` / `rt_t` = CHOCH'tan sonra TP ya da SL'ye kadar fiyatin en derin geri cekilmesi (TP mumu haric -- mum ici sira bilinmez);
   derinlik `retest_depth` = 0 (CHOCH kapanisi) .. 1 (dip). "Displacement + yalniz FVG retest" modeli vars["fvg"] + disp'ten okunur.
+  Min RR (06.11, kullanici -- CADJPY 4H RR 1.44, USDCHF 1H RR 1.66 ile girmisti): islem yalniz RR >= MIN_RR adaylardan; dusuk RR'li
+  adaylar `vars`'ta olculmeye devam eder. Hicbir aday RR >= MIN_RR degilse `rr_wait` (islem yok, adaylar izleniyor) -> `low_rr`.
+  Golge kollar (06.11, kullanici -- 6 islemin 6'si stop: CHOCH stopu mu dar, BE kurtarir mi?): ana islemin girisi ve TP'si ayni,
+  `sh` = zs (SL = satirin bolge stopu; daha genis degilse invalid) / be1r (+1R gorulunce SL girise) / be50 (TP yolunun %50'si gorulunce
+  SL girise). Dolum mumunda BE kurulmaz, TP gorulurse ambiguous (CRT'nin on_fill_bar kurali). Ana islem bitince de izlenir.
 Not: sd15m'de bu kol yok (kullanici 04.11: "CHOCH + retest 1H ve 4H icin").
 """
 from __future__ import annotations
@@ -45,17 +50,23 @@ CHOCH_SWING_K = 3                # CHOCH swing'i: her yanda bu kadar mum (05.11;
 SHORT_SWING_K = 1                # LTF sweep varken 3'lu swing RR'yi oldururse dusulen kisa swing (05.11)
 SHORT_SWING_RR = 2.0             # 3'lu swing'in MSS girisi bu RR'nin altindaysa "swing cok yukarida"
 DISP_STRONG = 1.0                # CHOCH displacement esigi (ort. LTF mum boyu kati)
+MIN_RR = 2.0                     # islem acilan aday en az bu RR (06.11; bolge planiyla ayni)
+BE_ARM_R = 1.0                   # golge be1r: +1R gorulunce SL girise
+BE_ARM_TP_FRAC = 0.5             # golge be50: TP yolunun %50'si (CRT be_arm_tp_fraction)
+SHADOWS = ("zs", "be1r", "be50")
+SHADOW_LABEL = {"zs": "zone stop", "be1r": "BE at +1R", "be50": "BE at 50% to TP"}
 LIQ_SEED_CAP = 40                # features.ltf_liq: en fazla bu kadar swing (en yenileri)
 MIN_GAP_FRAC = 0.15              # FVG / IFVG en kucuk bosluk: son 20 LTF mumunun ort. boyu x bu (05.11)
 GAP_AVG_BARS = 20
 VARIANTS = ("fvg", "ifvg", "cisd", "mss")
 VARIANT_LABEL = {"fvg": "FVG", "ifvg": "IFVG", "cisd": "CISD", "mss": "MSS level"}
-FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open", "week_close")
+FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open", "week_close", "low_rr")
 LABELS = {
     "pre": "—", "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — waiting retest", "filled": "Retest — in trade",
     "win": "Worked", "loss": "Zone failed after CHOCH", "ambiguous": "Same bar (?)", "missed": "No retest — price left",
     "failed": "Zone failed before CHOCH", "no_touch": "No retest in horizon", "no_choch": "No CHOCH in horizon",
     "open": "Open at horizon", "week_close": "Closed at week end",
+    "rr_wait": "CHOCH — RR < 2, no trade", "low_rr": "CHOCH — RR < 2, no trade",
 }
 
 
@@ -67,6 +78,11 @@ def _naive(ts):
     if getattr(ts, "tzinfo", None) is not None:
         ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
     return ts
+
+
+def _dt(v):
+    """datetime ya da ISO metin -> naive UTC datetime."""
+    return _naive(datetime.fromisoformat(v) if isinstance(v, str) else v)
 
 
 def _iso(ts) -> str | None:
@@ -220,13 +236,16 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
     if rec.get("strategy") not in STRATEGIES or rec.get("levels_at") is None or rec.get("entry") is None:
         return False
     st = _state(rec)
-    if st["o"] in FINAL:
+    if st["o"] in FINAL and not _sh_live(st):
         return False
     ts = _naive(bar_ts)
     if ts is None or (st.get("until") is not None and ts <= _naive(st["until"])):
         return False
     st["until"] = ts
     long = rec.get("direction") == "LONG"
+    if st["o"] in FINAL:                          # ana islem bitti, golge kollar suruyor
+        _sh_step(rec, st, long, ts, high, low, horizon)
+        return True
     bars = st["b"]
     touched = rec.get("entry_touched_at") is not None and ts >= _naive(rec["entry_touched_at"])
     if st["o"] == "pre":
@@ -269,6 +288,8 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
             st["cc"], st["disp"] = float(close), _disp(bars, st["lo_i"], ci, long)
             st["vars"] = {k: {"e": e, "rr": round(abs(tp - e) / abs(e - sl), 4) if abs(e - sl) > 0 else None,
                               "o": "pending", "t": None, "at": None} for k, e in cands.items()}
+            if st["vars"] and not _eligible(st):
+                st["o"] = "rr_wait"
             st["b"] = []                          # tampon artik gerekmez (JSON kucuk kalsin)
         elif ts >= rec["levels_at"] + horizon:
             st["o"], st["at"] = "no_choch", ts
@@ -298,21 +319,95 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
                 v["o"], v["at"] = "win", _iso(ts)
             elif hit_sl:
                 v["o"], v["at"] = "loss", _iso(ts)
-    filled = [v["t"] for v in st["vars"].values() if v.get("t")]
+    elig = _eligible(st)                          # 06.11: islem yalniz RR >= MIN_RR adaydan
+    filled = [v["t"] for v in elig.values() if v.get("t")]
     if filled:
         t0 = min(filled)
-        via = next(k for k in VARIANTS if st["vars"].get(k, {}).get("t") == t0)
-        v = st["vars"][via]
+        via = next(k for k in VARIANTS if elig.get(k, {}).get("t") == t0)
+        v = elig[via]
         # ust duzey t/at/until datetime (Journal `_ENTRY_TS` donusumu); adaylarin (vars) zamanlari ISO metin
         st["via"], st["e"], st["rr"], st["t"] = via, v["e"], v["rr"], datetime.fromisoformat(v["t"])
         st["o"] = v["o"] if v["o"] in ("win", "loss", "ambiguous") else "filled"
         if st["o"] != "filled":
             st["at"] = ts
-    elif (st["vars"] and all(v["o"] == "missed" for v in st["vars"].values())) or (not st["vars"] and hit_tp):
+    elif st["vars"] and not elig:                 # RR >= 2 aday yok: islem yok, adaylar olculmeye devam
+        st["o"] = "rr_wait"
+        if all(v["o"] not in ("pending", "filled") for v in st["vars"].values()):
+            st["o"], st["at"] = "low_rr", ts
+    elif (elig and all(v["o"] == "missed" for v in elig.values())) or (not st["vars"] and hit_tp):
         st["o"], st["at"] = "missed", ts
-    if st["o"] in ("wait_retest", "filled") and ts >= rec["levels_at"] + horizon:
-        st["o"], st["at"] = ("no_touch" if st["o"] == "wait_retest" else "open"), ts
+    if st["o"] in ("wait_retest", "filled", "rr_wait") and ts >= rec["levels_at"] + horizon:
+        st["o"], st["at"] = {"wait_retest": "no_touch", "filled": "open", "rr_wait": "low_rr"}[st["o"]], ts
+    if st.get("e") is not None:
+        _sh_step(rec, st, long, ts, high, low, horizon)
     return True
+
+
+def _eligible(st: dict) -> dict:
+    return {k: v for k, v in (st.get("vars") or {}).items() if (v.get("rr") or 0) >= MIN_RR}
+
+
+# --- Golge kollar (06.11, kullanici): ayni giris + TP; bolge stopu / BE ------------------------------------------------------
+def _sh_live(st: dict) -> bool:
+    return any(v.get("o") == "filled" for v in (st.get("sh") or {}).values())
+
+
+def _sh_init(rec: dict, st: dict, long: bool) -> None:
+    e, sl, tp, zsl = float(st["e"]), float(st["sl"]), float(rec["tp"]), float(rec["sl"])
+    risk = abs(e - sl)
+    sh = {}
+    if ((zsl < sl) if long else (zsl > sl)) and abs(e - zsl) > 0:
+        sh["zs"] = {"sl": zsl, "sl0": zsl, "rr": round(abs(tp - e) / abs(e - zsl), 4), "o": "filled", "at": None}
+    else:
+        sh["zs"] = {"o": "invalid", "why": "not_wider"}
+    for k, arm in (("be1r", e + BE_ARM_R * risk if long else e - BE_ARM_R * risk), ("be50", e + BE_ARM_TP_FRAC * (tp - e))):
+        sh[k] = {"sl": sl, "sl0": sl, "arm": arm, "be": None, "rr": st.get("rr"), "o": "filled", "at": None}
+    st["sh"] = sh
+
+
+def _sh_step(rec: dict, st: dict, long: bool, ts, high: float, low: float, horizon: timedelta) -> None:
+    """Golge kollarin mumu. Dolum mumunda TP gorulurse ambiguous, BE kurulmaz; BE kurulan mumdan sonra SL = giris."""
+    if "sh" not in st:
+        if st.get("e") is None or st.get("t") is None:
+            return
+        _sh_init(rec, st, long)
+        if ts > _dt(st["t"]):                     # 06.11 oncesi dolmus islem: golge dolumdan sonra basladi, analiz disi
+            for v in st["sh"].values():
+                v["late"] = True
+    fill_bar = ts <= _dt(st["t"])
+    e, tp = float(st["e"]), float(rec["tp"])
+    hit_tp = high >= tp if long else low <= tp
+    for v in st["sh"].values():
+        if v.get("o") != "filled":
+            continue
+        hit_sl = low <= v["sl"] if long else high >= v["sl"]
+        if hit_sl:
+            v["o"] = "ambiguous" if hit_tp else ("be" if v.get("be") else "loss")
+        elif hit_tp:
+            v["o"] = "ambiguous" if fill_bar else "win"
+        if v["o"] != "filled":
+            v["at"] = _iso(ts)
+            continue
+        if "arm" in v and v.get("be") is None and not fill_bar and ((high >= v["arm"]) if long else (low <= v["arm"])):
+            v["be"], v["sl"] = _iso(ts), e
+        if ts >= rec["levels_at"] + horizon:
+            v["o"], v["at"] = "open", _iso(ts)
+
+
+def shadow_r(v: dict | None, e, direction: str | None) -> float | None:
+    """Golge kolun R'si (kendi ilk stopunun riskiyle): win = rr, loss = -1, be / ambiguous / open = 0, hafta kapanisi fiyattan."""
+    if not v:
+        return None
+    o = v.get("o")
+    if o == "win":
+        return float(v.get("rr") or 0)
+    if o == "loss":
+        return -1.0
+    if o in ("be", "ambiguous", "open"):
+        return 0.0
+    if o == "week_close":
+        return week_close_r(e, v.get("sl0"), v.get("px"), direction)
+    return None
 
 
 def describe(st: dict | None, ltf: str) -> dict:
@@ -345,6 +440,9 @@ def describe(st: dict | None, ltf: str) -> dict:
     d = retest_depth(st)
     if d is not None:
         extra.append(f"deepest retest {st['rt']:.6g} ({d:.0%} back to the low)")
+    for k, v in (st.get("sh") or {}).items():
+        if v.get("o") not in (None, "invalid"):
+            extra.append(f"{SHADOW_LABEL.get(k, k)} → {v['o']}")
     tip = " · ".join(x for x in [tip] + extra if x)
     return {"label": label, "path": " · ".join(parts) or None, "tip": tip or None}
 
@@ -401,7 +499,7 @@ def final_r(st: dict | None) -> float | None:
         return float(st.get("rr") or 0)
     if st.get("o") == "loss":
         return -1.0
-    if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "open"):
+    if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "open", "low_rr", "rr_wait"):
         return 0.0
     if st.get("o") == "week_close":
         return week_close_r(st.get("e"), st.get("sl"), st.get("px"), st.get("dir"))

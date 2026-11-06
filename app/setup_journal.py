@@ -1533,12 +1533,19 @@ def sd_week_close(rec: dict, px: float, ts) -> bool:
             v["o"], v["at"], v["px"] = "week_close", ts, float(px)
             changed = True
     sdc = ents.get("sdc")
-    if sdc and sdc.get("o") == "filled":
-        sdc["o"], sdc["at"], sdc["px"] = "week_close", ts, float(px)
+    if sdc and sdc.get("o") in ("filled", "rr_wait"):
+        # rr_wait (06.11): RR >= 2 aday yoktu, islem yok -- dolmus adaylar kapanir, kol low_rr
+        sdc["o"], sdc["at"] = ("week_close", ts) if sdc["o"] == "filled" else ("low_rr", ts)
+        if sdc["o"] == "week_close":
+            sdc["px"] = float(px)
         for vv in (sdc.get("vars") or {}).values():
             if vv.get("o") == "filled":
                 vv["o"], vv["at"] = "week_close", ts.isoformat()
         changed = True
+    for vv in ((sdc or {}).get("sh") or {}).values():      # golge kollar (06.11): bolge stopu / BE
+        if vv.get("o") == "filled":
+            vv["o"], vv["at"], vv["px"] = "week_close", ts.isoformat(), float(px)
+            changed = True
     tpz = ents.get("tpz")
     if tpz and tpz.get("o") == "pending":
         tpz["o"], tpz["at"], tpz["px"] = "week_close", ts, float(px)

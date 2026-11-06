@@ -136,7 +136,7 @@
                     {{ label }} <span class="text-xs text-gray-500">{{ counts[key] }}</span>
                 </a>
                 {% endfor %}
-                {% if hidden_no_trade %}<a href="{{ sb }}?{{ sq }}tf={{ tf }}&market={{ market }}&direction={{ direction }}&result=no_trade&confirm={{ confirm }}&date_from={{ date_from }}&date_to={{ date_to }}" class="text-xs text-gray-500 hover:text-gray-300" title="Zone failed before CHOCH / no retest — no trade was opened">{{ hidden_no_trade }} no-trade rows hidden · show</a>{% endif %}
+                {% if hidden_no_trade %}<a href="{{ sb }}?{{ sq }}tf={{ tf }}&market={{ market }}&direction={{ direction }}&result=no_trade&confirm={{ confirm }}&date_from={{ date_from }}&date_to={{ date_to }}" class="text-xs text-gray-500 hover:text-gray-300" title="Zone failed before CHOCH / no retest / no candidate with RR ≥ 2 — no trade was opened">{{ hidden_no_trade }} no-trade rows hidden · show</a>{% endif %}
                 <span class="ml-auto text-xs text-gray-500">Prices from the live feed, refreshed on reload</span>
             </div>
 
@@ -156,7 +156,7 @@
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
-                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first · No trade = zone failed before the CHOCH or no retest came">RESULT</th>
+                            <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first · No trade = zone failed before the CHOCH, no retest came or no entry candidate gave RR ≥ 2">RESULT</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Old entry measured on the same zone (4H / 1H): limit at the proximal edge, zone stop">ZONE LIMIT</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="Open time of the first base candle of the zone (TF candle, TSİ)">SETUP</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="4H / 1H: the LTF candle that filled the retest candidate · 15m: the candle that touched the entry (TSİ)">RETEST</th>
@@ -232,7 +232,7 @@
             <p class="mt-4 text-[11px] text-gray-500 leading-relaxed">
                 A row is a zone that passed every gate (target, R:R ≥ 2). <b>4H / 1H (05.11): the zone touch is only an alert</b> — the trade
                 opens on the LTF CHOCH + retest below (Waiting zone → Waiting CHOCH → Waiting retest → Filled); if the stop is hit before the
-                CHOCH or no candidate is retested the row is <b>No trade</b> (0R). The old entry — a limit at the proximal edge — is still
+                CHOCH, no candidate is retested or no candidate gives R:R ≥ 2 (06.11) the row is <b>No trade</b> (0R). The old entry — a limit at the proximal edge — is still
                 measured on the same zone (<b>Zone limit</b> column, second summary line). 15m: limit at the proximal edge.
                 <b>Waiting</b>: no fill yet — if price runs to the target without filling, the zone keeps waiting (no result).
                 <b>Filled</b>: entry touched, no TP/SL yet. <b>Closed</b>: TP or SL hit after the fill (flat TP/SL on 15m candles, no partial
