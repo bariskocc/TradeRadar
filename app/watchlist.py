@@ -1932,7 +1932,9 @@ def _sd_stop_be_fn(strategy: str):
         t = _journal_table()
         rows = (await db.execute(select(t.c.entries, t.c.direction, t.c.best_stage_at).where(
             t.c.strategy == strategy, t.c.best_stage == "sd_ready"))).all()
-        names = (("main", "Bugünkü · dip − %10 stop"), ("zs", "Bölge stopu"), ("be1r", "+1R'de BE"), ("be50", "TP yolunun %50'sinde BE"))
+        # 07.11: ana stop dip -> bolge plani stopu (st["stop"] == "zone"); iki donemi ayni kolonlara topla
+        names = (("dip", "Dip − %10 stop (06.11'e kadar ana)"), ("zone", "Bölge stopu (07.11'den beri ana)"),
+                 ("be1r", "+1R'de BE (ana stopla)"), ("be50", "TP yolunun %50'sinde BE (ana stopla)"))
         trades = []
         for ents, d, at in rows:
             try:
@@ -1945,10 +1947,14 @@ def _sd_stop_be_fn(strategy: str):
             if any(v.get("o") == "filled" for v in sh.values()):
                 continue                          # golge kol cozulmedi
             main = sc.final_r(st) or 0.0
-            rs = {"main": (main, st["o"])}
+            rs = {}
             for k in sc.SHADOWS:
                 v = sh.get(k) or {}
                 rs[k] = (main, st["o"]) if v.get("o") in (None, "invalid") else (sc.shadow_r(v, st.get("e"), d) or 0.0, v["o"])
+            if st.get("stop") == "zone":
+                rs["zone"] = (main, st["o"])
+            else:
+                rs["zone"], rs["dip"] = rs["zs"], (main, st["o"])
             trades.append((rs, at))
         trades.sort(key=lambda x: x[1] or datetime.min)
         n, half = len(trades), len(trades) // 2
@@ -2175,6 +2181,127 @@ async def _p_sd_zone_wick(db: AsyncSession) -> Progress:
     n = len(acc.get(("sd15m", "fark ≥ 0,25 ATR"), []))
     return Progress(bars=[Bar("S/D 15m — fark ≥ 0,25 ATR, iki giriş de çözülmüş", n, 30)], table=table,
                     note="aynı bölge, aynı SL/TP · kaçan (dolmadan TP / dokunmadı) = 0R · 4H/1H ana işlem LTF onay kolu, bu satırlar bilgi")
+
+
+async def _p_sd_sweep_gate(db: AsyncSession) -> Progress:
+    """07.11 (kullanici, XAUUSD 4H): 4H / 1H'te LTF likiditesi alinmadan CHOCH aranmiyor (sd_confirm.SWEEP_CHOCH; ufukta `no_sweep`).
+    Soru: sweep sarti kazanani mi eliyor? Ayni bolgelerde bolge limiti (satir outcome, olcum kolu) sonucu: sweep'siz elenen
+    (`no_sweep`) vs sweep gelen bolgeler. Duz TP / SL; hafta kapanisi R isaretinden."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.outcome, t.c.rr, t.c.entries, t.c.entry, t.c.sl, t.c.direction, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h")), t.c.best_stage == "sd_ready", t.c.entry_touched_at.is_not(None)))).all()
+    acc: dict[tuple, list] = {}
+    for st_, o, rr, ents, e, sl, d, lv in rows:
+        try:
+            en = json.loads(ents or "{}")
+        except Exception:
+            continue
+        sd_ = en.get(sc.SDC_KEY) or {}
+        if "sw_lv" not in sd_ and sd_.get("o") != "no_sweep":
+            continue                              # 07.11 oncesi akis
+        grp = "sweep yok (elendi)" if sd_.get("o") == "no_sweep" else ("sweep geldi" if sd_.get("sw_lv") else None)
+        if grp is None:
+            continue
+        r_ = float(rr or 0) if o == "win" else -1.0 if o == "loss" else (
+            sc.week_close_r(e, sl, (en.get("_wc") or {}).get("px"), d) if o == "week_close" else None)
+        if r_ is None:
+            continue
+        acc.setdefault((st_, grp), []).append((lv, r_))
+    table = [["Strateji · grup", "W / L", "WR", "R/bölge (zone limit)", "1. yarı", "2. yarı"]]
+    for st_ in ("sd", "sd1h"):
+        for grp in ("sweep geldi", "sweep yok (elendi)"):
+            xs = sorted(acc.get((st_, grp), []), key=lambda x: x[0] or datetime.min)
+            if not xs:
+                continue
+            rs = [x[1] for x in xs]
+            w, l, h = sum(1 for x in rs if x > 0), sum(1 for x in rs if x < 0), len(rs) // 2
+            per = lambda v: f"{sum(v) / len(v):+.2f}" if v else "-"
+            table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H'}[st_] } · {grp}", f"{w} / {l}", f"%{100 * w / (w + l):.0f}" if w + l else "-",
+                          per(rs), per(rs[:h]), per(rs[h:])])
+    n = len(acc.get(("sd", "sweep yok (elendi)"), [])) + len(acc.get(("sd1h", "sweep yok (elendi)"), []))
+    return Progress(bars=[Bar("sweep'siz elenen, sonucu belli bölge (4H + 1H)", n, 30)], table=table,
+                    note="sonuç bölge limiti kolundan (aynı bölge, işlem değil) · 07.11 sonrası akış")
+
+
+async def _p_sd_partial_be(db: AsyncSession) -> Progress:
+    """07.11 (kullanici, EURJPY 15m): S/D 15m'de TP yolunun %50'sinde yarisi kapansin + kalan BE mi? Ana islemin Journal golgesi
+    (shadow k=1) motorun CRT kuralini zaten isletiyor (`_apply_partial_arm`: `pa` tetik, `cur` = kalan yarinin sonu tp / be / amb).
+    Kismi R = 0.5 x 0.5 x RR + 0.5 x (kalan: TP -> RR, BE / ayni mum -> 0, hafta kapanisi -> fiyattan)."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.shadow, t.c.entries, t.c.entry, t.c.sl, t.c.direction, t.c.levels_at).where(
+        t.c.strategy == "sd15m", t.c.best_stage == "sd_ready", t.c.shadow.is_not(None)))).all()
+    xs = []
+    for sh, ents, e, sl, d, lv in rows:
+        try:
+            v = (json.loads(sh or "{}")).get("1") or {}
+            en = json.loads(ents or "{}")
+        except Exception:
+            continue
+        o = v.get("o")
+        if o not in ("win", "loss", "week_close"):
+            continue
+        rr = float(v.get("rr") or 0)
+        wc = sc.week_close_r(e, sl, v.get("px") or (en.get("_wc") or {}).get("px"), d) if o == "week_close" else None
+        flat = rr if o == "win" else -1.0 if o == "loss" else (wc or 0.0)
+        if v.get("pa") is None:
+            part = flat
+        else:
+            rest = rr if v.get("cur") == "tp" else 0.0 if v.get("cur") in ("be", "amb") else (wc or 0.0)
+            part = 0.25 * rr + 0.5 * rest
+        xs.append((lv, flat, part, v.get("pa") is not None))
+    xs.sort(key=lambda x: x[0] or datetime.min)
+    h = len(xs) // 2
+
+    def per(v):
+        return f"{sum(v) / len(v):+.2f}" if v else "-"
+
+    table = [["Kural", "Artıda biten", "R/işlem", "1. yarı", "2. yarı"]]
+    for i, name in ((1, "Düz TP / SL (bugünkü)"), (2, "%50'de yarısı + kalan BE")):
+        rs = [x[i] for x in xs]
+        table.append([name, f"{sum(1 for r in rs if r > 0)} / {len(rs)}", per(rs), per(rs[:h]), per(rs[h:])])
+    table.append(["%50 tetiği görülen", f"{sum(1 for x in xs if x[3])} / {len(xs)}", "", "", ""])
+    return Progress(bars=[Bar("S/D 15m — sonuçlanmış işlem", len(xs), 150)], table=table,
+                    note="aynı işlem, Journal gölgesi k=1 (ana işlemle aynı giriş / stop / TP) · kısmi R = yarısı %50'de + kalan TP / BE")
+
+
+async def _p_sd_pd_compare(db: AsyncSession) -> Progress:
+    """07.11 (kullanici: premium / discount onceki onemli swing low / high arasinda olmali): son 72 HTF mumu araligi (`pd_ok`) mu,
+    base'ten onceki son genis swing tepe-dip araligi (`pd_ok_sw`) mi kazanani ayiriyor? Sonuc ana islemden: 15m satir outcome,
+    4H / 1H LTF onay kolu (entries.sdc). Yalniz `pd_ok_sw` tasiyan (07.11 sonrasi seviyelenen) satirlar."""
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.outcome, t.c.entries, t.c.features_at_levels, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage == "sd_ready"))).all()
+    acc: dict[tuple, list] = {}
+    for st_, o, ents, fal, lv in rows:
+        try:
+            f = json.loads(fal or "{}")
+            en = json.loads(ents or "{}")
+        except Exception:
+            continue
+        if "pd_ok_sw" not in f:
+            continue
+        res = o if st_ == "sd15m" else (en.get("sdc") or {}).get("o")
+        if res not in ("win", "loss"):
+            continue
+        for key, lab in (("pd_ok", "72 mum"), ("pd_ok_sw", "swing aralığı")):
+            if f.get(key) is None:
+                continue
+            acc.setdefault((lab, "uygun" if f[key] else "uygun değil"), []).append((lv, res == "win"))
+    table = [["Tanım · grup", "W / L", "WR", "1. yarı WR", "2. yarı WR"]]
+    for lab in ("72 mum", "swing aralığı"):
+        for g in ("uygun", "uygun değil"):
+            xs = sorted(acc.get((lab, g), []), key=lambda x: x[0] or datetime.min)
+            if not xs:
+                continue
+            h = len(xs) // 2
+            wr = lambda v: f"%{100 * sum(1 for x in v if x[1]) / len(v):.0f}" if v else "-"
+            w = sum(1 for x in xs if x[1])
+            table.append([f"{lab} · {g}", f"{w} / {len(xs) - w}", wr(xs), wr(xs[:h]), wr(xs[h:])])
+    n = min((len(acc.get(("swing aralığı", g), [])) for g in ("uygun", "uygun değil")), default=0)
+    return Progress(bars=[Bar("swing aralığı — en küçük grup (çözülmüş)", n, 30)], table=table,
+                    note="uygun = demand alt yarıda (discount), supply üst yarıda (premium) · 4H / 1H sonuç LTF onay kolundan")
 
 
 async def _p_sd_near_obstacle(db: AsyncSession) -> Progress:
@@ -3359,6 +3486,33 @@ ITEMS: list[WatchItem] = [
         measure="/sd-izleme tablosu (Journal entries chosen ↔ zone_wick)",
         md="S/D bölge sınırı: gövde-fitil mi, fitil-fitil mi? (07.11.2026)",
         progress_fn=_p_sd_zone_wick,
+    ),
+    WatchItem(
+        key="sd_sweep_gate", status="open", started="07.11", onem=1, group="sd",
+        title="S/D LTF sweep şartı: sweep olmadan elenen bölgeler kazanan mı?",
+        trigger="4H + 1H'te sweep'siz elenen, sonucu belli 30 bölge: bölge limiti R/bölgede sweep gelenlerden ≥ 0,15 önde VE iki yarıda "
+                "aynı yön → sweep şartı gevşetilir (etikete döner); aksi halde şart kalır",
+        measure="/sd-izleme tablosu (Journal entries.sdc o = no_sweep ↔ sw_lv; sonuç satır outcome = bölge limiti)",
+        md="S/D LTF sweep + CHOCH yeniden tanımı (07.11.2026)",
+        progress_fn=_p_sd_sweep_gate,
+    ),
+    WatchItem(
+        key="sd_partial_be", status="open", started="07.11", onem=1, group="sd",
+        title="S/D 15m: TP yolunun %50'sinde yarısı kapansın + kalan BE mi?",
+        trigger="150 sonuçlanmış 15m işlem: kısmi + BE R/işlemde düz TP/SL'den ≥ 0,15 önde VE iki yarıda aynı yön → 15m'de açılır; "
+                "aksi halde düz TP/SL kalır (07.11 ilk okuma 73 işlemde −0,12 geride)",
+        measure="/sd-izleme tablosu (Journal shadow k=1 pa / cur)",
+        md="S/D 15m: %50 kısmi kâr + BE mi? (07.11.2026)",
+        progress_fn=_p_sd_partial_be,
+    ),
+    WatchItem(
+        key="sd_pd_compare", status="open", started="07.11", onem=1, group="sd",
+        title="S/D premium / discount: son 72 mum mu, swing aralığı mı?",
+        trigger="swing aralığı tanımında uygun / uygun değil gruplarının her biri 30 çözülmüş: hangi tanımda uygun − uygun değil WR farkı "
+                "daha büyük VE iki yarıda aynı yön → rozet o tanıma geçer; ikisi de ≥ 10 puan ayırırsa puan kalemi adayı",
+        measure="/sd-izleme tablosu (features pd_ok ↔ pd_ok_sw)",
+        md="S/D premium / discount: 72 mum mu, swing aralığı mı? (07.11.2026)",
+        progress_fn=_p_sd_pd_compare,
     ),
     WatchItem(
         key="sd_near_obstacle", status="open", started="06.11", onem=1, group="sd",

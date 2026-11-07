@@ -176,7 +176,7 @@ RADAR_STATE_META = {
     "sd_ready":       {"label": "Zone ready (all gates)",     "color": "green",  "rank": 0},
     "sd_low_rr":      {"label": "Low RR",                     "color": "yellow", "rank": 2},
     "sd_no_target":   {"label": "No target",                  "color": "yellow", "rank": 3},
-    "sd_far":         {"label": "Too far from price (> 4R)",  "color": "yellow", "rank": 3},
+    "sd_far":         {"label": "Too far from price (> 3R)",  "color": "yellow", "rank": 3},
     "sd_bias":        {"label": "1D bias opposite",           "color": "orange", "rank": 5},
     "sd_dead":        {"label": "Zone dead",                  "color": "dim",    "rank": 11},
 }

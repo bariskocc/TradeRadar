@@ -68,6 +68,8 @@ MAX_TOUCHES = 1              # bu kadar dokunusa kadar canli; fazlasi olu
 LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
 MAX_AGE_BARS = 60            # daha eski base'ler Journal'a yazilmaz (03.11 kullanici: 120 FX'te ~4 hafta, 12.10'lu bolgeler listedeydi -> 60)
 TARGET_SWING_K = 2           # hedef swing: 5'li fraktal
+# 07.11 (kullanici, XAUUSD 4H TP 4174.38 = 05.10 tepesi, 06.10'da alinmis; EURJPY 15m'de de): hedef yalniz alinmamis swing
+TARGET_UNTAKEN_ONLY = True
 MIN_RR = 2.0
 # 06.11 (kullanici, EURJPY 15m: "TP'si 1.7 falan olanlari 2'ye sabitle"): ilk anlamli engel RR FLOOR_RR_MIN..MIN_RR arasindaysa
 # TP = MIN_RR noktasi (`target_kind` "rr2"). Bunun altindaki ara engeller (04.11 NZDUSD RR 1.1, 03.11 XAUUSD 3924 RR 0.7) eskisi
@@ -75,7 +77,9 @@ MIN_RR = 2.0
 FLOOR_RR_MIN = 1.5
 # 03.11 (kullanici: "40R sacma, 3-4R'den fazlasi olmasin"): yapisal hedef (en yakin karsi bolge YA DA swing) MAX_RR'yi asarsa
 # TP = giris + MAX_RR x risk (`target_kind` "cap"); yapisal RR `features.rr_struct`'ta olculmeye devam eder.
-MAX_RR = 4.0
+# 07.11 (kullanici: "TP'yi max 3RR yapalim, 3 olunca islem TP olarak kapansin"): 4 -> 3, butun S/D TF'leri. Yapisal hedefe gercekten
+# gidildi mi: Journal golge kol "struct" (setup_journal._shadow_sd_struct; 4H/1H onay kolunda sdc.sh["struct"]).
+MAX_RR = 3.0
 # Girise uzaklik kapisi (`sd_far`): 03.11 kullanici -- 4R, 1.5 ATR stopla 6 ATR uzagi kabul ediyordu; fiyat oraya gunlerce donmuyor.
 MAX_DIST_R = 3.0
 # Hedef fiyatin hemen dibindeki swing olmasin (03.11 canli: BTC 1H SHORT hedefi son kapanisin %0.04 altindaki swing low'du, ilk
@@ -123,6 +127,9 @@ class SDZone:
     legout_body_atr: float = 0.0       # leg-out ilk mumunun govdesi / ATR (05.11, yakin kacan bolge olcumu)
     mss: bool = False                  # MSS: donus bolgesinin (DBR/RBD) kirilimi; devam bolgesinde ayni kirilim BOS (05.11)
     pd_pos: Optional[float] = None     # proximal'in PD_RANGE_BARS araligindaki yeri: 0 = dip, 1 = tepe (05.11)
+    # 07.11 (kullanici: "fiyat onceki onemli swing low ile swing high arasinda..."): ayni yer, aralik = base'ten onceki son genis
+    # fraktal tepe ve dip (her yanda MAJOR_SWING_K mum, PD_RANGE_BARS icinde). < 0 / > 1 = aralik disi. Yalniz OLCUM.
+    pd_pos_sw: Optional[float] = None
     # 07.11 (kullanici, XAUUSD 1D 27.08 doji base): 'fitil-fitil' cizimde proximal = base'in karsi fitili (demand tepe, supply dip)
     # -- yalniz OLCUM (Journal giris varyanti `zone_wick`), bolge/dokunus/plan proximal'i degismez.
     wick_prox: Optional[float] = None
@@ -158,7 +165,7 @@ class SDPlan:
     dist_r: Optional[float] = None      # son kapanisin girise uzakligi, R cinsinden (pozitif = giris henuz dolmadi)
     sl_liq: Optional[float] = None      # stopu iten alinmamis tepe/dip (05.11; None = itilmedi)
     sl_old: Optional[float] = None      # 06.11 oncesi plan (golge "old"): 1.5 ATR taban
-    tp_old: Optional[float] = None      # ... ve ilk RR >= 2 engel (4R tavanli); None = eski kuralda hedef yok
+    tp_old: Optional[float] = None      # ... ve ilk RR >= 2 engel (MAX_RR tavanli); None = eski kuralda hedef yok
     rr_old: Optional[float] = None
     obst_rr: Optional[float] = None     # 06.11 olcum: fiyatin otesindeki EN YAKIN engelin RR'si (atlansa da); < 1 -> izleme maddesi
     obst_kind: Optional[str] = None
@@ -298,6 +305,10 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
         w0 = max(0, bs - PD_RANGE_BARS + 1)
         rng_hi, rng_lo = float(h[w0:bs + 1].max()), float(l[w0:bs + 1].min())
         pd_pos = round((proximal - rng_lo) / (rng_hi - rng_lo), 3) if rng_hi > rng_lo else None
+        sw_hi = _last_swing_before(h, bs, "high", k=MAJOR_SWING_K, lookback=PD_RANGE_BARS, wing_end=j - 1)
+        sw_lo = _last_swing_before(l, bs, "low", k=MAJOR_SWING_K, lookback=PD_RANGE_BARS, wing_end=j - 1)
+        pd_pos_sw = (round((proximal - sw_lo) / (sw_hi - sw_lo), 3)
+                     if sw_hi is not None and sw_lo is not None and sw_hi > sw_lo else None)
         z = SDZone(
             side="demand" if up else "supply",
             direction="LONG" if up else "SHORT",
@@ -307,7 +318,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
             legout_atr=round(float(legout / a), 3), legin_atr=round(float(legin), 3),
             base_bars=int(j - bs), base_max_atr=round(float((h[bs:j] - l[bs:j]).max() / a), 3),
             fvg=bool(fvg), formed_iloc=int(formed), bos=bool(bos), sweep=bool(sweep),
-            sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos,
+            sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos, pd_pos_sw=pd_pos_sw,
             legout_body_atr=round(float(abs(body) / a), 3),
             wick_prox=float(base_hi if up else base_lo),
         )
@@ -390,15 +401,20 @@ def _prev_day_extreme(idx, vals: np.ndarray, end: int, kind: str) -> Optional[fl
         return None
 
 
-def _swing_levels(df: pd.DataFrame, kind: str, k: int = TARGET_SWING_K) -> list[float]:
+def _swing_levels(df: pd.DataFrame, kind: str, k: int = TARGET_SWING_K, untaken: bool = TARGET_UNTAKEN_ONLY) -> list[float]:
+    """Fraktal tepe / dipler. `untaken` (07.11): sonradan fiyatin gecmedigi (alinmamis) swing'ler -- alinmis swing likidite degil."""
     vals = (df["high"] if kind == "high" else df["low"]).to_numpy(dtype=float)
     out: list[float] = []
     n = len(vals)
     for i in range(k, n - k):
         left, right = vals[i - k:i], vals[i + 1:i + k + 1]
         if kind == "high" and vals[i] > left.max() and vals[i] > right.max():
+            if untaken and (vals[i + 1:] > vals[i]).any():
+                continue
             out.append(float(vals[i]))
         elif kind == "low" and vals[i] < left.min() and vals[i] < right.min():
+            if untaken and (vals[i + 1:] < vals[i]).any():
+                continue
             out.append(float(vals[i]))
     return out
 
@@ -530,7 +546,11 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         "pd_pos": z.pd_pos,
         # demand alt yarida (discount), supply ust yarida (premium)
         "pd_ok": None if z.pd_pos is None else (1 if ((z.pd_pos < 0.5) if z.side == "demand" else (z.pd_pos > 0.5)) else 0),
+        # 07.11: ayni kural swing araligiyla (olcum; /sd-izleme "S/D premium / discount: 72 mum mu, swing araligi mi?")
+        "pd_pos_sw": z.pd_pos_sw,
+        "pd_ok_sw": None if z.pd_pos_sw is None else (1 if ((z.pd_pos_sw < 0.5) if z.side == "demand" else (z.pd_pos_sw > 0.5)) else 0),
         "touches": z.touches,
+        "distal": float(z.distal),           # 07.11: LTF likidite bandi (sd_confirm, distal ile stop arasi)
         "in_zone": 1 if z.in_zone else 0,
         "dist_atr": round(float(dist), 3) if dist is not None else None,
         "age_bars": int(n_bars_since),

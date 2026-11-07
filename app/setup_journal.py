@@ -76,7 +76,7 @@ STAGES: list[tuple[str, str]] = [
     ("sd_dead", "S/D: zone dead (broken / 2+ touches)"),
     ("sd_bias", "S/D: 1D bias opposite"),
     ("sd_no_target", "S/D: no target (zone / swing)"),
-    ("sd_far", "S/D: zone too far (> 4R from price)"),
+    ("sd_far", "S/D: zone too far (> 3R from price)"),
     ("sd_low_rr", "S/D: RR < 2"),
     # 05.11: cikis govdesi 0.8-1 ATR (kural disi, kapilari gecti) -- olcum, Signals'a girmez
     ("sd_near", "S/D: near-miss zone (leg-out body 0.8–1 ATR)"),
@@ -234,7 +234,44 @@ def _shadow_init(rec: dict) -> dict | None:
     old = _shadow_sd_old(rec, e) if rec.get("strategy") in SD_FILL_REQUIRED_STRATEGIES else None
     if old is not None:
         out["old"] = old
+    st_ = _shadow_sd_struct(rec, e) if rec.get("strategy") in SD_FILL_REQUIRED_STRATEGIES else None
+    if st_ is not None:
+        out["struct"] = st_
     return out
+
+
+def _shadow_sd_struct(rec: dict, e: float, features: dict | None = None) -> dict | None:
+    """S/D 07.11 (kullanici): TP tavanli (`target_kind` cap, sd_engine.MAX_RR) satirda yapisal hedefe (swing / karsi bolge,
+    `features.tp_struct`) gercekten gidildi mi -- ayni giris + SL, kendi TP'si (`k` yok, "old" gibi). Tavan yoksa kol yok."""
+    f = features if features is not None else (rec.get("features") or {})
+    ts_, sl, tp = f.get("tp_struct"), rec.get("sl"), rec.get("tp")
+    if f.get("target_kind") != "cap" or ts_ is None or sl is None or tp is None or e == sl:
+        return None
+    long = rec.get("direction") == "LONG"
+    if not ((float(ts_) > float(tp)) if long else (float(ts_) < float(tp))):
+        return None
+    return {"k": None, "sl": float(sl), "tp": float(ts_), "rr": round(abs(float(ts_) - e) / abs(e - float(sl)), 4),
+            "o": "pending", "e": None, "at": None, "until": None}
+
+
+def _sd_struct_retarget(rec: dict, features: dict) -> bool:
+    """Dolmamis S/D satirinda TP yenilenince (SD_TP_UPDATE_STRATEGIES) "struct" kolu da o anki yapisal hedefe kurulur / kalkar."""
+    sh = rec.get("shadow")
+    if sh is None or rec.get("entry") is None:
+        return False
+    cur = sh.get("struct")
+    if cur is not None and cur.get("o") != "pending":
+        return False
+    new = _shadow_sd_struct(rec, float(rec["entry"]), features)
+    if new is None:
+        if cur is None:
+            return False
+        sh.pop("struct", None)
+        return True
+    if cur is not None and abs(cur["tp"] - new["tp"]) <= 1e-9 * max(1.0, abs(new["tp"])) and abs(cur["sl"] - new["sl"]) <= 1e-12:
+        return False
+    sh["struct"] = new
+    return True
 
 
 def _shadow_sd_old(rec: dict, e: float) -> dict | None:
@@ -921,7 +958,7 @@ def _apply_shadow(rec: dict, bar_ts, high: float, low: float) -> None:
     for v in rec["shadow"].values():
         if v["o"] not in TRACKING or (v.get("until") is not None and bar_ts <= v["until"]):
             continue
-        if v.get("tp") is not None:                  # kendi TP'si olan kol (S/D "old")
+        if v.get("tp") is not None:                  # kendi TP'si olan kol (S/D "old", "struct")
             hit_tp = high >= v["tp"] if long else low <= v["tp"]
         else:
             hit_tp = high >= tp if long else low <= tp
@@ -1374,6 +1411,9 @@ def note(
             changed = True
         if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in ("sd_ready", "sd_near")
                 and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None and _sd_old_retarget(rec, features)):
+            changed = True
+        if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in ("sd_ready", "sd_near")
+                and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None and _sd_struct_retarget(rec, features)):
             changed = True
         if entry is not None and sl is not None and tp is not None and rec.get("levels_at") is None:
             # Ilk gorulen seviyeler dondurulur: sonuc izleme bunlarla yapilir.

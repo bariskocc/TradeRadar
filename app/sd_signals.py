@@ -44,13 +44,14 @@ STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), 
 # 05.11 (kullanici): ana giris LTF onay + retest olan stratejiler (sd_confirm kolu olanlar)
 MAIN_CONFIRM = tuple(sd_confirm.STRATEGIES)
 # 05.11 (kullanici): sonuc ve LTF onay sonucu filtreleri -- filtre -> eslesen outcome kumesi
-RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / no retest / RR < 2)"),
+RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / no sweep / no retest / RR < 2)"),
                   ("week_close", "Week close"), ("expired", "Expired"), ("other", "Same bar / missed")]
-_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed", "low_rr", "rr_wait"}, "week_close": {"week_close"},
+_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed", "low_rr", "rr_wait", "no_sweep"}, "week_close": {"week_close"},
                "expired": {"no_touch", "open", "no_choch"}, "other": {"ambiguous", "tp_before_entry", "unmeasured"}}
-CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_retest", "No retest"), ("low_rr", "RR < 2"),
+CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_sweep", "No LTF sweep"), ("no_retest", "No retest"),
+                   ("low_rr", "RR < 2"),
                    ("waiting", "Waiting / in trade"), ("none", "No touch yet")]
-_CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
+_CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed"}, "no_sweep": {"no_sweep"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
                 "low_rr": {"low_rr", "rr_wait"}, "waiting": {"wait_choch", "wait_retest", "filled"}, "none": {None}}
 
 # outcome -> (durum sekmesi, etiket, renk, "sonuc" etiketi, sonuc rengi)
@@ -72,6 +73,8 @@ _OUTCOME = {
     "failed":          ("closed",  "No trade",        "gray",   "Zone failed",     "gray"),
     "missed":          ("closed",  "No trade",        "gray",   "No retest",       "yellow"),
     "no_choch":        ("closed",  "Expired",         "gray",   "No CHOCH",        "gray"),
+    # 07.11 (kullanici): 4H / 1H'te LTF likiditesi alinmadan CHOCH aranmaz -- ufukta sweep yoksa islem yok
+    "no_sweep":        ("closed",  "No trade",        "gray",   "No LTF sweep",    "gray"),
     # 06.11 (kullanici): CHOCH geldi ama hicbir giris adayi RR >= 2 vermedi -- islem yok (adaylar olculmeye devam)
     "rr_wait":         ("closed",  "No trade",        "gray",   "RR < 2",          "gray"),
     "low_rr":          ("closed",  "No trade",        "gray",   "RR < 2",          "gray"),
@@ -171,16 +174,25 @@ def _confirm_trade(r: SetupJournal, sdc: dict) -> dict:
     if o in (None, "pre"):
         oc = row_oc if row_oc in ("pending", "no_touch") else "unmeasured"   # dolmus / kapanmis ama onay izi yok (05.11 oncesi)
         return {"oc": oc, **zone}
-    if o in ("wait_choch", "failed", "no_choch"):
+    if o in ("wait_choch", "failed", "no_choch", "no_sweep"):
         return {"oc": o, **zone}
     sl = sdc.get("sl")
     if sdc.get("e") is not None:
-        return {"oc": o, "entry": float(sdc["e"]), "sl": sl, "rr": sdc.get("rr"), "kind": "trade"}
+        return {"oc": o, "entry": float(sdc["e"]), "sl": sl, "rr": sdc.get("rr"), "kind": "trade", "tp": sdc.get("tp")}
     pend = [v for v in (sdc.get("vars") or {}).values() if v.get("o") == "pending"] or list((sdc.get("vars") or {}).values())
     if pend:                                     # CHOCH sonrasi: fiyata en yakin aday ilk dolacak olan
         v = max(pend, key=lambda x: x["e"]) if long else min(pend, key=lambda x: x["e"])
-        return {"oc": o, "entry": float(v["e"]), "sl": sl, "rr": v.get("rr"), "kind": "trade"}
+        return {"oc": o, "entry": float(v["e"]), "sl": sl, "rr": v.get("rr"), "kind": "trade", "tp": v.get("tp")}
     return {"oc": o, **zone}
+
+
+def _wc_result(r: float) -> tuple[str, str]:
+    """Hafta kapanisi sonucu R'nin isaretinden: (etiket, renk)."""
+    if r > 0:
+        return "Week close · Win", "green"
+    if r < 0:
+        return "Week close · Loss", "red"
+    return "Week close · BE", "gray"
 
 
 def _row_view(r: SetupJournal, price_fn) -> dict:
@@ -196,6 +208,8 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
     if confirm_main:
         ct = _confirm_trade(r, sdc)
         oc, entry, sl, rr, lv_kind = ct["oc"], ct["entry"], ct["sl"], ct["rr"], ct["kind"]
+        if ct.get("tp") is not None:              # 07.11: onay isleminin kendi (3R tavanli) TP'si
+            tp = float(ct["tp"])
         filled_ts = _ts(sdc.get("t")) if lv_kind == "trade" else None
         closed_ts = _ts(sdc.get("at"))
     else:
@@ -205,6 +219,8 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
     tab, status_label, status_color, result_label, result_color = _OUTCOME.get(oc, _OUTCOME["pending"])
     if confirm_main and oc == "pending":
         status_label = "Waiting zone"            # bolgeye dokunus = uyari, emir degil
+    if confirm_main and oc == "wait_choch" and "sw_lv" in sdc and not sdc.get("sw_lv"):
+        status_label = "Waiting LTF sweep"       # 07.11: once likidite alinmali
     price = price_fn(r.symbol) if tab in ("waiting", "filled") else None
     live_r = dist_r = None
     if price is not None and entry is not None and risk > 0:
@@ -221,6 +237,16 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
         final_r = _limit_final_r(r, ents) if tab == "closed" else None
         if oc == "unmeasured":
             final_r = None
+    # 07.11 (kullanici, GBPCHF 4H SHORT +2,2R): Cuma kapanisi R'nin isaretine gore kazanc / kayip gorunur ve sayilir
+    # (CRT'nin week_close kurali gibi); etiket "TP" olmaz -- TP'ye degmedi.
+    if oc == "week_close" and final_r is not None:
+        result_label, result_color = _wc_result(final_r)
+    # Hedef rozeti: 15m / onay oncesi satirin plani; onay isleminde kendi tavani (07.11 -- yapisal hedef `tps`, RR `rs`)
+    tgt_kind, tgt_rs = f.get("target_kind"), f.get("rr_struct")
+    if confirm_main and lv_kind == "trade" and sdc.get("tps") is not None and tp is not None:
+        v_ = next((v for v in (sdc.get("vars") or {}).values() if v.get("e") == entry), {})
+        capped = abs(float(sdc["tps"]) - float(tp)) > 1e-9 * max(1.0, abs(float(tp)))
+        tgt_kind, tgt_rs = ("cap", v_.get("rs")) if capped else (None, None)
     touches = f.get("touches")
     zt = r.model or f.get("zone_type") or "?"
     c_o = sdc.get("o")
@@ -243,9 +269,11 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
         "fresh": None if touches is None else int(touches) == 0,
         "bos": bool(f.get("bos")), "sweep": bool(f.get("sweep")), "fvg": bool(f.get("fvg")),
         "mss": bool(f.get("mss")), "sweep_kind": f.get("sweep_kind"),
-        "ltf_sweep": int(sdc.get("sw") or 0), "ltf_swept": sdc.get("swp") or [], "pd_ok": f.get("pd_ok"), "pd_pos": f.get("pd_pos"),
+        "ltf_sweep": int(sdc.get("sw") or 0), "ltf_swept": sdc.get("swp") or [],
+        # 07.11 (kullanici): sweep sonrasi LTF CHOCH displacement'la geldiyse etiket (filtre degil)
+        "ltf_disp": sd_confirm.is_disp(sdc), "ltf_disp_x": sdc.get("bdisp"), "pd_ok": f.get("pd_ok"), "pd_pos": f.get("pd_pos"),
         "score": int(r.score) if r.score is not None else None,
-        "entry": entry, "sl": sl, "tp": tp, "rr": rr, "rr_struct": f.get("rr_struct"), "target_kind": f.get("target_kind"),
+        "entry": entry, "sl": sl, "tp": tp, "rr": rr, "rr_struct": tgt_rs, "target_kind": tgt_kind,
         "price": price, "live_r": live_r, "dist_r": dist_r, "final_r": final_r,
         "tab": tab, "status_label": status_label, "status_color": status_color,
         "result_label": result_label, "result_color": result_color, "outcome": oc,
@@ -317,16 +345,21 @@ async def build_sd_signals(
             s["sl"] += 1
             s["r"] -= 1.0
         elif v["outcome"] == "week_close":
-            s["r"] += float(v["final_r"] or 0)
-        elif v["outcome"] in ("failed", "missed", "low_rr", "rr_wait"):
+            wr_ = float(v["final_r"] or 0)
+            s["r"] += wr_
+            if wr_ > 0:                           # 07.11: karda kapanan hafta = kazanc, zararda = kayip (WR'ye girer)
+                s["tp"] += 1
+            elif wr_ < 0:
+                s["sl"] += 1
+        elif v["outcome"] in ("failed", "missed", "low_rr", "rr_wait", "no_sweep"):
             s["no_trade"] += 1
         elif v["tab"] != "closed":
             s["open"] += 1
         lim = v["limit"]
         if lim:                                   # bolge limiti olcum kolu
-            if lim["o"] == "win":
+            if lim["o"] == "win" or (lim["o"] == "week_close" and (lim["r"] or 0) > 0):
                 s["l_tp"] += 1
-            elif lim["o"] == "loss":
+            elif lim["o"] == "loss" or (lim["o"] == "week_close" and (lim["r"] or 0) < 0):
                 s["l_sl"] += 1
             if lim["o"] in ("win", "loss", "week_close"):
                 s["l_r"] += float(lim["r"] or 0)
@@ -338,8 +371,8 @@ async def build_sd_signals(
     # 06.11 (kullanici): islemsiz satirlar (CHOCH'tan once bolge bozuldu / retest gelmedi) tabloda kalabalik -- gizli; ozet onlari
     # sayar (bolge limiti kiyasi), Result = No trade ya da LTF confirm = Zone failed / No retest secilince gorunur.
     hidden = 0
-    if result != "no_trade" and confirm not in ("failed", "no_retest", "low_rr"):
-        shown = [v for v in views if v["outcome"] not in ("failed", "missed", "low_rr", "rr_wait")]
+    if result != "no_trade" and confirm not in ("failed", "no_retest", "low_rr", "no_sweep"):
+        shown = [v for v in views if v["outcome"] not in ("failed", "missed", "low_rr", "rr_wait", "no_sweep")]
         hidden, views = len(views) - len(shown), shown
     counts = {k: 0 for k, _ in STATUS_FILTERS}
     for v in views:

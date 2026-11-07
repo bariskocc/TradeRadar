@@ -40,13 +40,13 @@
                     <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
                         <span class="text-lg font-bold {% if s.r > 0 %}text-green-400{% elif s.r < 0 %}text-red-400{% else %}text-white{% endif %}">{{ '%+.2f'|format(s.r) }}R</span>
                         <span class="text-xs text-gray-400">{{ s.n }} signal{% if s.n != 1 %}s{% endif %}</span>
-                        <span class="text-xs"><span class="text-green-400 font-semibold">{{ s.tp }} TP</span> · <span class="text-red-400 font-semibold">{{ s.sl }} SL</span>{% if s.wr is not none %} · WR {{ s.wr }}%{% endif %}</span>
+                        <span class="text-xs"><span class="text-green-400 font-semibold">{{ s.tp }} W</span> · <span class="text-red-400 font-semibold">{{ s.sl }} L</span>{% if s.wr is not none %} · WR {{ s.wr }}%{% endif %}</span>
                         <span class="text-xs text-gray-500">{{ s.open }} open{% if s.confirm_main %} · {{ s.no_trade }} no trade{% endif %}</span>
                     </div>
                     {% if s.confirm_main %}
                     <div class="mt-1 text-xs text-gray-400" title="Same zones, old entry: limit at the proximal edge, zone stop (measurement only)">
                         Zone limit (old entry): <span class="font-semibold {% if s.l_r > 0 %}text-green-400{% elif s.l_r < 0 %}text-red-400{% else %}text-gray-300{% endif %}">{{ '%+.2f'|format(s.l_r) }}R</span>
-                        · {{ s.l_tp }} TP · {{ s.l_sl }} SL
+                        · {{ s.l_tp }} W · {{ s.l_sl }} L
                     </div>
                     {% endif %}
                 </div>
@@ -152,8 +152,8 @@
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out: R = rally, D = drop (RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in) · hover for the full name · Fresh = untouched when the signal formed">ZONE</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="MSS = reversal zone (DBR / RBD) broke the last swing · BOS = the same break in a continuation zone · HTF sweep = base took the main liquidity (wide swing / EQ = equal lows-highs / PDL-PDH; a minor swing alone is not counted) · LTF sweep = the pullback into the zone took LTF swing lows / highs formed since the base (extra confirmation; with it a far CHOCH swing falls back to the nearest short swing) · Discount / Premium = zone in the lower / upper half of the last 72 candles · FVG left by the leg-out">KEY LEVEL</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
-                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="4H / 1H: before the CHOCH the zone's levels (tagged 'zone'), after it the retest candidate nearest to price and the CHOCH stop (pullback extreme + 10% buffer) · 15m: proximal edge / distal edge + 0.1 ATR · TP = nearest obstacle, capped at 4R">ENTRY / SL / TP</th>
-                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 4R, TP capped">R:R</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="4H / 1H: before the CHOCH the zone's levels (tagged 'zone'), after it the retest candidate nearest to price and the CHOCH stop (pullback extreme + 10% buffer) · 15m: proximal edge / distal edge + 0.1 ATR · TP = nearest obstacle (opposite zone / untaken swing), capped at 3R of the trade's own risk">ENTRY / SL / TP</th>
+                            <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 3R, TP capped (whether price reached the structural target is tracked)">R:R</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="After the fill: TP or SL first · No trade = zone failed before the CHOCH, no retest came or no entry candidate gave RR ≥ 2">RESULT</th>
@@ -178,10 +178,11 @@
                             <td class="px-2 py-2 text-[10px] whitespace-nowrap">
                                 {% if r.mss %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-blue bg-accent-blue/10" title="Reversal zone: leg-out broke the last swing (market structure shift)">MSS</span>{% elif r.bos %}<span class="px-1.5 py-0.5 rounded font-bold text-gray-300 bg-dark-600" title="Continuation zone: leg-out broke the last swing">BOS</span>{% endif %}
                                 {% if r.sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="HTF sweep — base took the main liquidity: {{ r.sweep_kind or 'major' }}">HTF sweep</span>{% endif %}
-                                {% if r.ltf_sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="LTF sweep — the pullback took {{ r.ltf_sweep }} LTF swing(s) formed since the base: {{ r.ltf_swept|join(' · ') }}">LTF sweep</span>{% endif %}
+                                {% if r.ltf_sweep %}<span class="px-1.5 py-0.5 rounded font-bold text-amber-400 bg-amber-500/10" title="LTF sweep — the pullback took {{ r.ltf_sweep }} LTF liquidity low(s)/high(s) beyond the zone (major swing or equal lows): {{ r.ltf_swept|join(' · ') }}">LTF sweep</span>{% endif %}
+                                {% if r.ltf_disp %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-blue bg-accent-blue/10" title="LTF displacement — the CHOCH candle's body is {{ '%.2f'|format(r.ltf_disp_x) }}× the avg LTF candle (≥ 1.5×) — label only, not a filter">LTF disp</span>{% endif %}
                                 {% if r.pd_ok == 1 %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10" title="Demand in discount / supply in premium of the last 72 candles (position {{ r.pd_pos }})">{{ 'Discount' if r.direction == 'LONG' else 'Premium' }}</span>{% endif %}
                                 {% if r.fvg %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10">FVG</span>{% endif %}
-                                {% if not (r.bos or r.sweep or r.ltf_sweep or r.fvg or r.pd_ok == 1) %}<span class="text-gray-600">—</span>{% endif %}
+                                {% if not (r.bos or r.sweep or r.ltf_sweep or r.ltf_disp or r.fvg or r.pd_ok == 1) %}<span class="text-gray-600">—</span>{% endif %}
                             </td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
@@ -206,7 +207,7 @@
                             </td>
                             <td class="px-2 py-2 text-xs whitespace-nowrap">
                                 {% if r.limit %}
-                                <span class="{% if r.limit.o == 'win' %}text-green-400 font-bold{% elif r.limit.o == 'loss' %}text-red-400{% elif r.limit.o == 'filled' %}text-accent-blue{% else %}text-gray-400{% endif %}" title="Limit {{ r.zone_entry_s }}">{{ r.limit.label }}</span>
+                                <span class="{% if r.limit.o == 'win' or (r.limit.o == 'week_close' and (r.limit.r or 0) > 0) %}text-green-400 font-bold{% elif r.limit.o == 'loss' or (r.limit.o == 'week_close' and (r.limit.r or 0) < 0) %}text-red-400{% elif r.limit.o == 'filled' %}text-accent-blue{% else %}text-gray-400{% endif %}" title="Limit {{ r.zone_entry_s }}">{{ r.limit.label }}</span>
                                 {% if r.limit.r is not none and r.limit.o in ('win', 'loss', 'week_close') %}<span class="ml-1 font-mono {% if r.limit.r > 0 %}text-green-400{% elif r.limit.r < 0 %}text-red-400{% endif %}">{{ '%+.2f'|format(r.limit.r) }}R</span>{% endif %}
                                 {% else %}<span class="text-gray-600">—</span>{% endif %}
                             </td>

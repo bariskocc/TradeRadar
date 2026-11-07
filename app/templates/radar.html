@@ -112,7 +112,7 @@
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">1D Bias</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="strength + base + fvg + fresh + 1D bias (max 9) — measurement only">Score</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Entry = proximal edge, SL = distal edge + 0.1 ATR">Entry / SL</th>
-                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Nearest obstacle: opposite live zone or swing beyond price; capped at 4R (cap)">Target</th>
+                                <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Nearest obstacle: opposite live zone or untaken swing beyond price; capped at 3R (cap)">Target</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap">RR</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Distance from last close to the proximal edge, in ATR">Dist</th>
                                 <th class="text-left font-semibold px-2 py-2 whitespace-nowrap" title="Open time of the first base candle (TSİ)">Formed</th>
@@ -236,10 +236,11 @@ function sdRow(s, badge) {
     const ctx = idle ? dash : ([d.mss ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="Reversal zone: leg-out broke the last swing (market structure shift)">MSS</span>'
                                      : (d.bos ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-gray-300 bg-dark-600" title="Continuation zone: leg-out broke the last swing">BOS</span>' : ''),
                                d.sweep ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="HTF sweep — base took the main liquidity: ${d.sweep_kind || 'major'}">HTF sweep</span>` : '',
-                               d.ltf_sweep ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="LTF sweep — the pullback took ${d.ltf_sweep} LTF swing(s) formed since the base">LTF sweep</span>` : ''].filter(Boolean).join(' ') || dash);
+                               d.ltf_sweep ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="LTF sweep — the pullback took ${d.ltf_sweep} LTF liquidity low(s)/high(s) beyond the zone">LTF sweep</span>` : '',
+                               d.ltf_disp ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="LTF CHOCH came with displacement — label only">LTF disp</span>` : ''].filter(Boolean).join(' ') || dash);
     const score = s.score != null ? `${s.score}` : dash;
     const lv = s.entry ? `<span class="text-white">${s.entry}</span> / <span class="text-red-400">${s.sl}</span>` : dash;
-    const target = s.tp ? `<span class="text-green-400">${s.tp}</span> <span class="text-[10px] text-gray-500" title="${d.target_kind === 'cap' ? 'Structural target beyond 4R — TP capped at 4R (structural RR ' + d.rr_struct + ')' : (d.target_kind === 'zone' ? 'Nearest opposite live zone' : (d.target_kind === 'rr2' ? 'Nearest obstacle gives RR < 2 (' + d.rr_struct + ') — TP set at 2R' : 'Nearest swing beyond price'))}">${d.target_kind || ''}</span>` : dash;
+    const target = s.tp ? `<span class="text-green-400">${s.tp}</span> <span class="text-[10px] text-gray-500" title="${d.target_kind === 'cap' ? 'Structural target beyond 3R — TP capped at 3R (structural RR ' + d.rr_struct + ')' : (d.target_kind === 'zone' ? 'Nearest opposite live zone' : (d.target_kind === 'rr2' ? 'Nearest obstacle gives RR < 2 (' + d.rr_struct + ') — TP set at 2R' : 'Nearest swing beyond price'))}">${d.target_kind || ''}</span>` : dash;
     const dist = d.dist_atr != null ? `${d.dist_atr.toFixed(1)} ATR` : dash;
     const zones = d.n_live != null ? ` <span class="text-[10px] text-gray-500" title="live zones / all zones in window">${d.n_live}/${d.n_zones}</span>` : '';
     return `<tr class="border-b border-dark-700/50 hover:bg-dark-700/30 transition">

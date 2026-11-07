@@ -36,7 +36,7 @@ CANDIDATES = [
 GATES = [
     ("sd_dead", "Ölü bölge", "2+ dokunuş ya da distal kırıldı"),
     ("sd_bias", "1D bias ters", "KAPALI (04.11) — eski satırlar"),
-    ("sd_no_target", "Hedef yok", "fiyatın ötesinde karşı bölge / swing yok (son kapanıştan ≥ 0,5 ATR)"),
+    ("sd_no_target", "Hedef yok", "fiyatın ötesinde karşı bölge / alınmamış swing yok (son kapanıştan ≥ 0,5 ATR)"),
     ("sd_far", "Fiyata uzak", f"giriş > {sde.MAX_DIST_R:g}R uzak — seviye yazılmaz"),
     ("sd_low_rr", "RR düşük", f"RR < {sde.MIN_RR:g} (hedef en yakın engel, tavan {sde.MAX_RR:g}R)"),
     ("sd_near", "Yakın kaçan bölge", "çıkış gövdesi 0,8–1 ATR, kapıları geçti — ölçüm, Signals'a girmez (05.11)"),
@@ -111,7 +111,7 @@ async def build_sd_score_table(db: AsyncSession, tf: str) -> dict:
         "tf": tf, "tfs": TFS, "tf_label": dict(TFS)[tf], "items": item_rows, "total": total, "gates": gate_rows,
         "n_rows": len(rows), "n_resolved": len(resolved),
         "plan": {"entry": "proximal kenar (limit); ölçümde %50 ve distal da izlenir", "sl": f"distal + {sde.SL_BUFFER_ATR:g} ATR, risk en az {sde.MIN_RISK_ATR:g} ATR (ATR = pariteye göre ölçek); gölgede ×0,67 / ×1,33, bölge stopu ve eski plan ({sde.OLD_MIN_RISK_ATR:g} ATR)",
-                 "tp": f"en yakın engel (karşı bölge / swing, son kapanıştan ≥ {sde.TARGET_MIN_BEYOND_ATR:g} ATR), engel RR < {sde.MIN_RR:g} ise TP = {sde.MIN_RR:g}R noktası, tavan {sde.MAX_RR:g}R; dolum öncesi güncellenir",
+                 "tp": f"en yakın engel (karşı bölge / alınmamış swing, son kapanıştan ≥ {sde.TARGET_MIN_BEYOND_ATR:g} ATR), engel RR < {sde.MIN_RR:g} ise TP = {sde.MIN_RR:g}R noktası, tavan {sde.MAX_RR:g}R; dolum öncesi güncellenir",
                  "base": f"≤ {sde.BASE_MAX_BARS} mum, gövde ≤ {sde.BASE_MAX_BODY_ATR:g} ATR", "legout": f"ilk mum gövdesi ≥ {sde.LEG_BODY_MIN_ATR:g} ATR, {sde.LEG_OUT_BARS} mumda ≥ {sde.LEG_OUT_MIN_ATR:g} ATR",
                  "age": f"base ≤ {sde.MAX_AGE_BARS} mum", "touch": f"dokunuş koşusu {sde.TOUCH_EXIT_ATR:g} ATR uzaklaşınca biter; 2+ dokunuş ölü"},
     }

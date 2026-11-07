@@ -21,7 +21,10 @@ Akis (LONG; SHORT simetrik):
        ifvg -- dususun biraktigi dusus FVG'si, CHOCH kapanisi ust kenarinin ustunde (invert), ust kenar (en yakini)
        cisd -- `lo`'ya inen son dusus blogunun ilk mumunun acilisi
        mss  -- kirilan swing tepe
-     Ortak SL = lo - SL_BUFFER_FRAC x (mss - lo); TP satirin TP'si. FVG / IFVG boslugu >= MIN_GAP_FRAC x son 20 LTF mumunun
+     Ortak SL = satirin bolge plani stopu (07.11, kullanici -- XAUUSD 4H: dip stopu 0.54 ATR, RR 6.16, stop oldu; bolge stopuyla
+     Cuma +0.4R). Eski dip stopu (lo - SL_BUFFER_FRAC x (mss - lo)) `sl_dip`'te, golge kol "dip". TP = yapisal hedef (`tps`: satir
+     tavanliysa features.tp_struct, degilse satirin TP'si), her adayda kendi riskinin sd_engine.MAX_RR katiyla tavanli (`vars[k].tp`,
+     07.11); tavanli islemde yapisal hedefe gidildi mi golge "struct". FVG / IFVG boslugu >= MIN_GAP_FRAC x son 20 LTF mumunun
      ortalama boyu (05.11 -- CRT'deki MIN_IFVG_GAP_RANGE_FRAC; INJ / KAS'ta tek tick'lik bosluk aday oluyordu).
   4. Her aday: girise donmeden TP -> kacti; dolum -> TP / SL. Sayfadaki hikaye "ilk dolan" adaydan (ayni mumda sira fvg, ifvg,
      cisd, mss): hangi bolgeden retest geldi, sonra ne oldu. Hicbir aday dolmadan TP -> `missed` (no retest, price left).
@@ -53,19 +56,21 @@ DISP_STRONG = 1.0                # CHOCH displacement esigi (ort. LTF mum boyu k
 MIN_RR = 2.0                     # islem acilan aday en az bu RR (06.11; bolge planiyla ayni)
 BE_ARM_R = 1.0                   # golge be1r: +1R gorulunce SL girise
 BE_ARM_TP_FRAC = 0.5             # golge be50: TP yolunun %50'si (CRT be_arm_tp_fraction)
-SHADOWS = ("zs", "be1r", "be50")
-SHADOW_LABEL = {"zs": "zone stop", "be1r": "BE at +1R", "be50": "BE at 50% to TP"}
+# 07.11 (kullanici): ana stop satirin bolge plani stopu (`stop` = "zone"); False -> 06.11'e kadarki dip stopu
+ZONE_STOP_MAIN = True
+SHADOWS = ("dip", "zs", "be1r", "be50", "struct")
+SHADOW_LABEL = {"dip": "dip stop", "zs": "zone stop", "be1r": "BE at +1R", "be50": "BE at 50% to TP", "struct": "structural target"}
 LIQ_SEED_CAP = 40                # features.ltf_liq: en fazla bu kadar swing (en yenileri)
 MIN_GAP_FRAC = 0.15              # FVG / IFVG en kucuk bosluk: son 20 LTF mumunun ort. boyu x bu (05.11)
 GAP_AVG_BARS = 20
 VARIANTS = ("fvg", "ifvg", "cisd", "mss")
 VARIANT_LABEL = {"fvg": "FVG", "ifvg": "IFVG", "cisd": "CISD", "mss": "MSS level"}
-FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "open", "week_close", "low_rr")
+FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "no_sweep", "open", "week_close", "low_rr")
 LABELS = {
     "pre": "—", "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — waiting retest", "filled": "Retest — in trade",
     "win": "Worked", "loss": "Zone failed after CHOCH", "ambiguous": "Same bar (?)", "missed": "No retest — price left",
     "failed": "Zone failed before CHOCH", "no_touch": "No retest in horizon", "no_choch": "No CHOCH in horizon",
-    "open": "Open at horizon", "week_close": "Closed at week end",
+    "open": "Open at horizon", "week_close": "Closed at week end", "no_sweep": "No LTF sweep — no trade",
     "rr_wait": "CHOCH — RR < 2, no trade", "low_rr": "CHOCH — RR < 2, no trade",
 }
 
@@ -169,6 +174,206 @@ def _ltf_sweep(rec: dict, st: dict, long: bool) -> list:
     return out
 
 
+# --- 07.11 LTF sweep + CHOCH (kullanici, XAUUSD 4H 18174) ----------------------------------------------------------------
+# Likidite (LONG; SHORT simetrik): bolgenin ALTINDA, distal ile satirin stopu arasindaki alinmamis LTF dipleri -- her yanda LIQ_K
+# mum (HTF MAJOR_SWING_K gibi) ya da esit dipler (her yanda EQ_K mum, fark <= EQ_TOL_FRAC x ort. LTF mum boyu, ikincisi birinciyi
+# almamis). Base mumlarinin icindekiler sayilmaz; base'ten LIQ_PRE_HTF HTF mumu oncesinden aranir (tohum `features.ltf_liq2`,
+# sd_scanner), dokunustan sonraki tepkide olusan dipler de sayilir. Sweep = bir LTF mumu boyle bir dibin altina iner. CHOCH seviyesi
+# = son alinan likidite dibi (dokunustan onceyse dokunus) ile sweep dibi arasindaki en yuksek tepe; kapanis bunun ustunde -> CHOCH.
+# Sweep olmadan CHOCH aranmaz (ufukta `no_sweep`). Eski akis (`SWEEP_CHOCH = False`): ilk 3'lu swing kirilimi + kisa swing yedegi.
+SWEEP_CHOCH = True
+# 07.11 (kullanici, CADJPY 4H 28.10 base dibi): bolgenin kendi dibi (distal = base'in en dusuk fitili) de likidite (k = LIQ_K)
+BASE_LOW_LIQ = True
+# 07.11 (kullanici, CADJPY 4H: 15m CHOCH yavas, kucuk mumlarla geldi): LTF displacement = CHOCH'u yapan (seviyenin otesinde kapanan)
+# mumun govdesi >= CHOCH_DISP_MIN x son GAP_AVG_BARS mumun ort. boyu (`sdc.bdisp`). Yalniz etiket; eski `disp` (hamledeki en buyuk
+# govde) olcum olarak kaliyor -- 1.0 esiginde yavas kirilimlari da displacement sayiyordu.
+CHOCH_DISP_MIN = 1.5
+LIQ_K = 5
+EQ_K = 2
+EQ_TOL_FRAC = 0.2
+LIQ_PRE_HTF = 8
+LIQ2_CAP = 60
+HTF_OF = {"sd": timedelta(hours=4), "sd1h": timedelta(hours=1)}
+
+
+def _is_piv(vals: list, i: int, long: bool, k: int) -> bool:
+    if i - k < 0 or i + k >= len(vals):
+        return False
+    x = vals[i]
+    side = vals[i - k:i] + vals[i + 1:i + k + 1]
+    return all(x < y for y in side) if long else all(x > y for y in side)
+
+
+def ltf_liq2(df, base_start, base_end, until, long: bool, stop: float, distal: float, htf: timedelta) -> list:
+    """sd_scanner tohumu (07.11, `features.ltf_liq2`): base'ten LIQ_PRE_HTF HTF mumu once ile `until` arasindaki kapanmis LTF
+    mumlarindan bolgenin altindaki (distal ile stop arasi) dipler -> [[iso, fiyat, ilk_alan_mum_iso | None, k]] (k = LIQ_K ya da EQ_K).
+    Base mumlarinin (base_start .. base_end) icindekiler yok."""
+    if df is None or len(df) == 0:
+        return []
+    import pandas as pd
+    idx = df.index.tz_convert(None) if getattr(df.index, "tz", None) is not None else df.index
+    t0 = pd.Timestamp(_naive(base_start)) - LIQ_PRE_HTF * htf
+    m = (idx >= t0) & (idx < pd.Timestamp(_naive(until)))
+    if not m.any():
+        return []
+    sub = idx[m]
+    vals = [float(x) for x in (df["low"] if long else df["high"]).to_numpy()[m]]
+    b0, b1 = pd.Timestamp(_naive(base_start)), pd.Timestamp(_naive(base_end))
+    out = []
+    if BASE_LOW_LIQ:                              # base'in kendi dibi / tepesi = distal
+        ib = [i for i in range(len(vals)) if b0 <= sub[i] < b1]
+        if ib:
+            i = min(ib, key=lambda j: vals[j]) if long else max(ib, key=lambda j: vals[j])
+            p = vals[i]
+            tk = next((sub[j] for j in range(i + 1, len(vals)) if ((vals[j] < p) if long else (vals[j] > p))), None)
+            out.append([sub[i].isoformat(), round(p, 10), tk.isoformat() if tk is not None else None, LIQ_K])
+    for i in range(EQ_K, len(vals) - EQ_K):
+        p = vals[i]
+        if not _is_piv(vals, i, long, EQ_K) or (b0 <= sub[i] < b1):
+            continue
+        if not ((stop < p < distal) if long else (distal < p < stop)):
+            continue
+        k = LIQ_K if _is_piv(vals, i, long, LIQ_K) else EQ_K
+        tk = next((sub[j] for j in range(i + 1, len(vals)) if ((vals[j] < p) if long else (vals[j] > p))), None)
+        out.append([sub[i].isoformat(), round(p, 10), tk.isoformat() if tk is not None else None, k])
+    out.sort(key=lambda x: x[0])
+    return out[-LIQ2_CAP:]
+
+
+def _liq_pool(rec: dict, st: dict, long: bool, bars: list) -> list:
+    """Bolgenin altindaki likidite dipleri: [(iso, fiyat, k)] -- tohum (tamponun ilk LIQ_K mumundan oncekiler) + tampon."""
+    f = rec.get("features") or {}
+    distal, stop = f.get("distal"), float(rec["sl"])
+    if distal is None or not bars:
+        return []
+    distal = float(distal)
+    htf = HTF_OF.get(rec.get("strategy"), timedelta(hours=4))
+    b_lo = _dt(rec["purge_time"]) if rec.get("purge_time") is not None else None
+    b_hi = b_lo + int(f.get("base_bars") or 1) * htf if b_lo is not None else None
+    bk = bars[min(LIQ_K, len(bars) - 1)][0]
+    b0 = bars[0][0]
+    out = {}
+    for it in f.get("ltf_liq2") or []:
+        ts_, p, tk, k = it[0], float(it[1]), it[2], int(it[3])
+        in_base = b_lo is not None and b_lo <= _dt(ts_) < b_hi        # base dibi (BASE_LOW_LIQ): tampona dussa da tohumdan
+        if (ts_ < bk or in_base) and not (tk is not None and tk < b0):
+            out[ts_] = (p, k)
+    vals = [b[2] if long else b[1] for b in bars]
+    for i in range(EQ_K, len(bars) - EQ_K):
+        if bars[i][0] < bk or not _is_piv(vals, i, long, EQ_K):
+            continue
+        t_i = _dt(bars[i][0])
+        if b_lo is not None and b_lo <= t_i < b_hi:
+            continue
+        p = vals[i]
+        if not ((stop < p < distal) if long else (distal < p < stop)):
+            continue
+        out[bars[i][0]] = (p, LIQ_K if _is_piv(vals, i, long, LIQ_K) else EQ_K)
+    return sorted((t, p, k) for t, (p, k) in out.items())
+
+
+def _sweep_choch_level(rec: dict, st: dict, long: bool, bars: list, ts, ext: float) -> float | None:
+    """Son mum likidite aldi mi (st["sw_lv"] birikir), sweep dibi (`slo`) ve CHOCH seviyesi. Sweep yoksa None."""
+    st.setdefault("sw_lv", [])
+    st.setdefault("slo", None)
+    st.setdefault("slo_i", None)
+    st.setdefault("slo_t", None)
+    ci = len(bars) - 1
+    vals = [b[2] if long else b[1] for b in bars]
+    pool = _liq_pool(rec, st, long, bars)
+    times = [b[0] for b in bars]
+    rng = [b[1] - b[2] for b in bars[max(0, ci - GAP_AVG_BARS + 1):ci + 1]]
+    tol = EQ_TOL_FRAC * (sum(rng) / len(rng)) if rng else 0.0
+    beyond = (lambda v, p: v < p) if long else (lambda v, p: v > p)
+
+    def taken_at(t_piv: str, p: float) -> str | None:     # tamponda dibi ilk alan mum (pivotun kendisinden sonra)
+        return next((times[j] for j in range(len(bars)) if times[j] > t_piv and beyond(vals[j], p)), None)
+
+    def confirmed(t_piv: str, k: int) -> bool:            # sag kanadi bu mumdan once tamamlanmis
+        if t_piv < times[0]:
+            return True
+        i = times.index(t_piv) if t_piv in times else None
+        return i is not None and i + k <= ci - 1
+
+    levels = []                                           # (seviye, likiditenin en gec olustugu an)
+    for t_piv, p, k in pool:
+        if k >= LIQ_K and confirmed(t_piv, LIQ_K):
+            levels.append((p, t_piv, "major"))
+    for a in range(len(pool)):                           # esit dipler: ikincisi birinciyi almamis
+        ta, pa, _ = pool[a]
+        tka = taken_at(ta, pa)
+        for b in range(a + 1, len(pool)):
+            tb, pb, _ = pool[b]
+            if abs(pa - pb) > tol or not confirmed(tb, EQ_K) or (tka is not None and tka <= tb):
+                continue
+            levels.append((min(pa, pb) if long else max(pa, pb), tb, "eq"))
+    done = {round(x[1], 10) for x in st["sw_lv"]}
+    new = []
+    for p, t_piv, kind in levels:
+        if round(p, 10) in done:
+            continue
+        tk = taken_at(t_piv, p)
+        if tk == times[ci]:                               # bu mum aldi (oncesinde alinmamisti)
+            new.append([t_piv, round(p, 10), kind])
+            done.add(round(p, 10))
+    if new:
+        st["sw_lv"].extend(new)
+        st["slo"], st["slo_i"], st["slo_t"] = float(ext), ci, times[ci]
+    elif st["slo"] is not None and beyond(ext, st["slo"]):
+        st["slo"], st["slo_i"], st["slo_t"] = float(ext), ci, times[ci]
+    st["sw"], st["swp"] = len(st["sw_lv"]), [x[1] for x in st["sw_lv"][-8:]]
+    if not st["sw_lv"] or st["slo_i"] is None:
+        return None
+    t_liq = max(x[0] for x in st["sw_lv"])
+    t_touch = _iso(_dt(rec["entry_touched_at"])) if rec.get("entry_touched_at") is not None else None
+    start = max(t_liq, t_touch) if t_touch else t_liq
+    hi = [b[1] if long else b[2] for b in bars]
+    win = [hi[j] for j in range(st["slo_i"] + 1) if times[j] >= start]
+    if not win:
+        return None
+    return float(max(win) if long else min(win))
+
+
+def _open_choch(rec: dict, st: dict, bars: list, ci: int, long: bool, lvl: float, close: float, sl_row: float, ts) -> None:
+    """CHOCH aninda: giris adaylari, stop (bolge plani; dip stopu golgede), tavanli TP'ler."""
+    cands = _candidates(bars, st["lo_i"], ci, long, lvl, close, st["lo"])
+    ref = abs(lvl - st["lo"])
+    dip_sl = st["lo"] - SL_BUFFER_FRAC * ref if long else st["lo"] + SL_BUFFER_FRAC * ref
+    sl = sl_row if ZONE_STOP_MAIN else dip_sl
+    st["sl_dip"], st["stop"] = float(dip_sl), ("zone" if ZONE_STOP_MAIN else "dip")
+    st["sl"], st["ct"], st["o"] = float(sl), _iso(ts), "wait_retest"
+    st["cc"], st["disp"] = float(close), _disp(bars, st["lo_i"], ci, long)
+    st["bdisp"] = _break_disp(bars, ci, long)
+    # 07.11 (kullanici): TP her adayda kendi riskinin MAX_RR katiyla tavanli; yapisal hedef (`tps`) ayri, golge "struct"
+    st["tps"] = float(_struct_tp(rec, long))
+    st["vars"] = {}
+    for k, e in cands.items():
+        d = abs(e - sl)
+        tp_v = _capped_tp(st["tps"], e, d, long) if d > 0 else st["tps"]
+        st["vars"][k] = {"e": e, "tp": float(tp_v), "rr": round(abs(tp_v - e) / d, 4) if d > 0 else None,
+                         "rs": round(abs(st["tps"] - e) / d, 4) if d > 0 else None,
+                         "o": "pending", "t": None, "at": None}
+    if st["vars"] and not _eligible(st):
+        st["o"] = "rr_wait"
+    st["b"] = []                                  # tampon artik gerekmez (JSON kucuk kalsin)
+
+
+def _break_disp(bars: list, ci: int, long: bool) -> float | None:
+    """CHOCH mumunun islem yonlu govdesi (open ~ onceki kapanis) / ondan onceki GAP_AVG_BARS mumun ort. boyu (07.11)."""
+    if ci < 1:
+        return None
+    rng = [b[1] - b[2] for b in bars[max(0, ci - GAP_AVG_BARS):ci]]
+    avg = sum(rng) / len(rng) if rng else 0.0
+    body = (bars[ci][3] - bars[ci - 1][3]) if long else (bars[ci - 1][3] - bars[ci][3])
+    return round(body / avg, 3) if avg > 0 else None
+
+
+def is_disp(st: dict | None) -> bool:
+    """LTF displacement etiketi (07.11 tanimi: CHOCH mumu)."""
+    v = (st or {}).get("bdisp")
+    return v is not None and float(v) >= CHOCH_DISP_MIN
+
+
 def _disp(bars: list, lo_i: int, ci: int, long: bool) -> float | None:
     """CHOCH hamlesinin en guclu mumu: islem yonlu govde (open ~ onceki kapanis) / son GAP_AVG_BARS mumun ort. boyu."""
     rng = [b[1] - b[2] for b in bars[max(0, ci - GAP_AVG_BARS + 1):ci + 1]]
@@ -269,6 +474,17 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
         ext = low if long else high
         if st["lo"] is None or ((ext < st["lo"]) if long else (ext > st["lo"])):
             st["lo"], st["lo_i"] = float(ext), len(bars) - 1
+        ci = len(bars) - 1
+        if SWEEP_CHOCH:
+            # 07.11 (kullanici, XAUUSD 4H): once asil LTF likiditesi alinmali, CHOCH = sweep bacaginin basladigi tepe
+            lvl = _sweep_choch_level(rec, st, long, bars, ts, low if long else high)
+            st["lvl"], st["kk"] = lvl, None
+            if lvl is not None and st["slo_i"] is not None and st["slo_i"] < ci and ((close > lvl) if long else (close < lvl)):
+                st["lo"], st["lo_i"] = float(st["slo"]), int(st["slo_i"])
+                _open_choch(rec, st, bars, ci, long, lvl, close, sl_row, ts)
+            elif ts >= rec["levels_at"] + horizon:
+                st["o"], st["at"] = ("no_choch" if st.get("sw_lv") else "no_sweep"), ts
+            return True
         swept = _ltf_sweep(rec, st, long)
         st["sw"], st["swp"] = len(swept), [round(p, 10) for p in swept[-8:]]
         lvl, st["kk"] = _swing_before(bars, st["lo_i"], long), CHOCH_SWING_K
@@ -279,18 +495,8 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
                 if short is not None and (lvl is None or ((short < lvl) if long else (short > lvl))):
                     lvl, st["kk"] = short, SHORT_SWING_K
         st["lvl"] = lvl
-        ci = len(bars) - 1
         if lvl is not None and st["lo_i"] < ci and ((close > lvl) if long else (close < lvl)):
-            cands = _candidates(bars, st["lo_i"], ci, long, lvl, close, st["lo"])
-            ref = abs(lvl - st["lo"])
-            sl = st["lo"] - SL_BUFFER_FRAC * ref if long else st["lo"] + SL_BUFFER_FRAC * ref
-            st["sl"], st["ct"], st["o"] = float(sl), _iso(ts), "wait_retest"
-            st["cc"], st["disp"] = float(close), _disp(bars, st["lo_i"], ci, long)
-            st["vars"] = {k: {"e": e, "rr": round(abs(tp - e) / abs(e - sl), 4) if abs(e - sl) > 0 else None,
-                              "o": "pending", "t": None, "at": None} for k, e in cands.items()}
-            if st["vars"] and not _eligible(st):
-                st["o"] = "rr_wait"
-            st["b"] = []                          # tampon artik gerekmez (JSON kucuk kalsin)
+            _open_choch(rec, st, bars, ci, long, lvl, close, sl_row, ts)
         elif ts >= rec["levels_at"] + horizon:
             st["o"], st["at"] = "no_choch", ts
         return True
@@ -303,6 +509,8 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
         if st.get("rt") is None or ((ext < st["rt"]) if long else (ext > st["rt"])):
             st["rt"], st["rt_t"] = float(ext), _iso(ts)
     for v in st["vars"].values():
+        tpv = v.get("tp", tp)                     # 07.11: adayin kendi (tavanli) TP'si; eski satirlarda satirin TP'si
+        hit_tp = high >= tpv if long else low <= tpv
         if v["o"] == "pending":
             hit_e = low <= v["e"] if long else high >= v["e"]
             if hit_tp and not hit_e:
@@ -327,6 +535,7 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
         v = elig[via]
         # ust duzey t/at/until datetime (Journal `_ENTRY_TS` donusumu); adaylarin (vars) zamanlari ISO metin
         st["via"], st["e"], st["rr"], st["t"] = via, v["e"], v["rr"], datetime.fromisoformat(v["t"])
+        st["tp"] = float(v.get("tp", tp))
         st["o"] = v["o"] if v["o"] in ("win", "loss", "ambiguous") else "filled"
         if st["o"] != "filled":
             st["at"] = ts
@@ -352,16 +561,40 @@ def _sh_live(st: dict) -> bool:
     return any(v.get("o") == "filled" for v in (st.get("sh") or {}).values())
 
 
+def _capped_tp(tps: float, e: float, risk: float, long: bool) -> float:
+    """Yapisal hedef `tps`, girisin MAX_RR x risk otesindeyse tavan noktasi (sd_engine.MAX_RR)."""
+    from app.sd_engine import MAX_RR
+    cap = e + MAX_RR * risk if long else e - MAX_RR * risk
+    return min(tps, cap) if long else max(tps, cap)
+
+
+def _struct_tp(rec: dict, long: bool) -> float:
+    """Onay kolunun yapisal hedefi: satir TP'si tavanliysa (`features.target_kind` cap) `tp_struct`, degilse satirin TP'si."""
+    tp = float(rec["tp"])
+    f = rec.get("features") or {}
+    ts_ = f.get("tp_struct")
+    if f.get("target_kind") == "cap" and ts_ is not None and ((float(ts_) > tp) if long else (float(ts_) < tp)):
+        return float(ts_)
+    return tp
+
+
 def _sh_init(rec: dict, st: dict, long: bool) -> None:
-    e, sl, tp, zsl = float(st["e"]), float(st["sl"]), float(rec["tp"]), float(rec["sl"])
+    e, sl, tp, zsl = float(st["e"]), float(st["sl"]), float(st.get("tp", rec["tp"])), float(rec["sl"])
     risk = abs(e - sl)
     sh = {}
+    dsl = st.get("sl_dip")
+    if st.get("stop") == "zone" and dsl is not None and abs(e - float(dsl)) > 0 and ((float(dsl) < e) if long else (float(dsl) > e)):
+        sh["dip"] = {"sl": float(dsl), "sl0": float(dsl), "rr": round(abs(tp - e) / abs(e - float(dsl)), 4), "o": "filled", "at": None}
     if ((zsl < sl) if long else (zsl > sl)) and abs(e - zsl) > 0:
         sh["zs"] = {"sl": zsl, "sl0": zsl, "rr": round(abs(tp - e) / abs(e - zsl), 4), "o": "filled", "at": None}
     else:
         sh["zs"] = {"o": "invalid", "why": "not_wider"}
     for k, arm in (("be1r", e + BE_ARM_R * risk if long else e - BE_ARM_R * risk), ("be50", e + BE_ARM_TP_FRAC * (tp - e))):
         sh[k] = {"sl": sl, "sl0": sl, "arm": arm, "be": None, "rr": st.get("rr"), "o": "filled", "at": None}
+    tps = st.get("tps")
+    if tps is not None and risk > 0 and ((float(tps) > tp) if long else (float(tps) < tp)):
+        # 07.11: tavanli islemde yapisal hedef (swing / karsi bolge) gercekten goruldu mu
+        sh["struct"] = {"sl": sl, "sl0": sl, "tp": float(tps), "rr": round(abs(float(tps) - e) / risk, 4), "o": "filled", "at": None}
     st["sh"] = sh
 
 
@@ -375,11 +608,12 @@ def _sh_step(rec: dict, st: dict, long: bool, ts, high: float, low: float, horiz
             for v in st["sh"].values():
                 v["late"] = True
     fill_bar = ts <= _dt(st["t"])
-    e, tp = float(st["e"]), float(rec["tp"])
-    hit_tp = high >= tp if long else low <= tp
+    e, tp = float(st["e"]), float(st.get("tp", rec["tp"]))
     for v in st["sh"].values():
         if v.get("o") != "filled":
             continue
+        tpv = v.get("tp", tp)                     # "struct" kolunun kendi TP'si
+        hit_tp = high >= tpv if long else low <= tpv
         hit_sl = low <= v["sl"] if long else high >= v["sl"]
         if hit_sl:
             v["o"] = "ambiguous" if hit_tp else ("be" if v.get("be") else "loss")
@@ -418,10 +652,13 @@ def describe(st: dict | None, ltf: str) -> dict:
     via = st.get("via")
     via_label = f"{ltf} {VARIANT_LABEL.get(via, via)}" if via else None
 
-    def hhmm(v):
+    def hhmm(v):                                  # 07.11: UTC+3 + tarih ("06.11 05:30"; kullanici saatleri UTC+3 okuyor)
         if not v:
             return "?"
-        return v.strftime("%H:%M") if hasattr(v, "strftime") else str(v)[11:16]
+        try:
+            return (_dt(v) + timedelta(hours=3)).strftime("%d.%m %H:%M")
+        except Exception:
+            return str(v)[5:16]
 
     parts = []
     if st.get("sw"):
@@ -431,11 +668,19 @@ def describe(st: dict | None, ltf: str) -> dict:
     if via:
         parts.append(f"retest {via_label} {hhmm(st.get('t'))}")
     label = LABELS.get(o, o)
+    if o == "wait_choch" and "sw_lv" in st and not st.get("sw_lv"):
+        label = "Waiting LTF sweep"               # 07.11: once likidite alinmali
     if o == "win" and via_label:
         label = f"Worked — retest {via_label}"
     tip = " · ".join(f"{VARIANT_LABEL[k]} {v['e']:.6g} → {v['o']}" for k, v in (st.get("vars") or {}).items())
     extra = []
-    if st.get("disp") is not None:
+    if st.get("sw_lv"):
+        extra.append("swept " + ", ".join(f"{x[1]:.6g}" + (" (EQ)" if x[2] == "eq" else "") for x in st["sw_lv"][-6:]))
+    if st.get("lvl") is not None and st.get("o") in ("wait_choch", "no_choch"):
+        extra.append(f"CHOCH level {st['lvl']:.6g}")
+    if st.get("bdisp") is not None:
+        extra.append(f"CHOCH candle {st['bdisp']:.2f}× avg" + (" (displacement)" if is_disp(st) else " (no displacement)"))
+    elif st.get("disp") is not None:
         extra.append(f"displacement {st['disp']:.2f}×")
     d = retest_depth(st)
     if d is not None:
@@ -499,7 +744,7 @@ def final_r(st: dict | None) -> float | None:
         return float(st.get("rr") or 0)
     if st.get("o") == "loss":
         return -1.0
-    if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "open", "low_rr", "rr_wait"):
+    if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "no_sweep", "open", "low_rr", "rr_wait"):
         return 0.0
     if st.get("o") == "week_close":
         return week_close_r(st.get("e"), st.get("sl"), st.get("px"), st.get("dir"))
