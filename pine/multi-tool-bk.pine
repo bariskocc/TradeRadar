@@ -1,0 +1,639 @@
+//@version=6
+indicator("Multi-Tool [BK]", overlay = true,
+     max_lines_count  = 500,
+     max_boxes_count  = 500,
+     max_labels_count = 500)
+
+// ============================================================
+//  GENEL AYARLAR
+// ============================================================
+tz = "America/New_York"   // ICT killzone saatleri NY saatine göre
+
+grpGen    = "Genel"
+maxDays   = input.int(5, "Kaç günlük geçmiş gösterilsin", minval = 1, maxval = 30, group = grpGen)
+maxLevels = input.int(60, "Maks. takip edilen seviye sayısı", minval = 4, maxval = 250, group = grpGen)
+
+grpSweep    = "Likidite / Sweep"
+sweepMethod = input.string("Wick (gölge)", "Sweep yöntemi",
+     options = ["Wick (gölge)", "Close (kapanış)"], group = grpSweep)
+keepSwept   = input.bool(true,  "Sweep olan çizgiler kalsın", group = grpSweep)
+markSweep   = input.bool(true,  "Sweep noktasını işaretle",   group = grpSweep)
+dimSwept    = input.bool(true,  "Sweep olan çizgiyi soldur",  group = grpSweep)
+
+// ============================================================
+//  KILLZONE TANIMLARI (NY saati - ICT standardı)
+// ============================================================
+grpKZ       = "Killzones"
+showKZLabel = input.bool(false, "İsim etiketlerini göster", group = grpKZ)
+showAsia    = input.bool(true, "Asia",     inline = "asia",  group = grpKZ)
+colAsia     = input.color(color.new(color.blue,   90), "", inline = "asia",  group = grpKZ)
+showLon     = input.bool(true, "London",   inline = "lon",   group = grpKZ)
+colLon      = input.color(color.new(color.red,    90), "", inline = "lon",   group = grpKZ)
+showAM      = input.bool(true, "NY AM",    inline = "am",    group = grpKZ)
+colAM       = input.color(color.new(color.green,  90), "", inline = "am",    group = grpKZ)
+showLunch   = input.bool(true, "NY Lunch", inline = "lunch", group = grpKZ)
+colLunch    = input.color(color.new(color.yellow, 90), "", inline = "lunch", group = grpKZ)
+showPM      = input.bool(true, "NY PM",    inline = "pm",    group = grpKZ)
+colPM       = input.color(color.new(color.purple, 90), "", inline = "pm",    group = grpKZ)
+
+// ============================================================
+//  ÖNCEKİ GÜN HIGH/LOW (sadece 1 önceki gün)
+// ============================================================
+grpPD       = "Önceki Gün High/Low"
+showPDHL    = input.bool(true,  "Göster",                   group = grpPD)
+showPDLabel = input.bool(false, "İsim etiketlerini göster", group = grpPD)
+colPDH      = input.color(color.red,   "PDH rengi", inline = "pd", group = grpPD)
+colPDL      = input.color(color.green, "PDL rengi", inline = "pd", group = grpPD)
+pdWidth     = input.int(2, "Çizgi kalınlığı", minval = 1, maxval = 4, group = grpPD)
+
+// ============================================================
+//  EMA'LAR  -  EMA 50 turuncu, EMA 200 mavi
+// ============================================================
+grpEMA   = "EMA"
+showE20  = input.bool(true, "EMA 20",  inline = "e20", group = grpEMA)
+lenE20   = input.int(20,  "", inline = "e20", minval = 1, group = grpEMA)
+colE20   = input.color(color.aqua,    "", inline = "e20", group = grpEMA)
+showE50  = input.bool(true, "EMA 50",  inline = "e50", group = grpEMA)
+lenE50   = input.int(50,  "", inline = "e50", minval = 1, group = grpEMA)
+colE50   = input.color(color.orange,  "", inline = "e50", group = grpEMA)
+showE100 = input.bool(true, "EMA 100", inline = "e100", group = grpEMA)
+lenE100  = input.int(100, "", inline = "e100", minval = 1, group = grpEMA)
+colE100  = input.color(color.fuchsia, "", inline = "e100", group = grpEMA)
+showE200 = input.bool(true, "EMA 200", inline = "e200", group = grpEMA)
+lenE200  = input.int(200, "", inline = "e200", minval = 1, group = grpEMA)
+colE200  = input.color(color.blue,    "", inline = "e200", group = grpEMA)
+
+// ============================================================
+//  NWOG / NDOG
+// ============================================================
+grpGap      = "NWOG / NDOG"
+showNDOG    = input.bool(true, "NDOG (Günlük açılış gap)", group = grpGap)
+colNDOG     = input.color(color.new(color.green, 80), "NDOG rengi", group = grpGap)
+maxNDOG     = input.int(3, "Maks. NDOG adedi", minval = 1, maxval = 50, group = grpGap)
+showNWOG    = input.bool(true, "NWOG (Haftalık açılış gap)", group = grpGap)
+colNWOG     = input.color(color.new(color.yellow, 80), "NWOG rengi", group = grpGap)
+maxNWOG     = input.int(3, "Maks. NWOG adedi", minval = 1, maxval = 50, group = grpGap)
+showCE      = input.bool(true, "Orta çizgi (CE) göster", group = grpGap)
+colCE       = input.color(color.new(color.white, 40), "CE rengi", group = grpGap)
+showGapLbl  = input.bool(true, "Gap etiketlerini göster", group = grpGap)
+lblColNDOG  = input.color(color.green,  "NDOG yazı rengi", group = grpGap)
+lblColNWOG  = input.color(color.yellow, "NWOG yazı rengi", group = grpGap)
+
+// ============================================================
+//  SMT DIVERGENCE  --  (KAPALI: açmak için aşağıdaki yorumları kaldırın)
+// ============================================================
+// grpSMT        = "SMT Divergence"
+// showSMT       = input.bool(false, "SMT göster", group = grpSMT)
+// showBrokenSMT = input.bool(false, "Broken SMT'leri göster", group = grpSMT)
+// smtAuto       = input.bool(true,  "Korele sembolü otomatik bul", group = grpSMT)
+// smtManual     = input.symbol("XAGUSD", "Manuel karşılaştırma sembolü", group = grpSMT)
+// smtLen        = input.int(5, "Pivot uzunluğu", minval = 1, maxval = 50, group = grpSMT)
+// colSMTbear    = input.color(color.red,   "Bearish SMT (tepe) çizgi", group = grpSMT)
+// colSMTbull    = input.color(color.green, "Bullish SMT (dip) çizgi",  group = grpSMT)
+// smtWidth      = input.int(2, "Çizgi kalınlığı", minval = 1, maxval = 4, group = grpSMT)
+// maxSMT        = input.int(20, "Maks. SMT adedi", minval = 1, maxval = 100, group = grpSMT)
+
+// ============================================================
+//  YARDIMCI: NY saatine göre verilen aralıkta mıyız?
+// ============================================================
+inSession(int startH, int startM, int endH, int endM) =>
+    h   = hour(time, tz)
+    m   = minute(time, tz)
+    cur = h * 60 + m
+    s   = startH * 60 + startM
+    e   = endH   * 60 + endM
+    e <= s ? (cur >= s or cur < e) : (cur >= s and cur < e)
+
+withinHistory = (timenow - time) <= maxDays * 86400000
+useWick       = sweepMethod == "Wick (gölge)"
+kzAllowed     = timeframe.isintraday and timeframe.in_seconds() <= 900
+emaAllowed    = timeframe.in_seconds() >= 300
+pdAllowed     = timeframe.in_seconds() <= 86400
+gapAllowed    = timeframe.in_seconds() <= 3600
+transp        = color.new(color.white, 100)   // görünmez baloncuk
+
+// ============================================================
+//  OTOMATIK KORELE SEMBOL ÇÖZÜMÜ  --  (KAPALI: SMT ile birlikte açın)
+// ============================================================
+// tkr = syminfo.ticker
+// string mate = na
+// string root = na
+//
+// if str.startswith(tkr, "XAUUSD")
+//     root := "XAUUSD", mate := "XAGUSD"
+// else if str.startswith(tkr, "XAGUSD")
+//     root := "XAGUSD", mate := "XAUUSD"
+// else if str.startswith(tkr, "EURUSD")
+//     root := "EURUSD", mate := "GBPUSD"
+// else if str.startswith(tkr, "GBPUSD")
+//     root := "GBPUSD", mate := "EURUSD"
+// else if str.startswith(tkr, "AUDUSD")
+//     root := "AUDUSD", mate := "NZDUSD"
+// else if str.startswith(tkr, "NZDUSD")
+//     root := "NZDUSD", mate := "AUDUSD"
+// else if str.startswith(tkr, "USDCAD")
+//     root := "USDCAD", mate := "USDCHF"
+// else if str.startswith(tkr, "USDCHF")
+//     root := "USDCHF", mate := "USDCAD"
+// else if str.startswith(tkr, "USDJPY")
+//     root := "USDJPY", mate := "USDCHF"
+// else if str.startswith(tkr, "NAS100")
+//     root := "NAS100", mate := "SPX500"
+// else if str.startswith(tkr, "SPX500")
+//     root := "SPX500", mate := "NAS100"
+// else if str.startswith(tkr, "US100")
+//     root := "US100", mate := "US500"
+// else if str.startswith(tkr, "US500")
+//     root := "US500", mate := "US100"
+// else if str.startswith(tkr, "US30")
+//     root := "US30", mate := "US500"
+// else if str.startswith(tkr, "BTCUSD")
+//     root := "BTCUSD", mate := "ETHUSD"
+// else if str.startswith(tkr, "ETHUSD")
+//     root := "ETHUSD", mate := "BTCUSD"
+//
+// suffix      = na(root) ? "" : str.substring(tkr, str.length(root))
+// autoSym     = na(mate) ? syminfo.tickerid : syminfo.prefix + ":" + mate + suffix
+// smtFinalSym = (smtAuto and not na(mate)) ? autoSym : smtManual
+
+// ============================================================
+//  VERİ TİPLERİ
+// ============================================================
+type KZ
+    bool  active = false
+    box   bx     = na
+    line  hi     = na
+    line  lo     = na
+    label lb     = na
+    float h      = na
+    float l      = na
+
+type Level
+    line   ln     = na
+    label  mk     = na
+    float  price  = na
+    bool   isHigh = true
+    bool   swept  = false
+    color  col    = na
+
+type Gap
+    box   bx  = na
+    line  ce  = na
+    label lb  = na
+    float mid = na
+
+// type SMT
+//     line  ln     = na
+//     label lb     = na
+//     float brk    = na
+//     bool  bear   = true
+//     bool  broken = false
+//     color col    = na
+
+var KZ kzAsia  = KZ.new()
+var KZ kzLon   = KZ.new()
+var KZ kzAM    = KZ.new()
+var KZ kzLunch = KZ.new()
+var KZ kzPM    = KZ.new()
+
+var array<Level> levels = array.new<Level>()
+var array<Gap>   ndogs  = array.new<Gap>()
+var array<Gap>   nwogs  = array.new<Gap>()
+// var array<SMT>   smts   = array.new<SMT>()
+
+// ============================================================
+//  Killzone seviyesini sweep-takibine ekle
+// ============================================================
+pushLevel(line ln, float p, bool isHigh, color col) =>
+    array.push(levels, Level.new(ln, na, p, isHigh, false, col))
+    if array.size(levels) > maxLevels
+        Level old = array.shift(levels)
+        if not na(old.ln)
+            line.delete(old.ln)
+        if not na(old.mk)
+            label.delete(old.mk)
+
+// ============================================================
+//  Gap fonksiyonları
+// ============================================================
+addGap(array<Gap> arr, float a, float b, color col, bool ce, color ceCol, int maxN,
+     string txt, bool showLbl, color lblCol) =>
+    top = math.max(a, b)
+    bot = math.min(a, b)
+    mid = (top + bot) / 2
+    bx  = box.new(bar_index, top, bar_index, bot, border_color = na, bgcolor = col)
+    line ceLn = na
+    if ce
+        ceLn := line.new(bar_index, mid, bar_index, mid, color = ceCol, style = line.style_dashed, width = 1)
+    label lb = na
+    if showLbl
+        lb := label.new(bar_index, mid, txt, style = label.style_label_right,
+             color = transp, textcolor = lblCol, size = size.small)
+    array.push(arr, Gap.new(bx, ceLn, lb, mid))
+    if array.size(arr) > maxN
+        Gap old = array.shift(arr)
+        if not na(old.bx)
+            box.delete(old.bx)
+        if not na(old.ce)
+            line.delete(old.ce)
+        if not na(old.lb)
+            label.delete(old.lb)
+
+updGap(Gap g) =>
+    box.set_right(g.bx, bar_index)
+    if not na(g.ce)
+        line.set_x2(g.ce, bar_index)
+    if not na(g.lb)
+        label.set_xy(g.lb, bar_index, g.mid)
+
+extendGaps(array<Gap> arr, bool onlyLast) =>
+    n = array.size(arr)
+    if n > 0
+        if onlyLast
+            updGap(array.get(arr, n - 1))
+        else
+            for g in arr
+                updGap(g)
+
+// ============================================================
+//  SMT ekle  --  (KAPALI: SMT ile birlikte açın)
+// ============================================================
+// addSMT(int x1, float y1, int x2, float y2, color col, bool bear, string txt, int maxN) =>
+//     ln = line.new(x1, y1, x2, y2, color = col, width = smtWidth)
+//     int   mx = int(math.round((x1 + x2) / 2))
+//     float my = bear ? math.max(y1, y2) : math.min(y1, y2)
+//     lb = label.new(mx, my, txt, style = bear ? label.style_label_down : label.style_label_up,
+//          color = transp, textcolor = col, size = size.tiny)
+//     array.push(smts, SMT.new(ln, lb, my, bear, false, col))
+//     if array.size(smts) > maxN
+//         SMT old = array.shift(smts)
+//         if not na(old.ln)
+//             line.delete(old.ln)
+//         if not na(old.lb)
+//             label.delete(old.lb)
+
+// ============================================================
+//  KILLZONE MOTORU
+// ============================================================
+drawKZ(KZ k, bool enabled, bool isIn, color col, string name) =>
+    lineCol = color.new(col, 60)
+    if enabled and withinHistory and kzAllowed
+        if isIn and not k.active
+            k.active := true
+            k.h := high
+            k.l := low
+            k.bx := box.new(bar_index, high, bar_index, low, border_color = na, bgcolor = col)
+            k.hi := line.new(bar_index, high, bar_index, high, color = lineCol, width = 1)
+            k.lo := line.new(bar_index, low,  bar_index, low,  color = lineCol, width = 1)
+            if showKZLabel
+                k.lb := label.new(bar_index, high, name,
+                     style = label.style_label_right, color = transp,
+                     textcolor = color.new(col, 0), size = size.small)
+        else if isIn and k.active
+            k.h := math.max(k.h, high)
+            k.l := math.min(k.l, low)
+            box.set_right(k.bx, bar_index)
+            box.set_top(k.bx, k.h)
+            box.set_bottom(k.bx, k.l)
+            line.set_xy2(k.hi, bar_index, k.h)
+            line.set_y1(k.hi, k.h)
+            line.set_xy2(k.lo, bar_index, k.l)
+            line.set_y1(k.lo, k.l)
+            if not na(k.lb)
+                label.set_xy(k.lb, line.get_x1(k.hi), k.h)
+        else if not isIn and k.active
+            k.active := false
+            pushLevel(k.hi, k.h, true,  lineCol)
+            pushLevel(k.lo, k.l, false, lineCol)
+            k.bx := na
+            k.hi := na
+            k.lo := na
+            k.lb := na
+    k
+
+// ============================================================
+//  ANA AKIŞ - Killzones
+// ============================================================
+kzAsia  := drawKZ(kzAsia,  showAsia,  inSession(20, 0, 0,  0),  colAsia,  "Asia")
+kzLon   := drawKZ(kzLon,   showLon,   inSession(2,  0, 5,  0),  colLon,   "London")
+kzAM    := drawKZ(kzAM,    showAM,    inSession(9,  30, 11, 0),  colAM,    "NY AM")
+kzLunch := drawKZ(kzLunch, showLunch, inSession(12, 0, 13, 0),  colLunch, "NY Lunch")
+kzPM    := drawKZ(kzPM,    showPM,    inSession(13, 30, 16, 0), colPM,    "NY PM")
+
+// ============================================================
+//  KILLZONE LİKİDİTE TAKİBİ
+// ============================================================
+int i = 0
+while i < array.size(levels)
+    Level lv = array.get(levels, i)
+    if not lv.swept
+        bool sweep = lv.isHigh ?
+             (useWick ? high >= lv.price : close > lv.price) :
+             (useWick ? low  <= lv.price : close < lv.price)
+        if sweep
+            lv.swept := true
+            line.set_x2(lv.ln, bar_index)
+            if dimSwept
+                line.set_color(lv.ln, color.new(lv.col, 50))
+                line.set_style(lv.ln, line.style_dotted)
+            if keepSwept == false
+                line.delete(lv.ln)
+            else if markSweep
+                lv.mk := label.new(bar_index, lv.price, "✕",
+                     style     = lv.isHigh ? label.style_label_down : label.style_label_up,
+                     color     = color.new(lv.col, 30),
+                     textcolor = color.white, size = size.tiny)
+        else
+            line.set_x2(lv.ln, bar_index)
+    i += 1
+
+// ============================================================
+//  ÖNCEKİ GÜN HIGH/LOW
+//  Gün içinde high/low ve oluştukları bar takip edilir;
+//  yeni günde çizgi, ekstremin oluştuğu bardan (iğneden) sağa çizilir
+//  (Sadece 1D ve altı zaman dilimlerinde çalışır)
+// ============================================================
+t        = time("D")
+isNewDay = na(t[1]) ? false : (t != t[1])
+
+var float curHigh    = na
+var int   curHighBar = na
+var float curLow     = na
+var int   curLowBar  = na
+
+var line  pdhLine = na
+var line  pdlLine = na
+var label pdhLbl  = na
+var label pdlLbl  = na
+var label pdhMark = na
+var label pdlMark = na
+var float pdhPrice = na
+var float pdlPrice = na
+var bool  pdhSwept = false
+var bool  pdlSwept = false
+
+if isNewDay
+    // Önceki günü kapat: takip edilen ekstremleri PDH/PDL'ye çevir
+    if showPDHL and pdAllowed and not na(curHigh) and not na(curLow) and withinHistory
+        if not na(pdhLine)
+            line.delete(pdhLine)
+        if not na(pdlLine)
+            line.delete(pdlLine)
+        if not na(pdhLbl)
+            label.delete(pdhLbl)
+        if not na(pdlLbl)
+            label.delete(pdlLbl)
+        if not na(pdhMark)
+            label.delete(pdhMark)
+        if not na(pdlMark)
+            label.delete(pdlMark)
+        pdhMark := na
+        pdlMark := na
+        pdhPrice := curHigh
+        pdlPrice := curLow
+        pdhSwept := false
+        pdlSwept := false
+        pdhLine := line.new(curHighBar, curHigh, bar_index, curHigh, color = colPDH, width = pdWidth)
+        pdlLine := line.new(curLowBar,  curLow,  bar_index, curLow,  color = colPDL, width = pdWidth)
+        if showPDLabel
+            pdhLbl := label.new(bar_index, curHigh, "PDH", style = label.style_label_left,
+                 color = transp, textcolor = colPDH, size = size.tiny)
+            pdlLbl := label.new(bar_index, curLow,  "PDL", style = label.style_label_left,
+                 color = transp, textcolor = colPDL, size = size.tiny)
+    // Yeni günü başlat
+    curHigh    := high
+    curHighBar := bar_index
+    curLow     := low
+    curLowBar  := bar_index
+else
+    if na(curHigh) or high > curHigh
+        curHigh    := high
+        curHighBar := bar_index
+    if na(curLow) or low < curLow
+        curLow    := low
+        curLowBar := bar_index
+
+if showPDHL and pdAllowed and not na(pdhLine)
+    if not pdhSwept
+        bool sw = useWick ? high >= pdhPrice : close > pdhPrice
+        if sw
+            pdhSwept := true
+            line.set_x2(pdhLine, bar_index)
+            if dimSwept
+                line.set_color(pdhLine, color.new(colPDH, 50))
+                line.set_style(pdhLine, line.style_dotted)
+            if markSweep
+                pdhMark := label.new(bar_index, pdhPrice, "✕", style = label.style_label_down,
+                     color = color.new(colPDH, 30), textcolor = color.white, size = size.tiny)
+        else
+            line.set_x2(pdhLine, bar_index)
+            if not na(pdhLbl)
+                label.set_xy(pdhLbl, bar_index, pdhPrice)
+
+if showPDHL and pdAllowed and not na(pdlLine)
+    if not pdlSwept
+        bool sw = useWick ? low <= pdlPrice : close < pdlPrice
+        if sw
+            pdlSwept := true
+            line.set_x2(pdlLine, bar_index)
+            if dimSwept
+                line.set_color(pdlLine, color.new(colPDL, 50))
+                line.set_style(pdlLine, line.style_dotted)
+            if markSweep
+                pdlMark := label.new(bar_index, pdlPrice, "✕", style = label.style_label_up,
+                     color = color.new(colPDL, 30), textcolor = color.white, size = size.tiny)
+        else
+            line.set_x2(pdlLine, bar_index)
+            if not na(pdlLbl)
+                label.set_xy(pdlLbl, bar_index, pdlPrice)
+
+// ============================================================
+//  NWOG / NDOG  (Sadece 1H ve altı zaman dilimlerinde çalışır)
+//  - NDOG: Pazartesi (yeni hafta) çizilmez, çünkü NWOG ile aynı yerde olur
+//  - Tarih etiketi: işlem gününün ORTASINA (+12s) denk gelen zaman,
+//    sembolün borsa saat diliminde formatlanır. Böylece günlük mum
+//    bir önceki akşam açılsa bile tarih doğru güne yazılır.
+// ============================================================
+[dClose1, dOpen] = request.security(syminfo.tickerid, "D", [close[1], open],
+     lookahead = barmerge.lookahead_on)
+[wClose1, wOpen] = request.security(syminfo.tickerid, "W", [close[1], open],
+     lookahead = barmerge.lookahead_on)
+
+tw         = time("W")
+isNewWeek  = na(tw[1]) ? false : (tw != tw[1])
+
+halfDay = 43200000   // 12 saat (ms) - işlem gününün ortasına kaydırma
+
+if isNewDay and not isNewWeek and showNDOG and gapAllowed and not na(dClose1) and not na(dOpen) and withinHistory
+    ndogTxt = str.format_time(t + halfDay, "dd.MM", syminfo.timezone) + " | NDOG"
+    addGap(ndogs, dClose1, dOpen, colNDOG, showCE, colCE, maxNDOG, ndogTxt, showGapLbl, lblColNDOG)
+
+if isNewWeek and showNWOG and gapAllowed and not na(wClose1) and not na(wOpen)
+    wEnd    = tw + 5 * 86400000
+    nwogTxt = str.format_time(tw + halfDay, "dd.MM", syminfo.timezone) + " - " + str.format_time(wEnd + halfDay, "dd.MM", syminfo.timezone) + " | NWOG"
+    addGap(nwogs, wClose1, wOpen, colNWOG, showCE, colCE, maxNWOG, nwogTxt, showGapLbl, lblColNWOG)
+
+extendGaps(ndogs, true)
+extendGaps(nwogs, true)
+
+// ============================================================
+//  SMT DIVERGENCE  --  (KAPALI: açmak için aşağıdaki yorumları kaldırın)
+// ============================================================
+// compHigh = request.security(smtFinalSym, timeframe.period, high)
+// compLow  = request.security(smtFinalSym, timeframe.period, low)
+// smtName  = request.security(smtFinalSym, timeframe.period, syminfo.ticker)
+//
+// phVal = ta.pivothigh(high, smtLen, smtLen)
+// plVal = ta.pivotlow(low,  smtLen, smtLen)
+//
+// var float lastPH     = na
+// var float lastCompPH = na
+// var int   lastPHbar  = na
+// var float lastPL     = na
+// var float lastCompPL = na
+// var int   lastPLbar  = na
+//
+// if showSMT
+//     if not na(phVal)
+//         curBar  = bar_index - smtLen
+//         curComp = compHigh[smtLen]
+//         if not na(lastPH) and not na(lastCompPH) and not na(curComp)
+//             diffP = phVal   - lastPH
+//             diffC = curComp - lastCompPH
+//             if (diffP > 0 and diffC < 0) or (diffP < 0 and diffC > 0)
+//                 addSMT(lastPHbar, lastPH, curBar, phVal, colSMTbear, true, "SMT - " + smtName, maxSMT)
+//         lastPH     := phVal
+//         lastCompPH := curComp
+//         lastPHbar  := curBar
+//     if not na(plVal)
+//         curBar  = bar_index - smtLen
+//         curComp = compLow[smtLen]
+//         if not na(lastPL) and not na(lastCompPL) and not na(curComp)
+//             diffP = plVal   - lastPL
+//             diffC = curComp - lastCompPL
+//             if (diffP > 0 and diffC < 0) or (diffP < 0 and diffC > 0)
+//                 addSMT(lastPLbar, lastPL, curBar, plVal, colSMTbull, false, "SMT - " + smtName, maxSMT)
+//         lastPL     := plVal
+//         lastCompPL := curComp
+//         lastPLbar  := curBar
+//
+//     int j = 0
+//     while j < array.size(smts)
+//         SMT s = array.get(smts, j)
+//         bool removed = false
+//         if not s.broken
+//             bool brk = s.bear ? close > s.brk : close < s.brk
+//             if brk
+//                 s.broken := true
+//                 if showBrokenSMT
+//                     if not na(s.ln)
+//                         line.set_style(s.ln, line.style_dotted)
+//                         line.set_color(s.ln, color.new(s.col, 70))
+//                     if not na(s.lb)
+//                         label.set_textcolor(s.lb, color.new(s.col, 70))
+//                 else
+//                     if not na(s.ln)
+//                         line.delete(s.ln)
+//                     if not na(s.lb)
+//                         label.delete(s.lb)
+//                     array.remove(smts, j)
+//                     removed := true
+//         if not removed
+//             j += 1
+
+// ============================================================
+//  EMA'LAR
+// ============================================================
+ema20  = ta.ema(close, lenE20)
+ema50  = ta.ema(close, lenE50)
+ema100 = ta.ema(close, lenE100)
+ema200 = ta.ema(close, lenE200)
+
+plot(showE20  and emaAllowed ? ema20  : na, "EMA 20",  color = colE20,  linewidth = 1)
+plot(showE50  and emaAllowed ? ema50  : na, "EMA 50",  color = colE50,  linewidth = 1)
+plot(showE100 and emaAllowed ? ema100 : na, "EMA 100", color = colE100, linewidth = 1)
+plot(showE200 and emaAllowed ? ema200 : na, "EMA 200", color = colE200, linewidth = 1)
+
+// ============================================================
+//  TRADING RULES PANELİ
+// ============================================================
+
+grpRules = "Trading Rules"
+showRules = input.bool(true, "Trading Rules panelini göster", group = grpRules)
+
+var table rulesTable = table.new(
+     position.top_right,
+     1,
+     8,
+     bgcolor = color.new(color.black, 100),
+     border_width = 0)
+
+if barstate.islast
+    if showRules
+
+        // ====================================================
+        // BAŞLIK
+        // ====================================================
+
+        table.cell(
+             rulesTable, 0, 0,
+             "🧠 TRADING RULES",
+             text_color = color.black,
+             text_size = size.normal,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+        // ====================================================
+        // KURALLAR
+        // ====================================================
+
+        table.cell(
+             rulesTable, 0, 1,
+             "🔴 Setup yoksa → TRADE YOK",
+             text_color = color.red,
+             text_size = size.small,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+        table.cell(
+             rulesTable, 0, 2,
+             "🔴 Confirmation yoksa → GİRİŞ YOK",
+             text_color = color.red,
+             text_size = size.small,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+        table.cell(
+             rulesTable, 0, 3,
+             "🔴 Loss'u geri alma → İNTİKAM TRADE YOK",
+             text_color = color.red,
+             text_size = size.small,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+        table.cell(
+             rulesTable, 0, 4,
+             "🔴 SMT tek başına değil → CISD / MSS",
+             text_color = color.red,
+             text_size = size.small,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+        table.cell(
+             rulesTable, 0, 5,
+             "🟡 Bölgeye → RETEST bekle",
+             text_color = color.orange,
+             text_size = size.small,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+        table.cell(
+             rulesTable, 0, 6,
+             "🟢 Trade kaçırmak > kötü trade",
+             text_color = color.lime,
+             text_size = size.small,
+             text_halign = text.align_left,
+             text_formatting = text.format_bold)
+
+    else
+        table.clear(rulesTable, 0, 0, 0, 6)
