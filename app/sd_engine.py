@@ -19,9 +19,9 @@ TOUCH_EXIT_ATR x ATR uzaklasinca biter -- 03.11: XAUUSD'de ayni tepkinin iki dal
 0 taze, 1 test edilmis, >= 2 ya da distal'in otesine fitil (SL_BUFFER_ATR) -> olu (islem aranmaz, hedef de olmaz).
 
 Plan: giris proximal, SL distal + SL_BUFFER_ATR x ATR ama risk en az MIN_RISK_ATR x ATR (03.11 kullanici: base dar olunca
-8 puanlik stop + her hedef 4R tavaninda; 1.0 ATR bile dar bulundu -> 1.5; Journal golgesi 1.0 / 2.0 ATR'yi olcer),
-TP karsi taraftaki ilk canli bolgenin proximal'i,
-yoksa fiyatin otesindeki ilk fraktal swing (TARGET_SWING_K). RR < MIN_RR -> `sd_low_rr`.
+8 puanlik stop + her hedef 4R tavaninda; 1.0 ATR bile dar bulundu -> 1.5; 06.11 -> 1.75, EURJPY 15m),
+TP fiyatin otesindeki en yakin engel (karsi canli bolgenin proximal'i ya da fraktal swing, TARGET_SWING_K); engel RR < MIN_RR
+veriyorsa TP = MIN_RR noktasi (06.11; `target_kind` "rr2"; RR < FLOOR_RR_MIN ara engeller atlanir). Eski plan (1.5 ATR + ilk RR >= 2 engel) `features.sl_old/tp_old`.
 
 Her sey durumsuz: `detect_zones` kapanmis 4H serisinden bolgeleri, dokunuslari ve kirilmayi her cagrida
 yeniden hesaplar; bolgenin kimligi base'in ilk mumunun acilis zamanidir (Journal anahtari).
@@ -59,13 +59,20 @@ STOP_LIQ_ATR = 0.5
 LEG_IN_BARS = 3
 LEG_IN_MIN_ATR = 1.0
 SL_BUFFER_ATR = 0.1
-MIN_RISK_ATR = 1.5           # stop mesafesi en az bu kadar ATR (05.11 kullanici: 1.5 dogruydu; bolge stopu golgede olculur)
+# 06.11 (kullanici, EURJPY 15m SHORT 09:45 TSI: 1.5 ATR stop tepeyi 0.55 pip gecip stop oldu, sonra TP): 1.5 -> 1.75.
+# Eski plan (OLD_MIN_RISK_ATR + eski hedef kurali) Journal'da golge kol "old" olarak olculur.
+MIN_RISK_ATR = 1.75          # stop mesafesi en az bu kadar ATR
+OLD_MIN_RISK_ATR = 1.5
 TOUCH_EXIT_ATR = 0.5         # dokunus kosusu: fiyat proximal'den bu kadar uzaklasinca biter
 MAX_TOUCHES = 1              # bu kadar dokunusa kadar canli; fazlasi olu
 LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
 MAX_AGE_BARS = 60            # daha eski base'ler Journal'a yazilmaz (03.11 kullanici: 120 FX'te ~4 hafta, 12.10'lu bolgeler listedeydi -> 60)
 TARGET_SWING_K = 2           # hedef swing: 5'li fraktal
 MIN_RR = 2.0
+# 06.11 (kullanici, EURJPY 15m: "TP'si 1.7 falan olanlari 2'ye sabitle"): ilk anlamli engel RR FLOOR_RR_MIN..MIN_RR arasindaysa
+# TP = MIN_RR noktasi (`target_kind` "rr2"). Bunun altindaki ara engeller (04.11 NZDUSD RR 1.1, 03.11 XAUUSD 3924 RR 0.7) eskisi
+# gibi atlanir -- yoksa 2R her kucuk swing'in otesine yazilirdi.
+FLOOR_RR_MIN = 1.5
 # 03.11 (kullanici: "40R sacma, 3-4R'den fazlasi olmasin"): yapisal hedef (en yakin karsi bolge YA DA swing) MAX_RR'yi asarsa
 # TP = giris + MAX_RR x risk (`target_kind` "cap"); yapisal RR `features.rr_struct`'ta olculmeye devam eder.
 MAX_RR = 4.0
@@ -116,6 +123,9 @@ class SDZone:
     legout_body_atr: float = 0.0       # leg-out ilk mumunun govdesi / ATR (05.11, yakin kacan bolge olcumu)
     mss: bool = False                  # MSS: donus bolgesinin (DBR/RBD) kirilimi; devam bolgesinde ayni kirilim BOS (05.11)
     pd_pos: Optional[float] = None     # proximal'in PD_RANGE_BARS araligindaki yeri: 0 = dip, 1 = tepe (05.11)
+    # 07.11 (kullanici, XAUUSD 1D 27.08 doji base): 'fitil-fitil' cizimde proximal = base'in karsi fitili (demand tepe, supply dip)
+    # -- yalniz OLCUM (Journal giris varyanti `zone_wick`), bolge/dokunus/plan proximal'i degismez.
+    wick_prox: Optional[float] = None
     touches: int = 0
     last_touch: Optional[pd.Timestamp] = None
     broken_at: Optional[pd.Timestamp] = None
@@ -140,13 +150,18 @@ class SDPlan:
     sl: float
     tp: Optional[float]
     rr: Optional[float]
-    target_kind: Optional[str]   # zone | swing | cap | None
+    target_kind: Optional[str]   # zone | swing | cap | rr2 | None
     tp_struct: Optional[float] = None   # tavan uygulanmadan onceki yapisal hedef
     sl_zone: Optional[float] = None     # taban uygulanmadan onceki bolge stopu (distal + tampon)
     tp_zone: Optional[float] = None     # fiyatin otesindeki ilk karsi canli bolge (olcum: 'hedef karsi bolge olsa?')
     rr_struct: Optional[float] = None
     dist_r: Optional[float] = None      # son kapanisin girise uzakligi, R cinsinden (pozitif = giris henuz dolmadi)
     sl_liq: Optional[float] = None      # stopu iten alinmamis tepe/dip (05.11; None = itilmedi)
+    sl_old: Optional[float] = None      # 06.11 oncesi plan (golge "old"): 1.5 ATR taban
+    tp_old: Optional[float] = None      # ... ve ilk RR >= 2 engel (4R tavanli); None = eski kuralda hedef yok
+    rr_old: Optional[float] = None
+    obst_rr: Optional[float] = None     # 06.11 olcum: fiyatin otesindeki EN YAKIN engelin RR'si (atlansa da); < 1 -> izleme maddesi
+    obst_kind: Optional[str] = None
 
 
 def closed_bars(df: pd.DataFrame, now=None, delta: timedelta = HTF_DELTA) -> pd.DataFrame:
@@ -294,6 +309,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
             fvg=bool(fvg), formed_iloc=int(formed), bos=bool(bos), sweep=bool(sweep),
             sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos,
             legout_body_atr=round(float(abs(body) / a), 3),
+            wick_prox=float(base_hi if up else base_lo),
         )
         _walk_after(z, h, l, idx)
         zones.append(z)
@@ -417,8 +433,12 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     entry = z.proximal
     long = z.direction == "LONG"
     sl_zone = z.distal - buf if long else z.distal + buf
-    floor = MIN_RISK_ATR * z.atr
-    sl = min(sl_zone, entry - floor) if long else max(sl_zone, entry + floor)
+
+    def _sl(mult: float) -> float:
+        floor = mult * z.atr
+        return min(sl_zone, entry - floor) if long else max(sl_zone, entry + floor)
+
+    sl = _sl(MIN_RISK_ATR)
     # Olcum (05.11): stopu otesindeki alinmamis tepe/dibin otesine itmek ana stopa UYGULANMAZ -- onbellekteki 4H/1H serilerinde
     # canli bolgelerin %58'inde (3 mumluk pencerede bile %29) stop degisiyordu; Journal golgesi "liq" ile olculur.
     sl_liq = _liq_beyond_stop(z, df, sl)
@@ -433,28 +453,42 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
     risk = abs(entry - sl)
     zone_lvls = [lvl for lvl, k in cands if k == "zone"]
     tp_zone = (min(zone_lvls) if long else max(zone_lvls)) if zone_lvls else None
-    if cands:
-        # Fiyata en yakin engel; ama MIN_RR'nin altinda kalan ara engel hedef degil (04.11, kullanici: NZDUSD 1H TP 0.56091 /
-        # RR 1.1 -- 17 pip otedeki kucuk swing). Sirayla ilk RR >= MIN_RR veren engel alinir; hicbiri vermiyorsa en yakini
-        # (satir `sd_low_rr` kalir).
-        ordered = sorted(cands, reverse=not long)
-        tp, kind = ordered[0]
-        for lvl, k in ordered:
-            if risk > 0 and abs(lvl - entry) / risk >= MIN_RR:
-                tp, kind = lvl, k
-                break
-    rr = None
-    tp_struct, rr_struct = tp, None
+    ordered = sorted(cands, reverse=not long)
+
+    def _target(risk_: float, floor_rr: bool):
+        """(tp, kind, tp_struct, rr_struct, rr). Eski kural (04.11, NZDUSD 1H RR 1.1): sirayla ilk RR >= MIN_RR engel; hicbiri
+        vermiyorsa en yakini (satir `sd_low_rr` kalir). floor_rr (06.11): RR < FLOOR_RR_MIN ara engelleri atladiktan sonraki ilk
+        engel RR < MIN_RR veriyorsa TP = MIN_RR noktasi ("rr2"; yapisal = o engel) -- o nokta fiyatin otesinde degilse eski kural."""
+        if not ordered or risk_ <= 0:
+            return None, None, None, None, None
+        tp_, kind_ = ordered[0]
+        if floor_rr:
+            first = next(((lvl, k) for lvl, k in ordered if abs(lvl - entry) / risk_ >= FLOOR_RR_MIN), None)
+            p2 = entry + MIN_RR * risk_ if long else entry - MIN_RR * risk_
+            if first is not None and abs(first[0] - entry) / risk_ < MIN_RR and ((p2 > ref) if long else (p2 < ref)):
+                return p2, "rr2", first[0], round(abs(first[0] - entry) / risk_, 2), MIN_RR
+        if abs(tp_ - entry) / risk_ < MIN_RR:
+            for lvl, k in ordered:
+                if abs(lvl - entry) / risk_ >= MIN_RR:
+                    tp_, kind_ = lvl, k
+                    break
+        rs = round(abs(tp_ - entry) / risk_, 2)
+        ts_ = tp_
+        if rs > MAX_RR:
+            tp_ = entry + MAX_RR * risk_ if long else entry - MAX_RR * risk_
+            kind_ = "cap"
+        return tp_, kind_, ts_, rs, round(abs(tp_ - entry) / risk_, 2)
+
+    tp, kind, tp_struct, rr_struct, rr = _target(risk, True)
+    obst_rr = round(abs(ordered[0][0] - entry) / risk, 2) if ordered and risk > 0 else None
     dist_r = round(((last_close - entry) if long else (entry - last_close)) / risk, 2) if risk > 0 else None
-    if tp is not None and risk > 0:
-        rr_struct = round(abs(tp - entry) / risk, 2)
-        if rr_struct > MAX_RR:
-            tp = entry + MAX_RR * risk if long else entry - MAX_RR * risk
-            kind = "cap"
-        rr = round(abs(tp - entry) / risk, 2)
+    sl_old = _sl(OLD_MIN_RISK_ATR)
+    tp_old, _, _, _, rr_old = _target(abs(entry - sl_old), False)
     return SDPlan(entry=float(entry), sl=float(sl), tp=tp, rr=rr, target_kind=kind,
                   tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r, sl_zone=float(sl_zone),
-                  tp_zone=float(tp_zone) if tp_zone is not None else None, sl_liq=sl_liq)
+                  tp_zone=float(tp_zone) if tp_zone is not None else None, sl_liq=sl_liq,
+                  sl_old=float(sl_old), tp_old=float(tp_old) if tp_old is not None else None, rr_old=rr_old,
+                  obst_rr=obst_rr, obst_kind=ordered[0][1] if ordered else None)
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -509,6 +543,11 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         out["sl_zone"] = plan.sl_zone
         out["tp_zone"] = plan.tp_zone
         out["sl_liq"] = plan.sl_liq
+        out["sl_old"] = plan.sl_old
+        out["tp_old"] = plan.tp_old
+        out["rr_old"] = plan.rr_old
+        out["obst_rr"] = plan.obst_rr
+        out["obst_kind"] = plan.obst_kind
         if plan.sl_liq is not None and z.atr:
             b = SL_BUFFER_ATR * z.atr
             out["sl_liq_stop"] = plan.sl_liq - b if z.direction == "LONG" else plan.sl_liq + b

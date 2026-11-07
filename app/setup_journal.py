@@ -179,6 +179,8 @@ ENTRY_VARIANTS = ("chosen", "cisd", "mss",
                   # S/D (04.11, kullanici: "giris bolgenin %50'si olsun mu?"): ayni bolge, SL/TP ayni, giris proximal (chosen) /
                   # bolge ortasi / distal kenar -- `app/sd_scanner` verir, CRT satirlarinda yok.
                   "zone_mid", "zone_far",
+                  # 07.11 (kullanici, doji base): giris base'in karsi fitilinde ("fitil-fitil" bolge; proximal'den disarida)
+                  "zone_wick",
                   "cfvg_near", "cfvg_mid", "cfvg_far")
 
 # CISD kirilim FVG'si: onay mumu merkezli pencere (orta mum: onay-1 .. onay+2). Adaylardan
@@ -229,7 +231,42 @@ def _shadow_init(rec: dict) -> dict | None:
         d = abs(e - float(liq))
         out["liq"] = {"k": round(d / risk, 4), "sl": float(liq), "rr": round(abs(tp - e) / d, 4),
                       "o": "pending", "e": None, "at": None, "until": None}
+    old = _shadow_sd_old(rec, e) if rec.get("strategy") in SD_FILL_REQUIRED_STRATEGIES else None
+    if old is not None:
+        out["old"] = old
     return out
+
+
+def _shadow_sd_old(rec: dict, e: float) -> dict | None:
+    """S/D 06.11 oncesi plan (golge "old"; sd_engine.OLD_MIN_RISK_ATR stop + ilk RR >= 2 engel): kendi SL'i VE kendi TP'si.
+    `k` yok (TP guncellemesinde k-tabanli RR yenilemesine girmez; TP'si `features.tp_old` ile ayri yenilenir). Eski kuralda
+    hedef yoksa ya da RR < 2 ise islem acilmazdi -> invalid."""
+    f = rec.get("features") or {}
+    if "sl_old" not in f:
+        return None
+    sl_o, tp_o, rr_o = f.get("sl_old"), f.get("tp_old"), f.get("rr_old")
+    base = {"k": None, "sl": sl_o, "tp": tp_o, "rr": rr_o, "o": "pending", "e": None, "at": None, "until": None}
+    if sl_o is None or tp_o is None or rr_o is None or float(rr_o) < 2.0:
+        base.update(o="invalid", why="old_no_trade")
+        return base
+    base.update(sl=float(sl_o), tp=float(tp_o), rr=round(abs(float(tp_o) - e) / abs(e - float(sl_o)), 4))
+    return base
+
+
+def _sd_old_retarget(rec: dict, features: dict) -> bool:
+    """Dolmamis S/D satirinda "old" kolunun TP'si eski kuralin o anki hedefine (features.tp_old) yenilenir -- ana TP gibi
+    (SD_TP_UPDATE_STRATEGIES). Eski stopla giris ayni kaldigi surece; hedef kaybolursa ya da RR < 2 olursa dokunmaz."""
+    v = (rec.get("shadow") or {}).get("old")
+    tp_o, sl_o, e = features.get("tp_old"), features.get("sl_old"), rec.get("entry")
+    if not v or v.get("o") != "pending" or tp_o is None or sl_o is None or e is None or v.get("sl") is None:
+        return False
+    if abs(float(sl_o) - float(v["sl"])) > 1e-9 * max(1.0, abs(float(sl_o))) or abs(float(tp_o) - float(v["tp"])) <= 1e-9 * max(1.0, abs(float(tp_o))):
+        return False
+    rr = abs(float(tp_o) - float(e)) / abs(float(e) - float(sl_o))
+    if rr < 2.0:
+        return False
+    v["tp"], v["rr"] = float(tp_o), round(rr, 4)
+    return True
 
 
 def _shadow_c1(rec: dict, e: float, sl: float, tp: float, risk: float) -> dict | None:
@@ -884,6 +921,10 @@ def _apply_shadow(rec: dict, bar_ts, high: float, low: float) -> None:
     for v in rec["shadow"].values():
         if v["o"] not in TRACKING or (v.get("until") is not None and bar_ts <= v["until"]):
             continue
+        if v.get("tp") is not None:                  # kendi TP'si olan kol (S/D "old")
+            hit_tp = high >= v["tp"] if long else low <= v["tp"]
+        else:
+            hit_tp = high >= tp if long else low <= tp
         hit_sl = low <= v["sl"] if long else high >= v["sl"]
         v["until"] = bar_ts
         prev = v["o"]
@@ -1330,6 +1371,9 @@ def note(
                 path = (float(tp) - float(rec["entry"])) if rec["direction"] == "LONG" else (float(rec["entry"]) - float(tp))
                 if path > 0:
                     rec["prefill"]["path"] = round(path, 8)
+            changed = True
+        if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in ("sd_ready", "sd_near")
+                and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None and _sd_old_retarget(rec, features)):
             changed = True
         if entry is not None and sl is not None and tp is not None and rec.get("levels_at") is None:
             # Ilk gorulen seviyeler dondurulur: sonuc izleme bunlarla yapilir.

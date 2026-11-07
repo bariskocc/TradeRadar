@@ -2066,6 +2066,167 @@ async def _p_sd_stop_width(db: AsyncSession) -> Progress:
                     note="aynı setup, aynı giriş/TP; yalnız stop farklı — düz TP/SL (Journal gölgesi)")
 
 
+async def _p_sd_plan_0611(db: AsyncSession) -> Progress:
+    """06.11 (kullanici, EURJPY 15m SHORT): S/D ana plan stop 1.75 ATR + en yakin engel RR < 2 ise TP = 2R. Eski plan (1.5 ATR +
+    ilk RR >= 2 engel) Journal golgesi `shadow.old` (kendi SL + TP; eski kuralda islem yoksa invalid = 0R). Ana plan = k=1 kolu.
+    Yalniz 06.11 sonrasi seviyelenen satirlar (`old` anahtari tasiyan). Duz TP/SL; hafta kapanisi fiyattan."""
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.shadow, t.c.direction, t.c.entry, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage == "sd_ready", t.c.shadow.is_not(None)))).all()
+    done = ("win", "loss", "week_close", "invalid")
+
+    def r_of(v, e, d):
+        o = v.get("o")
+        if o == "win":
+            return float(v.get("rr") or 0)
+        if o == "loss":
+            return -1.0
+        if o == "week_close" and v.get("px") is not None and v.get("sl") is not None and e is not None:
+            risk = abs(float(e) - float(v["sl"]))
+            return ((float(v["px"]) - float(e)) if d == "LONG" else (float(e) - float(v["px"]))) / risk if risk else 0.0
+        return 0.0
+
+    acc: dict[str, list] = {}
+    for st_, sh, d, e, lv in rows:
+        try:
+            s_ = json.loads(sh or "{}")
+        except Exception:
+            continue
+        new, old = s_.get("1") or {}, s_.get("old")
+        if not old or new.get("o") not in done[:3] or old.get("o") not in done:
+            continue                              # iki kol da cozulmeli (eskide islem yok = invalid, 0R)
+        acc.setdefault(st_, []).append((lv, r_of(new, e, d), r_of(old, e, d), new.get("o"), old.get("o")))
+    table = [["Strateji · plan", "TP / SL", "R/işlem", "1. yarı", "2. yarı"]]
+    names = {"sd": "S/D 4H (bölge limiti)", "sd1h": "S/D 1H (bölge limiti)", "sd15m": "S/D 15m"}
+    for st_ in ("sd15m", "sd", "sd1h"):
+        xs = sorted(acc.get(st_, []), key=lambda x: x[0] or datetime.min)
+        h = len(xs) // 2
+
+        def per(v):
+            return f"{sum(v) / len(v):+.2f}" if v else "-"
+
+        for i, label in ((1, "yeni · 1,75 ATR + 2R taban"), (2, "eski · 1,5 ATR + ilk RR ≥ 2 engel")):
+            os_ = [x[2 + i] for x in xs]
+            rr = [x[i] for x in xs]
+            extra = f" · eskide işlem yok {os_.count('invalid')}" if i == 2 and os_.count("invalid") else ""
+            table.append([f"{names[st_]} · {label}", f"{os_.count('win')} / {os_.count('loss')}{extra}", per(rr),
+                          per(rr[:h]), per(rr[h:])])
+    return Progress(bars=[Bar("S/D 15m — iki plan da çözülmüş", len(acc.get("sd15m", [])), 30)], table=table,
+                    note="aynı bölge, aynı giriş · yeni = ana plan, eski = Journal gölgesi (kendi stop + TP) · düz TP/SL")
+
+
+async def _p_sd_zone_wick(db: AsyncSession) -> Progress:
+    """07.11 (kullanici, XAUUSD 1D 27.08 doji base: "S/D'de dojinin tamami degil miydi?"): bolge 'govde-fitil' (bugunku proximal) mi,
+    'fitil-fitil' (butun base mumu; giris base'in karsi fitilinde) mi? Ayni bolge, SL/TP ayni: Journal giris varyantlari `chosen` ↔
+    `zone_wick`. Dolmadan TP / hic dokunmama = 0R (kacan), hafta kapanisi fiyattan. `imm` (seviye aninda gecilmis) dislanir. Dilim:
+    iki giris arasi >= 0.25 ATR (doji / fitilli base -- farkin anlamli oldugu bolgeler)."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.entries, t.c.direction, t.c.sl, t.c.features_at_levels, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage == "sd_ready", t.c.entries.is_not(None)))).all()
+    done = ("win", "loss", "week_close", "tp_before_entry", "no_touch")
+
+    def r_of(v, sl, d, px):
+        o = v.get("o")
+        if o == "win":
+            return float(v.get("rr") or 0)
+        if o == "loss":
+            return -1.0
+        if o == "week_close":
+            return sc.week_close_r(v.get("e"), sl, px, d) or 0.0
+        return 0.0
+
+    acc: dict[tuple, list] = {}
+    for st_, ents, d, sl, fal, lv in rows:
+        try:
+            en = json.loads(ents or "{}")
+            f = json.loads(fal or "{}")
+        except Exception:
+            continue
+        a, b = en.get("chosen") or {}, en.get("zone_wick")
+        if not b or a.get("o") not in done or b.get("o") not in done or a.get("imm") or b.get("imm"):
+            continue
+        px = (en.get("_wc") or {}).get("px")
+        risk_atr = f.get("risk_atr")
+        gap = (abs(float(b["e"]) - float(a["e"])) / (abs(float(a["e"]) - float(sl)) / risk_atr)
+               if risk_atr and sl is not None and a.get("e") is not None and b.get("e") is not None and a["e"] != sl else None)
+        item = (lv, r_of(a, sl, d, px), r_of(b, sl, d, px), a.get("o"), b.get("o"))
+        acc.setdefault((st_, "hepsi"), []).append(item)
+        if gap is not None and gap >= 0.25:
+            acc.setdefault((st_, "fark ≥ 0,25 ATR"), []).append(item)
+    table = [["Strateji · dilim · giriş", "TP / SL / kaçan", "R/bölge", "1. yarı", "2. yarı"]]
+    names = {"sd": "S/D 4H", "sd1h": "S/D 1H", "sd15m": "S/D 15m"}
+    for st_ in ("sd15m", "sd", "sd1h"):
+        for sl_ in ("hepsi", "fark ≥ 0,25 ATR"):
+            xs = sorted(acc.get((st_, sl_), []), key=lambda x: x[0] or datetime.min)
+            if not xs:
+                continue
+            h = len(xs) // 2
+
+            def per(v):
+                return f"{sum(v) / len(v):+.2f}" if v else "-"
+
+            for i, label in ((1, "gövde-fitil (bugünkü)"), (2, "fitil-fitil (bütün mum)")):
+                os_ = [x[2 + i] for x in xs]
+                rr = [x[i] for x in xs]
+                miss = sum(os_.count(k) for k in ("tp_before_entry", "no_touch"))
+                table.append([f"{names[st_]} · {sl_} · {label}", f"{os_.count('win')} / {os_.count('loss')} / {miss}", per(rr),
+                              per(rr[:h]), per(rr[h:])])
+    n = len(acc.get(("sd15m", "fark ≥ 0,25 ATR"), []))
+    return Progress(bars=[Bar("S/D 15m — fark ≥ 0,25 ATR, iki giriş de çözülmüş", n, 30)], table=table,
+                    note="aynı bölge, aynı SL/TP · kaçan (dolmadan TP / dokunmadı) = 0R · 4H/1H ana işlem LTF onay kolu, bu satırlar bilgi")
+
+
+async def _p_sd_near_obstacle(db: AsyncSession) -> Progress:
+    """06.11 (kullanici: "RR 1'den dusukse onu bir setup saymasin?"): fiyatin otesindeki en yakin engel (karsi bolge / swing) RR < 1
+    veriyorsa hedef planinda atlanir (04.11 kurali). Soru: bu bolgeler hic setup sayilmasin mi? `features_at_levels.obst_rr` (06.11 sonrasi
+    seviyelenen satirlar). Sonuc ana islemden: 15m bolge limiti (satir outcome), 4H / 1H LTF onay kolu (entries.sdc; islem yoksa sayilmaz)."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.outcome, t.c.rr, t.c.entries, t.c.features_at_levels, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage == "sd_ready", t.c.entry.is_not(None)))).all()
+    acc: dict[tuple, list] = {}
+    for st_, o, rr, ents, fal, lv in rows:
+        try:
+            f = json.loads(fal or "{}")
+        except Exception:
+            continue
+        if "obst_rr" not in f:
+            continue
+        if st_ in sc.STRATEGIES:
+            try:
+                sdc = (json.loads(ents or "{}")).get(sc.SDC_KEY) or {}
+            except Exception:
+                continue
+            if sdc.get("o") not in ("win", "loss"):
+                continue
+            r_ = sc.final_r(sdc) or 0.0
+            win = sdc["o"] == "win"
+        else:
+            if o not in ("win", "loss"):
+                continue
+            win = o == "win"
+            r_ = float(rr or 0) if win else -1.0
+        near = f.get("obst_rr") is not None and float(f["obst_rr"]) < 1.0
+        acc.setdefault((st_, near), []).append((lv, win, r_))
+    names = {"sd15m": "S/D 15m", "sd": "S/D 4H (onay kolu)", "sd1h": "S/D 1H (onay kolu)"}
+    table = [["Strateji · en yakın engel", "TP / SL", "WR", "R/işlem", "1. yarı", "2. yarı"]]
+    for st_ in ("sd15m", "sd", "sd1h"):
+        for near, label in ((True, "RR < 1 (atlanan)"), (False, "RR ≥ 1 ya da yok")):
+            xs = sorted(acc.get((st_, near), []), key=lambda x: x[0] or datetime.min)
+            n, h = len(xs), len(xs) // 2
+            w = sum(1 for x in xs if x[1])
+            rs = [x[2] for x in xs]
+
+            def per(v):
+                return f"{sum(v) / len(v):+.2f}" if v else "-"
+
+            table.append([f"{names[st_]} · {label}", f"{w} / {n - w}", f"%{100 * w / n:.0f}" if n else "-", per(rs),
+                          per(rs[:h]), per(rs[h:])])
+    bars = [Bar(f"{names[s_]} — RR < 1 engelli çözülmüş", len(acc.get((s_, True), [])), 30) for s_ in ("sd15m",)]
+    return Progress(bars=bars, table=table, note="obst_rr = fiyatın ötesindeki en yakın engelin RR'si (seviye anı) · 06.11 öncesi satırlar yok")
+
+
 ITEMS: list[WatchItem] = [
     WatchItem(
         key="session_anchor", status="done", started="18.09",
@@ -3181,7 +3342,39 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_near,
     ),
     WatchItem(
-        key="sd_stop_width", status="open", started="03.11", onem=1, group="sd",
+        key="sd_plan_0611", status="open", started="06.11", onem=1, group="sd",
+        title="S/D planı 06.11 — 1,75 ATR stop + 2R TP tabanı eskisine göre tuttu mu?",
+        trigger="15m'de iki plan da çözülmüş 30 bölge: yeni plan R/işlemde eskiden ≥ 0,15 geride VE iki yarıda aynı yön → eski plana "
+                "(1,5 ATR + ilk RR ≥ 2 engel) dönüş; aksi halde yeni plan kalır. 4H/1H bölge limiti satırları bilgi (ana işlem LTF onay kolu)",
+        measure="/sd-izleme tablosu (Journal shadow k=1 ↔ shadow.old)",
+        md="S/D planı 06.11 — 1,75 ATR stop + 2R TP tabanı (06.11.2026)",
+        progress_fn=_p_sd_plan_0611,
+    ),
+    WatchItem(
+        key="sd_zone_wick", status="open", started="07.11", onem=1, group="sd",
+        title="S/D bölge sınırı: gövde-fitil mi, fitil-fitil (bütün base mumu) mu?",
+        trigger="15m'de iki giriş arası ≥ 0,25 ATR olan, iki girişi de çözülmüş 30 bölge: fitil-fitil R/bölgede gövde-fitilden ≥ 0,15 "
+                "önde VE iki yarıda aynı yön → proximal base'in karşı fitili olur (giriş + çizim); aksi halde bugünkü kural kalır. "
+                "4H/1H satırları bilgi (ana işlem LTF onay kolu)",
+        measure="/sd-izleme tablosu (Journal entries chosen ↔ zone_wick)",
+        md="S/D bölge sınırı: gövde-fitil mi, fitil-fitil mi? (07.11.2026)",
+        progress_fn=_p_sd_zone_wick,
+    ),
+    WatchItem(
+        key="sd_near_obstacle", status="open", started="06.11", onem=1, group="sd",
+        title="S/D: en yakın engel RR < 1 veriyorsa bölge setup sayılmasın mı?",
+        trigger="15m'de en yakın engeli RR < 1 olan 30 çözülmüş bölge: bu grup R/işlemde diğerlerinden ≥ 0,15 geride VE iki yarıda aynı yön "
+                "→ bu bölgeler setup sayılmaz (kapı); aksi halde engel atlanmaya devam eder (04.11 kuralı). 4H/1H onay kolu bilgi",
+        measure="/sd-izleme tablosu (Journal features_at_levels.obst_rr)",
+        md="S/D: en yakın engel RR < 1 — setup sayılsın mı? (06.11.2026)",
+        progress_fn=_p_sd_near_obstacle,
+    ),
+    WatchItem(
+        key="sd_stop_width", status="done", started="03.11", onem=1, group="sd",
+        result="(06.11) KULLANICI KARARIYLA KAPANDI, tetik dolmadan: ana stop 1,5 → 1,75 ATR + en yakın engel RR < 2 ise TP = 2R "
+               "(EURJPY 15m SHORT 06.11 09:45 TSİ: stop tepeyi 0,55 pip geçti, sonra TP; hedef zaten süpürülmüş swing'di). O gün "
+               "15m'de aynı TP ile 2,0 ATR gölgesi 56 işlemde R/işlem +0,24 → +0,11 idi (karar aleyhine). Doğrulama: 'S/D planı "
+               "06.11 — 1,75 ATR stop + 2R TP tabanı eskisine göre tuttu mu?'",
         title="S/D stop genişliği — 1,5 ATR mı, 1,0 / 2,0 ATR mı, bölge stopu mu, yakın tepe/dibin ötesi mi?",
         trigger="ana stop (1,5 ATR) 60 çözülmüş; aynı setuplarda 1,0 ATR / 2,0 ATR / bölge stopu / yakın tepe-dip ötesi gölgesi R/işlemde ≥ +0,15 ileride VE "
                 "iki yarıda aynı yönde → ana stop o kurala; aksi halde 1,5 ATR kalır (ATR pariteye göre ölçeklenir, ayrı çarpan yok)",

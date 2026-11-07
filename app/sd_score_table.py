@@ -110,8 +110,8 @@ async def build_sd_score_table(db: AsyncSession, tf: str) -> dict:
     return {
         "tf": tf, "tfs": TFS, "tf_label": dict(TFS)[tf], "items": item_rows, "total": total, "gates": gate_rows,
         "n_rows": len(rows), "n_resolved": len(resolved),
-        "plan": {"entry": "proximal kenar (limit); ölçümde %50 ve distal da izlenir", "sl": f"distal + {sde.SL_BUFFER_ATR:g} ATR, risk en az {sde.MIN_RISK_ATR:g} ATR (ATR = pariteye göre ölçek); gölgede 1,0 / 2,0 ATR ve bölge stopu",
-                 "tp": f"en yakın engel (karşı bölge / swing, son kapanıştan ≥ {sde.TARGET_MIN_BEYOND_ATR:g} ATR), tavan {sde.MAX_RR:g}R; dolum öncesi güncellenir",
+        "plan": {"entry": "proximal kenar (limit); ölçümde %50 ve distal da izlenir", "sl": f"distal + {sde.SL_BUFFER_ATR:g} ATR, risk en az {sde.MIN_RISK_ATR:g} ATR (ATR = pariteye göre ölçek); gölgede ×0,67 / ×1,33, bölge stopu ve eski plan ({sde.OLD_MIN_RISK_ATR:g} ATR)",
+                 "tp": f"en yakın engel (karşı bölge / swing, son kapanıştan ≥ {sde.TARGET_MIN_BEYOND_ATR:g} ATR), engel RR < {sde.MIN_RR:g} ise TP = {sde.MIN_RR:g}R noktası, tavan {sde.MAX_RR:g}R; dolum öncesi güncellenir",
                  "base": f"≤ {sde.BASE_MAX_BARS} mum, gövde ≤ {sde.BASE_MAX_BODY_ATR:g} ATR", "legout": f"ilk mum gövdesi ≥ {sde.LEG_BODY_MIN_ATR:g} ATR, {sde.LEG_OUT_BARS} mumda ≥ {sde.LEG_OUT_MIN_ATR:g} ATR",
                  "age": f"base ≤ {sde.MAX_AGE_BARS} mum", "touch": f"dokunuş koşusu {sde.TOUCH_EXIT_ATR:g} ATR uzaklaşınca biter; 2+ dokunuş ölü"},
     }

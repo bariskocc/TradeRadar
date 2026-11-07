@@ -1,0 +1,315 @@
+//@version=6
+// TradeRadar Supply / Demand bolgeleri -- app/sd_engine.py `detect_zones` + `_walk_after` kopyasi.
+// Grafigin TF'sinden hesaplanir (TF degisince bolgeler yeniden kurulur). Yalniz KAPANMIS mumlar sayilir (motor gibi).
+// Esikler motorla ayni; sd_engine.py'de bir sabit degisirse buraya da yaz.
+indicator("TradeRadar S/D Zones", "S/D [BK]", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_bars_back = 1100)
+
+// ---- Ayarlar ----------------------------------------------------------------------------------------------------------
+grpZ = "Bölgeler"
+lookback   = input.int(200, "Geriye bakış (kapanmış mum)", minval = 30, maxval = 1000, group = grpZ, tooltip = "Motor son 200 kapanmış mumu kullanır. Değiştirirsen motorla birebir aynı olmaz.")
+showDead   = input.bool(true, "Ölü bölgeleri göster (soluk)", group = grpZ, tooltip = "2. dokunuşta ya da distal kırılınca bölge ölür; kutu o mumda biter.")
+showLabels = input.bool(true, "Etiket (tip · tazelik · rozetler)", group = grpZ)
+zoneDraw   = input.string("Gövde-fitil (motor)", "Bölge sınırı", options = ["Gövde-fitil (motor)", "Fitil-fitil (bütün mum)"], group = grpZ, tooltip = "Gövde-fitil: proximal base gövdesinde (motorun girişi). Fitil-fitil: bütün base mumu kutuya girer (doji base). Yalnız çizim değişir; dokunuş / ölü hesabı motorun proximal'inden.")
+grpL = "Etiket"
+lblH = input.string("Sağ", "Yatay konum", options = ["Sağ", "Sol"], group = grpL, tooltip = "Etiket kutunun içinde, bu kenarda durur.")
+lblV = input.string("Orta", "Dikey konum", options = ["Üst", "Orta", "Alt"], group = grpL)
+txtPt = input.int(9, "Yazı boyutu (punto)", options = [6, 7, 8, 9, 10, 11, 12, 14, 16], group = grpL)
+grpC = "Renkler"
+cDemand = input.color(color.new(#22c55e, 82), "Demand", group = grpC)
+cSupply = input.color(color.new(#ef4444, 82), "Supply", group = grpC)
+cDead   = input.color(color.new(#9ca3af, 90), "Ölü bölge", group = grpC)
+
+// ---- Motor sabitleri (app/sd_engine.py) ---------------------------------------------------------------------------------
+ATR_PERIOD         = 14
+BASE_MAX_BARS      = 4
+BASE_MAX_BODY_ATR  = 0.5
+BASE_MAX_RANGE_ATR = 1.5
+LEG_OUT_MIN_ATR    = 2.0
+LEG_OUT_BARS       = 3
+LEG_BODY_MIN_ATR   = 1.0
+LEG_IN_BARS        = 3
+LEG_IN_MIN_ATR     = 1.0
+SL_BUFFER_ATR      = 0.1
+TOUCH_EXIT_ATR     = 0.5
+MAX_TOUCHES        = 1
+SWING_K            = 2
+MAJOR_SWING_K      = 5
+SWING_LOOKBACK     = 30
+EQ_TOL_ATR         = 0.2
+BOS_EXTRA_BARS     = 2
+PD_RANGE_BARS      = 72
+DAY_MS             = 86400000.0
+
+// ---- Yardimcilar --------------------------------------------------------------------------------------------------------
+f_isBase(array<float> o, array<float> h, array<float> l, array<float> c, int i, float a) =>
+    math.abs(c.get(i) - o.get(i)) <= BASE_MAX_BODY_ATR * a and (h.get(i) - l.get(i)) <= BASE_MAX_RANGE_ATR * a
+
+// v[a..b] (dahil) en buyuk / en kucuk
+f_max(array<float> v, int a, int b) =>
+    float m = v.get(a)
+    int i = a + 1
+    while i <= b
+        m := math.max(m, v.get(i))
+        i += 1
+    m
+
+f_min(array<float> v, int a, int b) =>
+    float m = v.get(a)
+    int i = a + 1
+    while i <= b
+        m := math.min(m, v.get(i))
+        i += 1
+    m
+
+f_isPivot(array<float> v, int i, bool isHigh, int k) =>
+    float x = v.get(i)
+    bool ok = true
+    for m = 1 to k
+        if isHigh ? (x <= v.get(i - m) or x <= v.get(i + m)) : (x >= v.get(i - m) or x >= v.get(i + m))
+            ok := false
+    ok
+
+// _last_swing_before: `end`'den (haric) onceki son fraktal tepe/dip; sag kanat en fazla `wingEnd` mumuna uzanir
+f_lastSwing(array<float> v, int end, bool isHigh, int k, int wingEnd) =>
+    float res = na
+    int last = math.min(wingEnd, v.size() - 1)
+    int i = math.min(end - 1, last - k)
+    int stop = math.max(k, end - SWING_LOOKBACK)
+    while i >= stop and na(res)
+        if f_isPivot(v, i, isHigh, k)
+            res := v.get(i)
+        i -= 1
+    res
+
+// _equal_level_before: birbirine `tol` kadar yakin iki fraktal dip/tepe (esit dipler / tepeler havuzu)
+f_equalLevel(array<float> v, int end, bool isHigh, float tol) =>
+    array<float> piv = array.new<float>()
+    int i = math.max(SWING_K, end - SWING_LOOKBACK)
+    while i < end - SWING_K
+        if f_isPivot(v, i, isHigh, SWING_K)
+            piv.push(v.get(i))
+        i += 1
+    float best = na
+    int np = piv.size()
+    int a = 0
+    while a < np - 1
+        int b = a + 1
+        while b < np
+            float pa = piv.get(a)
+            float pb = piv.get(b)
+            if math.abs(pa - pb) <= tol
+                float lvl = isHigh ? math.max(pa, pb) : math.min(pa, pb)
+                best := na(best) ? lvl : (isHigh ? math.min(best, lvl) : math.max(best, lvl))
+            b += 1
+        a += 1
+    best
+
+// _prev_day_extreme: base gununden bir onceki UTC gunun dibi / tepesi (pencere icindeki mumlardan)
+f_prevDayExtreme(array<int> t, array<float> v, int end, bool isHigh) =>
+    int dEnd = math.floor(t.get(end) / DAY_MS)
+    int prev = -1
+    for i = 0 to end - 1
+        int d = math.floor(t.get(i) / DAY_MS)
+        if d < dEnd and d > prev
+            prev := d
+    float res = na
+    if prev >= 0
+        for i = 0 to end - 1
+            if math.floor(t.get(i) / DAY_MS) == prev
+                res := na(res) ? v.get(i) : (isHigh ? math.max(res, v.get(i)) : math.min(res, v.get(i)))
+    res
+
+f_fmt(float x) =>
+    str.tostring(x, format.mintick)
+
+// ---- Hesap + cizim (yalniz son mumda; her seferinde bastan) -------------------------------------------------------------
+if barstate.islast
+    allBoxes = box.all
+    if allBoxes.size() > 0
+        for i = 0 to allBoxes.size() - 1
+            allBoxes.get(i).delete()
+    allLabels = label.all
+    if allLabels.size() > 0
+        for i = 0 to allLabels.size() - 1
+            allLabels.get(i).delete()
+
+    // Olusan mum sayilmaz (motorun closed_bars'i)
+    int skip = barstate.isconfirmed ? 0 : 1
+    int n = math.min(lookback, bar_index + 1 - skip)
+    if n >= ATR_PERIOD + LEG_IN_BARS + BASE_MAX_BARS + 2
+        o = array.new<float>(n, 0.0)
+        h = array.new<float>(n, 0.0)
+        l = array.new<float>(n, 0.0)
+        c = array.new<float>(n, 0.0)
+        t = array.new<int>(n, 0)
+        for i = 0 to n - 1
+            int off = n - 1 - i + skip
+            o.set(i, open[off])
+            h.set(i, high[off])
+            l.set(i, low[off])
+            c.set(i, close[off])
+            t.set(i, time[off])
+        // ATR: TR'nin 14 mumluk basit ortalamasi, pencere icinde (pandas rolling min_periods=1)
+        atr = array.new<float>(n, 0.0)
+        tr = array.new<float>(n, 0.0)
+        float sumTr = 0.0
+        for i = 0 to n - 1
+            float x = h.get(i) - l.get(i)
+            if i > 0
+                float pc = c.get(i - 1)
+                x := math.max(x, math.abs(h.get(i) - pc), math.abs(l.get(i) - pc))
+            tr.set(i, x)
+            sumTr += x
+            if i >= ATR_PERIOD
+                sumTr -= tr.get(i - ATR_PERIOD)
+            atr.set(i, sumTr / math.min(i + 1, ATR_PERIOD))
+
+        int lastBi = bar_index - skip
+        int j = LEG_IN_BARS + 1
+        while j < n
+            int nextJ = j + 1
+            float a = atr.get(j - 1)
+            float body = c.get(j) - o.get(j)
+            if a > 0 and math.abs(body) >= LEG_BODY_MIN_ATR * a
+                bool up = body > 0
+                int bs = j - 1
+                while bs > 0 and (j - bs) < BASE_MAX_BARS and f_isBase(o, h, l, c, bs - 1, a)
+                    bs -= 1
+                if f_isBase(o, h, l, c, j - 1, a)
+                    float baseHi = f_max(h, bs, j - 1)
+                    float baseLo = f_min(l, bs, j - 1)
+                    if (up and c.get(j) > baseHi) or (not up and c.get(j) < baseLo)
+                        float bodiesHi = math.max(f_max(o, bs, j - 1), f_max(c, bs, j - 1))
+                        float bodiesLo = math.min(f_min(o, bs, j - 1), f_min(c, bs, j - 1))
+                        float prox = up ? bodiesHi : bodiesLo
+                        float dist = up ? baseLo : baseHi
+                        // leg-out: proximal'den LEG_OUT_BARS icinde en az LEG_OUT_MIN_ATR
+                        int endK = math.min(n, j + LEG_OUT_BARS)
+                        int formed = -1
+                        float legout = 0.0
+                        int k = j
+                        while k < endK and formed < 0
+                            float ext = up ? h.get(k) : l.get(k)
+                            legout := math.max(legout, up ? ext - prox : prox - ext)
+                            if legout >= LEG_OUT_MIN_ATR * a
+                                formed := k
+                            k += 1
+                        if formed >= 0
+                            nextJ := formed + 1
+                            // leg-in harfi
+                            int li0 = bs - 1 - LEG_IN_BARS
+                            float legin = li0 >= 0 ? (c.get(bs - 1) - c.get(li0)) / a : 0.0
+                            string inL = legin >= LEG_IN_MIN_ATR ? "R" : legin <= -LEG_IN_MIN_ATR ? "D" : "?"
+                            string outL = up ? "R" : "D"
+                            string ztype = inL + "B" + outL
+                            // FVG: leg-out icinde 3'lu bosluk
+                            bool fvg = false
+                            int fk = j
+                            while fk < math.min(n - 1, j + LEG_OUT_BARS) and not fvg
+                                if up and l.get(fk + 1) > h.get(fk - 1)
+                                    fvg := true
+                                if not up and h.get(fk + 1) < l.get(fk - 1)
+                                    fvg := true
+                                fk += 1
+                            // BOS: base'den onceki son 5'li swing'in otesinde kapanis (formed + 2 muma kadar)
+                            int bosEnd = math.min(n, formed + BOS_EXTRA_BARS + 1)
+                            float sw = f_lastSwing(up ? h : l, bs, up, SWING_K, j - 1)
+                            bool bos = false
+                            if not na(sw)
+                                int bk = j
+                                while bk < bosEnd and not bos
+                                    if up ? c.get(bk) > sw : c.get(bk) < sw
+                                        bos := true
+                                    bk += 1
+                            // Sweep: genis fraktal (her yanda 5) / esit dip-tepe / onceki UTC gunun ucu
+                            array<float> sideV = up ? l : h
+                            float mj = f_lastSwing(sideV, bs, not up, MAJOR_SWING_K, j - 1)
+                            bool sweep = not na(mj) and (up ? baseLo < mj : baseHi > mj)
+                            string sweepKind = sweep ? "major" : ""
+                            if not sweep
+                                float eq = f_equalLevel(sideV, bs, not up, EQ_TOL_ATR * a)
+                                if not na(eq) and (up ? baseLo < eq : baseHi > eq)
+                                    sweep := true
+                                    sweepKind := "EQ"
+                            if not sweep
+                                float pdx = f_prevDayExtreme(t, sideV, bs, not up)
+                                if not na(pdx) and (up ? baseLo < pdx : baseHi > pdx)
+                                    sweep := true
+                                    sweepKind := up ? "PDL" : "PDH"
+                            bool reversal = inL != "?" and inL != outL
+                            bool mss = reversal and bos
+                            // Premium / discount: proximal'in son 72 mumluk araliktaki yeri
+                            int w0 = math.max(0, bs - PD_RANGE_BARS + 1)
+                            float rHi = f_max(h, w0, bs)
+                            float rLo = f_min(l, w0, bs)
+                            float pdPos = rHi > rLo ? (prox - rLo) / (rHi - rLo) : na
+                            bool pdOk = not na(pdPos) and (up ? pdPos < 0.5 : pdPos > 0.5)
+                            // Olusumdan sonra: dokunus kosulari ve distal kirilmasi (_walk_after)
+                            float buf = SL_BUFFER_ATR * a
+                            int touches = 0
+                            bool inRun = false
+                            int brokenAt = -1
+                            int touch2At = -1
+                            int wi = formed + 1
+                            while wi < n and brokenAt < 0
+                                bool touching = up ? l.get(wi) <= prox : h.get(wi) >= prox
+                                bool beyond = up ? l.get(wi) < dist - buf : h.get(wi) > dist + buf
+                                if touching and not inRun
+                                    touches += 1
+                                    inRun := true
+                                    if touches == MAX_TOUCHES + 1
+                                        touch2At := wi
+                                else if inRun
+                                    bool left = up ? l.get(wi) > prox + TOUCH_EXIT_ATR * a : h.get(wi) < prox - TOUCH_EXIT_ATR * a
+                                    if left
+                                        inRun := false
+                                if beyond
+                                    brokenAt := wi
+                                wi += 1
+                            bool dead = brokenAt >= 0 or touches > MAX_TOUCHES
+                            bool inZone = inRun and brokenAt < 0
+                            int deadAt = brokenAt >= 0 and (touch2At < 0 or brokenAt <= touch2At) ? brokenAt : touch2At
+
+                            if not dead or showDead
+                                // Cizim siniri: motor proximal'i ya da base'in karsi fitili (yalniz gorunum, Journal varyanti `zone_wick`)
+                                float drawProx = zoneDraw == "Fitil-fitil (bütün mum)" ? (up ? baseHi : baseLo) : prox
+                                float zTop = math.max(drawProx, dist)
+                                float zBot = math.min(drawProx, dist)
+                                int leftBi = lastBi - (n - 1 - bs)
+                                int rightBi = dead ? lastBi - (n - 1 - deadAt) : bar_index
+                                color baseCol = up ? cDemand : cSupply
+                                color fillCol = dead ? cDead : baseCol
+                                color lineCol = dead ? color.new(cDead, 60) : color.new(baseCol, 35)
+                                string lineStyle = touches == 0 or dead ? line.style_solid : line.style_dashed
+                                box.new(leftBi, zTop, rightBi, zBot, border_color = lineCol, border_width = 1,
+                                     border_style = lineStyle, extend = extend.none, bgcolor = fillCol)
+                                if showLabels
+                                    string state = dead ? (deadAt == brokenAt ? "Broken" : "2nd touch") : touches == 0 ? "Fresh" : "Tested"
+                                    string txt = ztype + " · " + state
+                                    if not dead
+                                        if inZone
+                                            txt := txt + " · In zone"
+                                        if mss
+                                            txt := txt + " · MSS"
+                                        else if bos
+                                            txt := txt + " · BOS"
+                                        if sweep
+                                            txt := txt + (sweepKind == "major" ? " · Sweep" : " · Sweep " + sweepKind)
+                                        if pdOk
+                                            txt := txt + (up ? " · Discount" : " · Premium")
+                                        if fvg
+                                            txt := txt + " · FVG"
+                                    string tip = (up ? "Demand " : "Supply ") + ztype + "\nProximal " + f_fmt(prox) + " · Distal " + f_fmt(dist)
+                                         + "\nLeg-out " + str.tostring(legout / a, "#.##") + " ATR · leg-in " + str.tostring(legin, "#.##")
+                                         + " ATR · base " + str.tostring(j - bs) + " mum\nDokunuş " + str.tostring(touches)
+                                         + (na(pdPos) ? "" : " · PD " + str.tostring(pdPos, "#.##"))
+                                    color txtCol = dead ? color.new(color.gray, 30) : color.new(baseCol, 0)
+                                    // Kutunun icinde: secilen kenara yaslanir (etiketin ucu kenarda, govdesi iceri dogru)
+                                    bool onRight = lblH == "Sağ"
+                                    float ly = lblV == "Üst" ? zTop : lblV == "Alt" ? zBot : (zTop + zBot) / 2
+                                    string lst = lblV == "Üst" ? (onRight ? label.style_label_upper_right : label.style_label_upper_left)
+                                         : lblV == "Alt" ? (onRight ? label.style_label_lower_right : label.style_label_lower_left)
+                                         : (onRight ? label.style_label_right : label.style_label_left)
+                                    label.new(onRight ? rightBi : leftBi, ly, txt, style = lst, color = color.new(color.black, 100),
+                                         textcolor = txtCol, size = txtPt, tooltip = tip)
+            j := nextJ
