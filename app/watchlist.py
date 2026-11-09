@@ -2149,7 +2149,11 @@ async def _p_sd_zone_wick(db: AsyncSession) -> Progress:
             f = json.loads(fal or "{}")
         except Exception:
             continue
-        a, b = en.get("chosen") or {}, en.get("zone_wick")
+        # 09.11'den beri chosen = fitil-fitil, eski govde kenari `zone_body`; oncesinde chosen = govde, `zone_wick` = fitil
+        if "zone_body" in en:
+            a, b = en.get("zone_body") or {}, en.get("chosen")
+        else:
+            a, b = en.get("chosen") or {}, en.get("zone_wick")
         if not b or a.get("o") not in done or b.get("o") not in done or a.get("imm") or b.get("imm"):
             continue
         px = (en.get("_wc") or {}).get("px")
@@ -2172,7 +2176,7 @@ async def _p_sd_zone_wick(db: AsyncSession) -> Progress:
             def per(v):
                 return f"{sum(v) / len(v):+.2f}" if v else "-"
 
-            for i, label in ((1, "gövde-fitil (bugünkü)"), (2, "fitil-fitil (bütün mum)")):
+            for i, label in ((1, "gövde-fitil (eski)"), (2, "fitil-fitil (09.11'den beri ana)")):
                 os_ = [x[2 + i] for x in xs]
                 rr = [x[i] for x in xs]
                 miss = sum(os_.count(k) for k in ("tp_before_entry", "no_touch"))
@@ -2180,6 +2184,61 @@ async def _p_sd_zone_wick(db: AsyncSession) -> Progress:
                               per(rr[:h]), per(rr[h:])])
     n = len(acc.get(("sd15m", "fark ≥ 0,25 ATR"), []))
     return Progress(bars=[Bar("S/D 15m — fark ≥ 0,25 ATR, iki giriş de çözülmüş", n, 30)], table=table,
+                    note="aynı bölge, aynı SL/TP · kaçan (dolmadan TP / dokunmadı) = 0R · 4H/1H ana işlem LTF onay kolu, bu satırlar bilgi")
+
+
+async def _p_sd_mid_entry(db: AsyncSession) -> Progress:
+    """09.11 (kullanici, EURUSD 1H 06.11 13:00 UTC+3 supply): bolge >= sd_engine.MID_ENTRY_MIN_ATR ise giris orta nokta, stop yerinde.
+    Ayni bolgede orta (`chosen`) vs kenar (`zone_wick` = fitil-fitil proximal), SL/TP satirinki. Kacan (dolmadan TP / dokunmadi) = 0R,
+    hafta kapanisi fiyattan, `imm` dislanir. Yalniz `features.entry_kind = mid` satirlar (09.11 restart'indan sonra)."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.entries, t.c.direction, t.c.sl, t.c.features_at_levels, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage == "sd_ready", t.c.entries.is_not(None)))).all()
+    done = ("win", "loss", "week_close", "tp_before_entry", "no_touch")
+
+    def r_of(v, sl, d, px):
+        o = v.get("o")
+        if o == "win":
+            return float(v.get("rr") or 0)
+        if o == "loss":
+            return -1.0
+        if o == "week_close":
+            return sc.week_close_r(v.get("e"), sl, px, d) or 0.0
+        return 0.0
+
+    acc: dict[str, list] = {}
+    for st_, ents, d, sl, fal, lv in rows:
+        try:
+            en = json.loads(ents or "{}")
+            f = json.loads(fal or "{}")
+        except Exception:
+            continue
+        if f.get("entry_kind") != "mid":
+            continue
+        a, b = en.get("chosen") or {}, en.get("zone_wick") or {}
+        if a.get("o") not in done or b.get("o") not in done or a.get("imm") or b.get("imm"):
+            continue
+        px = (en.get("_wc") or {}).get("px")
+        acc.setdefault(st_, []).append((lv, r_of(a, sl, d, px), r_of(b, sl, d, px), a.get("o"), b.get("o")))
+    table = [["Strateji · giriş", "TP / SL / kaçan", "R/bölge", "1. yarı", "2. yarı"]]
+    names = {"sd": "S/D 4H", "sd1h": "S/D 1H", "sd15m": "S/D 15m"}
+    for st_ in ("sd15m", "sd", "sd1h"):
+        xs = sorted(acc.get(st_, []), key=lambda x: x[0] or datetime.min)
+        if not xs:
+            continue
+        h = len(xs) // 2
+
+        def per(v):
+            return f"{sum(v) / len(v):+.2f}" if v else "-"
+
+        for i, label in ((1, "orta nokta (bugünkü)"), (2, "kenar (fitil)")):
+            os_ = [x[2 + i] for x in xs]
+            rr = [x[i] for x in xs]
+            miss = sum(os_.count(k) for k in ("tp_before_entry", "no_touch"))
+            table.append([f"{names[st_]} · {label}", f"{os_.count('win')} / {os_.count('loss')} / {miss}", per(rr), per(rr[:h]), per(rr[h:])])
+    n = len(acc.get("sd15m", []))
+    return Progress(bars=[Bar("S/D 15m — büyük bölge, iki giriş de çözülmüş", n, 30)], table=table,
                     note="aynı bölge, aynı SL/TP · kaçan (dolmadan TP / dokunmadı) = 0R · 4H/1H ana işlem LTF onay kolu, bu satırlar bilgi")
 
 
@@ -3478,7 +3537,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_plan_0611,
     ),
     WatchItem(
-        key="sd_zone_wick", status="open", started="07.11", onem=1, group="sd",
+        key="sd_zone_wick", status="done", started="07.11", onem=1, group="sd",
+        result="(09.11) KULLANICI KARARI (tetik dolmadan): bölge sınırı fitil-fitil — proximal base'in karşı fitili; giriş, dokunuş / "
+               "tazelik ve plan bu kenardan, tespit aynı. Eski gövde kenarı Journal varyantı `zone_body` (tablo ölçmeye devam ediyor). "
+               "İlk okuma: çözülen 19 bölgede iki giriş aynı sonucu verdi.",
         title="S/D bölge sınırı: gövde-fitil mi, fitil-fitil (bütün base mumu) mu?",
         trigger="15m'de iki giriş arası ≥ 0,25 ATR olan, iki girişi de çözülmüş 30 bölge: fitil-fitil R/bölgede gövde-fitilden ≥ 0,15 "
                 "önde VE iki yarıda aynı yön → proximal base'in karşı fitili olur (giriş + çizim); aksi halde bugünkü kural kalır. "
@@ -3486,6 +3548,15 @@ ITEMS: list[WatchItem] = [
         measure="/sd-izleme tablosu (Journal entries chosen ↔ zone_wick)",
         md="S/D bölge sınırı: gövde-fitil mi, fitil-fitil mi? (07.11.2026)",
         progress_fn=_p_sd_zone_wick,
+    ),
+    WatchItem(
+        key="sd_mid_entry", status="open", started="09.11", onem=1, group="sd",
+        title="S/D büyük bölgede orta nokta girişi — kenardan iyi mi?",
+        trigger="15m'de bölge ≥ 1,25 ATR, iki girişi de çözülmüş 30 bölge: orta nokta R/bölgede kenardan ≥ 0,15 geride VE iki yarıda "
+                "aynı yön → giriş kenara döner (MID_ENTRY_MIN_ATR = None) ya da eşik büyür; aksi halde kalır. 4H/1H bilgi",
+        measure="/sd-izleme tablosu (Journal entries chosen = orta ↔ zone_wick = kenar, features.entry_kind = mid)",
+        md="S/D büyük bölgede orta nokta girişi (09.11.2026)",
+        progress_fn=_p_sd_mid_entry,
     ),
     WatchItem(
         key="sd_sweep_gate", status="open", started="07.11", onem=1, group="sd",

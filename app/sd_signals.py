@@ -263,6 +263,8 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
         "confirm_o": c_o if c_o != "pre" else None, "confirm_rr": sdc.get("rr"), "confirm_main": confirm_main,
         **{f"confirm_{k}": v for k, v in sd_confirm.describe(sdc, LTF_LABEL.get(r.strategy, "15m")).items()},
         "levels_kind": lv_kind, "limit": lim, "zone_entry_s": _fmt_p(r.entry),
+        # 09.11: buyuk bolgede (>= sd_engine.MID_ENTRY_MIN_ATR) bolge girisi orta nokta
+        "entry_mid": f.get("entry_kind") == "mid" and lv_kind != "trade",
         "touched_at": _fmt_tsi(r.entry_touched_at) if r.entry_touched_at else None,
         "setup_at": _fmt_tsi(r.purge_time), "retest_at": _fmt_tsi(filled_ts) if filled_ts else None,
         "_sort": (-(int(r.score) if r.score is not None else -1), -(r.best_stage_at.timestamp() if r.best_stage_at else 0)),

@@ -181,6 +181,8 @@ ENTRY_VARIANTS = ("chosen", "cisd", "mss",
                   "zone_mid", "zone_far",
                   # 07.11 (kullanici, doji base): giris base'in karsi fitilinde ("fitil-fitil" bolge; proximal'den disarida)
                   "zone_wick",
+                  # 09.11: bolge siniri fitil-fitil oldu (chosen = karsi fitil); eski govde kenari girisi olcum
+                  "zone_body",
                   "cfvg_near", "cfvg_mid", "cfvg_far")
 
 # CISD kirilim FVG'si: onay mumu merkezli pencere (orta mum: onay-1 .. onay+2). Adaylardan

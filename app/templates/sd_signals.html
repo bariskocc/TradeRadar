@@ -25,7 +25,7 @@
             {% if sd_hub %}{% include '_sd_tabs.html' %}{% endif %}
             <div class="mb-5 {% if sd_hub %}hidden{% endif %}">
                 <h1 class="text-xl font-bold text-white">S/D Signals</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Supply / Demand zones that passed every gate — measurement mode: no real order, no Telegram. 4H / 1H: the zone touch is an alert, the trade opens on the LTF CHOCH + retest; 15m: limit at the proximal edge. Flat TP/SL.</p>
+                <p class="text-sm text-gray-500 mt-0.5">Supply / Demand zones that passed every gate — measurement mode: no real order, no Telegram. 4H / 1H: the zone touch is an alert, the trade opens on the LTF CHOCH + retest; 15m: limit at the proximal edge (zone midpoint when the zone is ≥ 1.25 ATR). Flat TP/SL.</p>
             </div>
 
             {% if error %}
@@ -152,7 +152,7 @@
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="leg-in · Base · leg-out: R = rally, D = drop (RBR / DBD continuation, DBR / RBD reversal, ? = weak leg-in) · hover for the full name · Fresh = untouched when the signal formed">ZONE</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap" title="MSS = reversal zone (DBR / RBD) broke the last swing · BOS = the same break in a continuation zone · HTF sweep = base took the main liquidity (wide swing / EQ = equal lows-highs / PDL-PDH; a minor swing alone is not counted) · LTF sweep = the pullback into the zone took LTF swing lows / highs formed since the base (extra confirmation; with it a far CHOCH swing falls back to the nearest short swing) · Discount / Premium = zone in the lower / upper half of the last 72 candles · FVG left by the leg-out">KEY LEVEL</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap">SCORE</th>
-                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="4H / 1H: before the CHOCH the zone's levels (tagged 'zone'), after it the retest candidate nearest to price and the CHOCH stop (pullback extreme + 10% buffer) · 15m: proximal edge / distal edge + 0.1 ATR · TP = nearest obstacle (opposite zone / untaken swing), capped at 3R of the trade's own risk">ENTRY / SL / TP</th>
+                            <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="4H / 1H: before the CHOCH the zone's levels (tagged 'zone'), after it the retest candidate nearest to price and the CHOCH stop (pullback extreme + 10% buffer) · 15m: proximal edge (midpoint in zones ≥ 1.25 ATR) / distal edge + 0.1 ATR · TP = nearest obstacle (opposite zone / untaken swing), capped at 3R of the trade's own risk">ENTRY / SL / TP</th>
                             <th class="px-2 py-2 text-center font-semibold whitespace-nowrap" title="cap = structural target beyond 3R, TP capped (whether price reached the structural target is tracked)">R:R</th>
                             <th class="px-2 py-2 text-right font-semibold whitespace-nowrap" title="Filled: open R now · Waiting: distance to entry in R · Closed: final flat R">LIVE R</th>
                             <th class="px-2 py-2 text-left font-semibold whitespace-nowrap">STATUS</th>
@@ -186,7 +186,7 @@
                             </td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
-                                {% if r.levels_kind == 'zone' and r.confirm_main %}<span class="text-[10px] text-gray-500 mr-1" title="Zone levels — the trade levels come after the LTF CHOCH">zone</span>{% endif %}{{ r.entry_s }} / <span class="text-red-400/80">{{ r.sl_s }}</span> / <span class="text-green-400/80">{{ r.tp_s }}</span>
+                                {% if r.levels_kind == 'zone' and r.confirm_main %}<span class="text-[10px] text-gray-500 mr-1" title="Zone levels — the trade levels come after the LTF CHOCH">zone</span>{% endif %}{% if r.entry_mid %}<span class="text-[10px] text-gray-500 mr-1" title="Large zone (≥ 1.25 ATR): entry at the zone midpoint, stop unchanged">mid</span>{% endif %}{{ r.entry_s }} / <span class="text-red-400/80">{{ r.sl_s }}</span> / <span class="text-green-400/80">{{ r.tp_s }}</span>
                             </td>
                             <td class="px-2 py-2 text-center text-xs text-gray-300 whitespace-nowrap">{% if r.rr is not none %}{{ '%.2f'|format(r.rr) }}{% endif %}{% if r.target_kind == 'cap' %} <span class="text-[10px] text-gray-500" title="Structural RR {{ r.rr_struct }}">cap</span>{% elif r.target_kind == 'rr2' %} <span class="text-[10px] text-gray-500" title="Nearest obstacle RR {{ r.rr_struct }} &lt; 2 — TP set at 2R">2R</span>{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
@@ -234,7 +234,8 @@
                 A row is a zone that passed every gate (target, R:R ≥ 2). <b>4H / 1H (05.11): the zone touch is only an alert</b> — the trade
                 opens on the LTF CHOCH + retest below (Waiting zone → Waiting CHOCH → Waiting retest → Filled); if the stop is hit before the
                 CHOCH, no candidate is retested or no candidate gives R:R ≥ 2 (06.11) the row is <b>No trade</b> (0R). The old entry — a limit at the proximal edge — is still
-                measured on the same zone (<b>Zone limit</b> column, second summary line). 15m: limit at the proximal edge.
+                measured on the same zone (<b>Zone limit</b> column, second summary line). 15m: limit at the proximal edge — at the zone midpoint
+                when the zone is ≥ 1.25 ATR (stop unchanged).
                 <b>Waiting</b>: no fill yet — if price runs to the target without filling, the zone keeps waiting (no result).
                 <b>Filled</b>: entry touched, no TP/SL yet. <b>Closed</b>: TP or SL hit after the fill (flat TP/SL on 15m candles, no partial
                 profit / BE); <b>Expired</b>: no entry within the horizon (4H: 9 days, 1H: 4 days). Entry and SL are frozen when the zone first

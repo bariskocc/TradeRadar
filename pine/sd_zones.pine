@@ -9,7 +9,7 @@ grpZ = "Bölgeler"
 lookback   = input.int(200, "Geriye bakış (kapanmış mum)", minval = 30, maxval = 1000, group = grpZ, tooltip = "Motor son 200 kapanmış mumu kullanır. Değiştirirsen motorla birebir aynı olmaz.")
 showDead   = input.bool(true, "Ölü bölgeleri göster (soluk)", group = grpZ, tooltip = "2. dokunuşta ya da distal kırılınca bölge ölür; kutu o mumda biter.")
 showLabels = input.bool(true, "Etiket (tip · tazelik · rozetler)", group = grpZ)
-zoneDraw   = input.string("Gövde-fitil (motor)", "Bölge sınırı", options = ["Gövde-fitil (motor)", "Fitil-fitil (bütün mum)"], group = grpZ, tooltip = "Gövde-fitil: proximal base gövdesinde (motorun girişi). Fitil-fitil: bütün base mumu kutuya girer (doji base). Yalnız çizim değişir; dokunuş / ölü hesabı motorun proximal'inden.")
+zoneDraw   = input.string("Fitil-fitil (motor)", "Bölge sınırı", options = ["Fitil-fitil (motor)", "Gövde-fitil (eski)"], group = grpZ, tooltip = "Fitil-fitil: bütün base mumu kutuda, proximal base'in karşı fitili (09.11'den beri motorun girişi). Gövde-fitil: proximal base gövdesinde (eski kural). Dokunuş / ölü hesabı seçilen sınırdan; bölge tespiti ikisinde aynı.")
 grpL = "Etiket"
 lblH = input.string("Sağ", "Yatay konum", options = ["Sağ", "Sol"], group = grpL, tooltip = "Etiket kutunun içinde, bu kenarda durur.")
 lblV = input.string("Orta", "Dikey konum", options = ["Üst", "Orta", "Alt"], group = grpL)
@@ -183,7 +183,9 @@ if barstate.islast
                         float bodiesLo = math.min(f_min(o, bs, j - 1), f_min(c, bs, j - 1))
                         float prox = up ? bodiesHi : bodiesLo
                         float dist = up ? baseLo : baseHi
-                        // leg-out: proximal'den LEG_OUT_BARS icinde en az LEG_OUT_MIN_ATR
+                        // Bolge siniri (09.11): motor fitil-fitil -- giris / dokunus / cizim bu kenardan; tespit govde kenarindan (prox)
+                        float zProx = zoneDraw == "Gövde-fitil (eski)" ? prox : (up ? baseHi : baseLo)
+                        // leg-out: govde kenarindan LEG_OUT_BARS icinde en az LEG_OUT_MIN_ATR
                         int endK = math.min(n, j + LEG_OUT_BARS)
                         int formed = -1
                         float legout = 0.0
@@ -252,7 +254,7 @@ if barstate.islast
                             int touch2At = -1
                             int wi = formed + 1
                             while wi < n and brokenAt < 0
-                                bool touching = up ? l.get(wi) <= prox : h.get(wi) >= prox
+                                bool touching = up ? l.get(wi) <= zProx : h.get(wi) >= zProx
                                 bool beyond = up ? l.get(wi) < dist - buf : h.get(wi) > dist + buf
                                 if touching and not inRun
                                     touches += 1
@@ -260,7 +262,7 @@ if barstate.islast
                                     if touches == MAX_TOUCHES + 1
                                         touch2At := wi
                                 else if inRun
-                                    bool left = up ? l.get(wi) > prox + TOUCH_EXIT_ATR * a : h.get(wi) < prox - TOUCH_EXIT_ATR * a
+                                    bool left = up ? l.get(wi) > zProx + TOUCH_EXIT_ATR * a : h.get(wi) < zProx - TOUCH_EXIT_ATR * a
                                     if left
                                         inRun := false
                                 if beyond
@@ -271,10 +273,8 @@ if barstate.islast
                             int deadAt = brokenAt >= 0 and (touch2At < 0 or brokenAt <= touch2At) ? brokenAt : touch2At
 
                             if not dead or showDead
-                                // Cizim siniri: motor proximal'i ya da base'in karsi fitili (yalniz gorunum, Journal varyanti `zone_wick`)
-                                float drawProx = zoneDraw == "Fitil-fitil (bütün mum)" ? (up ? baseHi : baseLo) : prox
-                                float zTop = math.max(drawProx, dist)
-                                float zBot = math.min(drawProx, dist)
+                                float zTop = math.max(zProx, dist)
+                                float zBot = math.min(zProx, dist)
                                 int leftBi = lastBi - (n - 1 - bs)
                                 int rightBi = dead ? lastBi - (n - 1 - deadAt) : bar_index
                                 color baseCol = up ? cDemand : cSupply
@@ -299,7 +299,7 @@ if barstate.islast
                                             txt := txt + (up ? " · Discount" : " · Premium")
                                         if fvg
                                             txt := txt + " · FVG"
-                                    string tip = (up ? "Demand " : "Supply ") + ztype + "\nProximal " + f_fmt(prox) + " · Distal " + f_fmt(dist)
+                                    string tip = (up ? "Demand " : "Supply ") + ztype + "\nProximal " + f_fmt(zProx) + " · Distal " + f_fmt(dist)
                                          + "\nLeg-out " + str.tostring(legout / a, "#.##") + " ATR · leg-in " + str.tostring(legin, "#.##")
                                          + " ATR · base " + str.tostring(j - bs) + " mum\nDokunuş " + str.tostring(touches)
                                          + (na(pdPos) ? "" : " · PD " + str.tostring(pdPos, "#.##"))

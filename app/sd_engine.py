@@ -10,8 +10,9 @@ Bolge tanimi (uc parca):
              02.11 15:00 TSI demand'ini 0.03 ATR'yle kaciriyordu -> 4 mum / 0.8 ATR)
   leg-out -> base'den sert cikis: ilk mumun govdesi >= LEG_BODY_MIN_ATR x ATR, base disinda kapanis,
              LEG_OUT_BARS icinde proximal'den >= LEG_OUT_MIN_ATR x ATR yol
-Demand (cikis yukari): distal = base'in en dusuk low'u, proximal = base govdelerinin en yukseği.
-Supply (cikis asagi): distal = base'in en yuksek high'i, proximal = base govdelerinin en dusugu.
+Demand (cikis yukari): distal = base'in en dusuk low'u, proximal = base'in en yuksek high'i (fitil-fitil, 09.11).
+Supply (cikis asagi): distal = base'in en yuksek high'i, proximal = base'in en dusuk low'u.
+09.11'e kadar proximal base govdelerinin ucuydu (govde-fitil); o kenar `body_prox`, leg-out ve premium / discount hala ondan.
 Tip: leg-in harfi + B + leg-out harfi -> RBR / DBD (devam), DBR / RBD (donus), ?BR / ?BD (leg-in zayif).
 
 Tazelik: olusumdan sonra proximal'e dokunan her ayri mum kosusu bir "dokunus" (kosu ancak fiyat proximal'den
@@ -64,6 +65,14 @@ SL_BUFFER_ATR = 0.1
 MIN_RISK_ATR = 1.75          # stop mesafesi en az bu kadar ATR
 OLD_MIN_RISK_ATR = 1.5
 TOUCH_EXIT_ATR = 0.5         # dokunus kosusu: fiyat proximal'den bu kadar uzaklasinca biter
+# 09.11 (kullanici): bolge siniri fitil-fitil -- proximal = base'in karsi fitili (demand tepe, supply dip); giris, dokunus / tazelik,
+# plan ve karsi bolge hedefi bu kenardan. Tespit (leg-out yolu, premium / discount) govde kenarindan kaldi, bolge kumesi ayni.
+# False = eski govde-fitil (07.11'e kadar). Eski giris Journal varyanti `zone_body`.
+ZONE_WICK_BOUNDARY = True
+# 09.11 (kullanici, EURUSD 1H 06.11 13:00 UTC+3 supply, fitil-fitil 1.39 ATR): bolge boyu >= MID_ENTRY_MIN_ATR ise giris bolgenin
+# orta noktasi (`SDPlan.entry_kind` "mid"); STOP AYNI YERDE (taban kenardan hesaplanir) -- risk kuculur, RR / TP girisle yeniden.
+# Dokunus / tazelik kenardan. None = kapali (her bolge kenardan).
+MID_ENTRY_MIN_ATR: float | None = 1.25
 MAX_TOUCHES = 1              # bu kadar dokunusa kadar canli; fazlasi olu
 LOOKBACK_BARS = 200          # tespit penceresi (kapanmis 4H mumu)
 MAX_AGE_BARS = 60            # daha eski base'ler Journal'a yazilmaz (03.11 kullanici: 120 FX'te ~4 hafta, 12.10'lu bolgeler listedeydi -> 60)
@@ -130,9 +139,10 @@ class SDZone:
     # 07.11 (kullanici: "fiyat onceki onemli swing low ile swing high arasinda..."): ayni yer, aralik = base'ten onceki son genis
     # fraktal tepe ve dip (her yanda MAJOR_SWING_K mum, PD_RANGE_BARS icinde). < 0 / > 1 = aralik disi. Yalniz OLCUM.
     pd_pos_sw: Optional[float] = None
-    # 07.11 (kullanici, XAUUSD 1D 27.08 doji base): 'fitil-fitil' cizimde proximal = base'in karsi fitili (demand tepe, supply dip)
-    # -- yalniz OLCUM (Journal giris varyanti `zone_wick`), bolge/dokunus/plan proximal'i degismez.
+    # 07.11 (kullanici, XAUUSD 1D 27.08 doji base): 'fitil-fitil' kenar = base'in karsi fitili (demand tepe, supply dip);
+    # 09.11'den beri ZONE_WICK_BOUNDARY ile proximal'in kendisi. `body_prox` = govde kenari (eski proximal, tespit olcumleri).
     wick_prox: Optional[float] = None
+    body_prox: Optional[float] = None
     touches: int = 0
     last_touch: Optional[pd.Timestamp] = None
     broken_at: Optional[pd.Timestamp] = None
@@ -169,6 +179,7 @@ class SDPlan:
     rr_old: Optional[float] = None
     obst_rr: Optional[float] = None     # 06.11 olcum: fiyatin otesindeki EN YAKIN engelin RR'si (atlansa da); < 1 -> izleme maddesi
     obst_kind: Optional[str] = None
+    entry_kind: str = "edge"            # 09.11: edge = proximal kenar, mid = buyuk bolgede orta nokta (MID_ENTRY_MIN_ATR)
 
 
 def closed_bars(df: pd.DataFrame, now=None, delta: timedelta = HTF_DELTA) -> pd.DataFrame:
@@ -241,7 +252,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
             proximal, distal = bodies_hi, base_lo
         else:
             proximal, distal = bodies_lo, base_hi
-        # leg-out: proximal'den LEG_OUT_BARS icinde en az LEG_OUT_MIN_ATR
+        # leg-out: govde kenarindan (proximal) LEG_OUT_BARS icinde en az LEG_OUT_MIN_ATR -- 09.11 fitil siniri tespiti degistirmez
         end = min(n, j + LEG_OUT_BARS)
         formed = None
         legout = 0.0
@@ -314,13 +325,13 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
             direction="LONG" if up else "SHORT",
             zone_type=zone_type,
             base_start=idx[bs], base_end=idx[j - 1], legout_time=idx[j], formed_time=idx[formed],
-            proximal=float(proximal), distal=float(distal), atr=float(a),
+            proximal=float((base_hi if up else base_lo) if ZONE_WICK_BOUNDARY else proximal), distal=float(distal), atr=float(a),
             legout_atr=round(float(legout / a), 3), legin_atr=round(float(legin), 3),
             base_bars=int(j - bs), base_max_atr=round(float((h[bs:j] - l[bs:j]).max() / a), 3),
             fvg=bool(fvg), formed_iloc=int(formed), bos=bool(bos), sweep=bool(sweep),
             sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos, pd_pos_sw=pd_pos_sw,
             legout_body_atr=round(float(abs(body) / a), 3),
-            wick_prox=float(base_hi if up else base_lo),
+            wick_prox=float(base_hi if up else base_lo), body_prox=float(proximal),
         )
         _walk_after(z, h, l, idx)
         zones.append(z)
@@ -446,13 +457,14 @@ def _liq_beyond_stop(z: SDZone, df: pd.DataFrame, sl: float) -> Optional[float]:
 def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: float | None = None) -> SDPlan:
     """Giris / SL / TP: TP = en yakin engel (karsi canli bolgenin proximal'i ya da fiyatin otesindeki ilk swing), MAX_RR tavani."""
     buf = SL_BUFFER_ATR * z.atr
-    entry = z.proximal
+    mid = MID_ENTRY_MIN_ATR is not None and z.height_atr >= MID_ENTRY_MIN_ATR
+    entry = (z.proximal + z.distal) / 2 if mid else z.proximal
     long = z.direction == "LONG"
     sl_zone = z.distal - buf if long else z.distal + buf
 
-    def _sl(mult: float) -> float:
+    def _sl(mult: float) -> float:                # taban kenardan (09.11: orta giriste stop yerinde kalir)
         floor = mult * z.atr
-        return min(sl_zone, entry - floor) if long else max(sl_zone, entry + floor)
+        return min(sl_zone, z.proximal - floor) if long else max(sl_zone, z.proximal + floor)
 
     sl = _sl(MIN_RISK_ATR)
     # Olcum (05.11): stopu otesindeki alinmamis tepe/dibin otesine itmek ana stopa UYGULANMAZ -- onbellekteki 4H/1H serilerinde
@@ -504,7 +516,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
                   tp_struct=tp_struct, rr_struct=rr_struct, dist_r=dist_r, sl_zone=float(sl_zone),
                   tp_zone=float(tp_zone) if tp_zone is not None else None, sl_liq=sl_liq,
                   sl_old=float(sl_old), tp_old=float(tp_old) if tp_old is not None else None, rr_old=rr_old,
-                  obst_rr=obst_rr, obst_kind=ordered[0][1] if ordered else None)
+                  obst_rr=obst_rr, obst_kind=ordered[0][1] if ordered else None, entry_kind="mid" if mid else "edge")
 
 
 def score_zone(z: SDZone, bias: str | None) -> dict:
@@ -557,6 +569,7 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
     }
     if plan is not None:
         out["target_kind"] = plan.target_kind
+        out["entry_kind"] = plan.entry_kind
         out["rr_struct"] = plan.rr_struct
         out["dist_r"] = plan.dist_r
         out["risk_atr"] = round(abs(plan.entry - plan.sl) / z.atr, 2) if z.atr else None

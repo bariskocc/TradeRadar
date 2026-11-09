@@ -292,10 +292,12 @@ def _seed_ltf_liq(strategy, feats: dict, z, df_ltf, now, ltf_delta, sl: float | 
 
 def _entry_cands(z, plan, last_close: float) -> dict:
     """Journal giris varyantlari (04.11): chosen = proximal (bugunku), zone_mid = bolge ortasi, zone_far = distal kenar;
-    07.11 zone_wick = 'fitil-fitil' cizim, base'in karsi fitili (butun mum; doji base'de govde ortada kaliyordu).
+    07.11 zone_wick = 'fitil-fitil' cizim, base'in karsi fitili (butun mum; doji base'de govde ortada kaliyordu) -- 09.11'den
+    beri ana sinir, chosen ile ayni; zone_body = eski govde kenari (govde-fitil girisi).
     SL/TP satirinki; `_ref` = seviye andaki fiyat (Journal 'zaten gecilmis giris' isaretlemesi icin)."""
     return {"chosen": float(plan.entry), "zone_mid": float((z.proximal + z.distal) / 2), "zone_far": float(z.distal),
             **({"zone_wick": float(z.wick_prox)} if getattr(z, "wick_prox", None) is not None else {}),
+            **({"zone_body": float(z.body_prox)} if getattr(z, "body_prox", None) is not None else {}),
             "_ref": float(last_close)}
 
 

@@ -13,7 +13,7 @@
         <div class="p-3 md:p-6">
             <div class="mb-5">
                 <h1 class="text-xl font-bold text-white">S/D Skor Tablosu</h1>
-                <p class="text-sm text-gray-500 mt-0.5">Ölçüm modu — kalemler Journal'daki çözülmüş bölgelerle (dolum sonrası TP / SL) okunur; puanlar henüz doğrulanmadı</p>
+                <p class="text-sm text-gray-500 mt-0.5">Ölçüm modu — kalemler Journal'daki çözülmüş işlemlerle (ana giriş, dolum sonrası TP / SL) okunur; puanlar henüz doğrulanmadı</p>
                 <div class="flex items-center gap-1 mt-3">
                     {% for key, lbl in tfs %}
                     <a href="/sd?view=score&tf={{ key }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == key %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">{{ lbl }}</a>
@@ -28,7 +28,7 @@
                 <div><span class="text-gray-500">Hedef:</span> {{ plan.tp }}</div>
                 <div><span class="text-gray-500">Base:</span> {{ plan.base }} · <span class="text-gray-500">Leg-out:</span> {{ plan.legout }}</div>
                 <div><span class="text-gray-500">Yaş:</span> {{ plan.age }} · <span class="text-gray-500">Dokunuş:</span> {{ plan.touch }}</div>
-                <div><span class="text-gray-500">Veri:</span> {{ n_rows }} bölge, {{ n_resolved }} çözülmüş ({{ tf_label }})</div>
+                <div><span class="text-gray-500">Veri:</span> {{ n_rows }} bölge, {{ n_resolved }} çözülmüş ({{ tf_label }}) · {{ plan.result }}</div>
             </div>
 
             <!-- Toplam skor -->
