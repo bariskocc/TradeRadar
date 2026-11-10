@@ -35,7 +35,13 @@ CANDIDATES = [
     ("pd_ok_sw", "Premium / Discount (swing aralığı)", "aynı kural, aralık = base öncesi son geniş swing tepe-dip (her yanda 5 mum) — 07.11"),
     ("ltf_disp", "LTF displacement (yalnız 4H / 1H)", f"CHOCH mumunun gövdesi ≥ {sdc.CHOCH_DISP_MIN:g} × ort. LTF mum boyu — etiket, 07.11"),
     ("strong", "Çok sert çıkış (≥ 3 ATR)", "ilk okumada ters (05.11) — 'strength' +2'si buna veriliyor"),
+    ("origin", "Hareketin başı (origin)", f"base ucu önceki {sde.ORIGIN_BARS} HTF mumun en yükseği / en düşüğü = hareketi başlatan base; 0 = ara duraklama (10.11, NZDUSD 4H — 10.11'den sonraki satırlarda)"),
+    ("disp", "Displacement (devam eden çıkış)", f"≥ {sde.DISP_MIN_BIG_BARS} ardışık ≥ {sde.LEG_BODY_MIN_ATR:g} ATR gövdeli çıkış mumu + FVG + sonraki {sde.RETRACE_BARS} mumda geri alma < %{sde.DISP_MAX_RETRACE * 100:.0f} (10.11, 1000PEPE 4H — son `features`)"),
+    ("legout_bars_big", "Ardışık büyük çıkış mumu", f"base'den sonra ardışık ≥ {sde.LEG_BODY_MIN_ATR:g} ATR gövdeli aynı yönlü mum sayısı (PEPE 1; 10.11)"),
+    ("touch_fast", "Hemen dokunuş", f"oluşumdan ilk dokunuşa ≤ {sde.TOUCH_FAST_BARS} mum (fiyat uzaklaşmadan geri geldi; PEPE 0 mum; 10.11)"),
 ]
+# 10.11: bu adaylar bolgenin olusumundan sonra dolar (devam, dokunus) -- seviye anindaki kopya eksik kalir, son `features` okunur
+LATEST_KEYS = ("disp", "legout_bars_big", "touch_fast")
 GATES = [
     ("sd_dead", "Ölü bölge", "2+ dokunuş ya da distal kırıldı"),
     ("sd_bias", "1D bias ters", "KAPALI (04.11) — eski satırlar"),
@@ -43,12 +49,14 @@ GATES = [
     ("sd_far", "Fiyata uzak", f"giriş > {sde.MAX_DIST_R:g}R uzak — seviye yazılmaz"),
     ("sd_low_rr", "RR düşük", f"RR < {sde.MIN_RR:g} (hedef en yakın engel, tavan {sde.MAX_RR:g}R)"),
     ("sd_near", "Yakın kaçan bölge", "çıkış gövdesi 0,8–1 ATR, kapıları geçti — ölçüm, Signals'a girmez (05.11)"),
+    ("sd_slow", "Yavaş çıkışlı bölge", f"çıkış mumu gövdesi < {sde.NEAR_LEG_BODY_ATR:g} ATR ama {sde.LEG_OUT_BARS} mumda ≥ {sde.LEG_OUT_MIN_ATR:g} ATR uzama, kapıları geçti — ölçüm, Signals'a girmez (10.11, NZDUSD 4H)"),
     ("sd_ready", "Hazır (sinyal)", "bütün kapılar geçildi — seviye ve sonuç yalnız burada (04.11)"),
 ]
 # 4H / 1H LTF onay kolunun kapisi (07.11): satirin asamasi degil, entries.sdc sonucu. Elenenlerin sonrasi bolge limitinden.
 CONFIRM_GATES = [
     ("no_sweep", "LTF sweep yok (4H / 1H)", "bölgenin altındaki LTF likiditesi alınmadan CHOCH aranmaz — elenenlerin bölge limiti sonucu (07.11)"),
     ("failed", "CHOCH'tan önce stop (4H / 1H)", "bölge stopu CHOCH gelmeden yendi — işlem yok"),
+    ("invalid", "Bölge geçersiz (4H / 1H)", f"HTF kapanışı kutunun %{sde.INVALID_CLOSE_FRAC * 100:.0f}'sini ya da LTF kapanışı distal'i geçti — CHOCH aranmaz, işlem yok (10.11, USDJPY 1H)"),
 ]
 
 
@@ -135,6 +143,11 @@ async def build_sd_score_table(db: AsyncSession, tf: str) -> dict:
                 f = json.loads(r.features_at_levels or r.features or "{}")
             except Exception:
                 continue
+            if key in LATEST_KEYS:
+                try:
+                    f = json.loads(r.features or "{}")
+                except Exception:
+                    f = {}
             if key == "strong":
                 val = None if f.get("legout_atr") is None else int(float(f["legout_atr"]) >= sde.STRENGTH_STRONG_ATR)
             elif key == "ltf_disp":

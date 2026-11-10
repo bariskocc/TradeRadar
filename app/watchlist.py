@@ -1700,7 +1700,8 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
     from app import sd_confirm
     confirm_main = strategy in sd_confirm.STRATEGIES
     t = _journal_table()
-    rows = (await db.execute(select(t).where(t.c.strategy == strategy, t.c.entry.is_not(None)))).mappings().all()
+    rows = (await db.execute(select(t).where(t.c.strategy == strategy, t.c.entry.is_not(None),
+                                             t.c.best_stage.not_in(("sd_near", "sd_slow"))))).mappings().all()   # olcum kollari disarida (10.11)
     groups: dict[str, list[int]] = {}
 
     def _add(name: str, tp: bool) -> None:
@@ -1743,12 +1744,15 @@ async def _p_sd_outcomes(db: AsyncSession, strategy: str = "sd") -> Progress:
                          + (" · giriş = LTF onay + retest (işlemsiz bölge sayılmaz)" if confirm_main else ""))
 
 
-async def _p_sd_near(db: AsyncSession) -> Progress:
-    """05.11 (kullanici, KAS 4H): cikis govdesi 0.8-1 ATR'lik yakin kacan bolgeler (`sd_near`) ana kuralin bolgeleri (`sd_ready`)
-    kadar calisiyor mu? Cozulmus = dolumdan sonra TP / SL. Tetik: 4H'te sd_near 30 cozulmus."""
+_SD_TF_LABEL = {"sd": "S/D 4H", "sd1h": "S/D 1H", "sd15m": "S/D 15m"}
+
+
+async def _p_sd_alt(db: AsyncSession, alt_stage: str, alt_label: str, bar_label: str, bar_strats=("sd",)) -> Progress:
+    """Olcum kolundaki bolgeler (`sd_near` 05.11 / `sd_slow` 10.11) ana kuralin bolgeleri (`sd_ready`) kadar calisiyor mu?
+    Cozulmus = bolge limitiyle dolumdan sonra TP / SL. Tablo: strateji x kol; cubuk `bar_strats` stratejilerinde alt kol."""
     t = _journal_table()
     rows = (await db.execute(select(t.c.strategy, t.c.best_stage, t.c.outcome).where(
-        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage.in_(("sd_near", "sd_ready")),
+        t.c.strategy.in_(("sd", "sd1h", "sd15m")), t.c.best_stage.in_((alt_stage, "sd_ready")),
         t.c.outcome.in_(("win", "loss"))))).all()
     acc: dict[tuple, list[int]] = {}
     for st, stage, o in rows:
@@ -1756,18 +1760,153 @@ async def _p_sd_near(db: AsyncSession) -> Progress:
         g[0 if o == "win" else 1] += 1
     table = [["Strateji · bölge", "TP", "SL", "WR"]]
     for st in ("sd", "sd1h", "sd15m"):
-        for stage, label in (("sd_ready", "ana kural (gövde ≥ 1 ATR)"), ("sd_near", "yakın kaçan (0,8–1 ATR)")):
+        for stage, label in (("sd_ready", "ana kural (gövde ≥ 1 ATR)"), (alt_stage, alt_label)):
             w, l = acc.get((st, stage), [0, 0])
             if w + l:
-                table.append([f"{ {'sd': 'S/D 4H', 'sd1h': 'S/D 1H', 'sd15m': 'S/D 15m'}[st] } · {label}", str(w), str(l),
-                              f"%{100 * w / (w + l):.0f}"])
-    n = sum(acc.get(("sd", "sd_near"), [0, 0]))
-    return Progress(bars=[Bar("4H yakın kaçan bölge — çözülmüş", n, 30)], table=table,
-                    note="dolumdan sonra TP / SL; yakın kaçan bölgeler Signals'a girmez")
+                table.append([f"{_SD_TF_LABEL[st]} · {label}", str(w), str(l), f"%{100 * w / (w + l):.0f}"])
+    n = sum(sum(acc.get((st, alt_stage), [0, 0])) for st in bar_strats)
+    return Progress(bars=[Bar(bar_label, n, 30)], table=table,
+                    note="bölge limitiyle dolumdan sonra TP / SL; ölçüm kolu bölgeleri Signals'a girmez")
+
+
+async def _p_sd_near(db: AsyncSession) -> Progress:
+    """05.11 (kullanici, KAS 4H): cikis govdesi 0.8-1 ATR'lik yakin kacan bolgeler (`sd_near`). Tetik: 4H'te sd_near 30 cozulmus."""
+    return await _p_sd_alt(db, "sd_near", "yakın kaçan (0,8–1 ATR)", "4H yakın kaçan bölge — çözülmüş")
+
+
+async def _p_sd_slow(db: AsyncSession) -> Progress:
+    """10.11 (kullanici, NZDUSD 4H 05.11 tepesi): cikis mumu govdesi < 0.8 ATR ama 3 mumda >= 2 ATR uzayan yavas cikisli base'ler
+    (`sd_slow`, sd_scanner._slow_zones). Tetik: 4H + 1H'te sd_slow 30 cozulmus."""
+    return await _p_sd_alt(db, "sd_slow", "yavaş çıkış (gövde < 0,8 ATR, 3 mumda ≥ 2 ATR)",
+                           "4H + 1H yavaş çıkışlı bölge — çözülmüş", bar_strats=("sd", "sd1h"))
 
 
 async def _p_sd1h_outcomes(db: AsyncSession) -> Progress:
     return await _p_sd_outcomes(db, "sd1h")
+
+
+async def _p_sd_origin(db: AsyncSession, strategy: str = "sd") -> Progress:
+    """10.11 (kullanici, NZDUSD 4H SHORT #18600: "06.11 01:00 base'i dususun ortasindaki mum, baslatan degil"): base hareketin
+    basinda mi (`features.origin` = base ucu onceki sd_engine.ORIGIN_BARS HTF mumun ucu) yoksa ara duraklama mi -- hangisi tutuyor?
+    Kume: kapiyi gecen (sd_ready) bolgeler; sonuc bolge limitiyle dolum sonrasi TP / SL ("bolge tutuyor mu" sorusu). 4H / 1H'te ana
+    islem onay kolu (entries.sdc) ek kolon. Tetik: taraf basina 30 cozulmus. `origin` 10.11 restart'indan sonraki satirlarda var."""
+    from app import sd_confirm
+    from app import sd_engine as sde
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.outcome, t.c.features_at_levels, t.c.features, t.c.entries).where(
+        t.c.strategy == strategy, t.c.best_stage == "sd_ready", t.c.entry.is_not(None)))).all()
+    confirm = strategy in sd_confirm.STRATEGIES
+    acc = {1: [0, 0, 0, 0], 0: [0, 0, 0, 0]}          # origin -> bolge TP, bolge SL, onay kolu W, onay kolu L
+    for o, fal, f, ents in rows:
+        try:
+            feats = json.loads(fal or f or "{}")
+        except Exception:
+            continue
+        og = feats.get("origin")
+        if og is None:
+            continue
+        g = acc[1 if og else 0]
+        if o == "win":
+            g[0] += 1
+        elif o == "loss":
+            g[1] += 1
+        if confirm:
+            try:
+                so = ((json.loads(ents or "{}") or {}).get(sd_confirm.SDC_KEY) or {}).get("o")
+            except Exception:
+                so = None
+            if so == "win":
+                g[2] += 1
+            elif so == "loss":
+                g[3] += 1
+    label = {"sd": "4H", "sd1h": "1H", "sd15m": "15m"}.get(strategy, strategy)
+    table = [["Base", "Bölge TP", "Bölge SL", "WR"] + (["Onay W", "Onay L"] if confirm else [])]
+    for og, name in ((1, f"hareketin başı (origin, ≥ {sde.ORIGIN_BARS} mum)"), (0, "ara duraklama")):
+        w, l, cw, cl = acc[og]
+        table.append([name, str(w), str(l), f"%{100 * w / (w + l):.0f}" if w + l else "-"] + ([str(cw), str(cl)] if confirm else []))
+    return Progress(bars=[Bar(f"{label} origin bölge — çözülmüş", sum(acc[1][:2]), 30),
+                          Bar(f"{label} ara duraklama — çözülmüş", sum(acc[0][:2]), 30)], table=table,
+                    note="bölge limitiyle dolum sonrası TP / SL (bölge tutuyor mu); origin yalnız 10.11'den sonraki satırlarda")
+
+
+async def _p_sd1h_origin(db: AsyncSession) -> Progress:
+    return await _p_sd_origin(db, "sd1h")
+
+
+async def _p_sd15m_origin(db: AsyncSession) -> Progress:
+    return await _p_sd_origin(db, "sd15m")
+
+
+async def _p_sd_disp(db: AsyncSession, strategy: str = "sd") -> Progress:
+    """10.11 (kullanici, 1000PEPE 4H #19245: "arkasinda 2-3 saglam mum ve FVG yoksa duzgun supply degil"): devam eden cikis
+    (`features.disp` = >= 2 ardisik >= 1 ATR mum + FVG + sonraki 3 mumda geri alma < %50) bolgeleri daha mi iyi tutuyor? Ayrica ardisik
+    buyuk mum sayisi ve olusumdan ilk dokunusa gecen mum. Alanlar olusumdan sonra dolar -> son `features` okunur (seviye kopyasi degil).
+    Kume: sd_ready, sonuc bolge limitiyle dolum sonrasi TP / SL; 4H / 1H'te onay kolu ek kolon. Tetik: disp tarafi basina 30 cozulmus."""
+    from app import sd_confirm
+    from app import sd_engine as sde
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.outcome, t.c.features, t.c.entries).where(
+        t.c.strategy == strategy, t.c.best_stage == "sd_ready", t.c.entry.is_not(None)))).all()
+    confirm = strategy in sd_confirm.STRATEGIES
+    acc: dict[tuple, list[int]] = {}
+
+    def _add(k, o, so):
+        g = acc.setdefault(k, [0, 0, 0, 0])
+        if o == "win":
+            g[0] += 1
+        elif o == "loss":
+            g[1] += 1
+        if so == "win":
+            g[2] += 1
+        elif so == "loss":
+            g[3] += 1
+
+    for o, f, ents in rows:
+        if o not in ("win", "loss"):
+            continue
+        try:
+            feats = json.loads(f or "{}")
+        except Exception:
+            continue
+        so = None
+        if confirm:
+            try:
+                so = ((json.loads(ents or "{}") or {}).get(sd_confirm.SDC_KEY) or {}).get("o")
+            except Exception:
+                so = None
+        if feats.get("disp") is not None:
+            _add(("disp", int(feats["disp"])), o, so)
+        nb = feats.get("legout_bars_big")
+        if nb is not None:
+            _add(("big", "0" if nb == 0 else ("1" if nb == 1 else ("2" if nb == 2 else "3+"))), o, so)
+        tl = feats.get("touch_lag")
+        if tl is not None:
+            _add(("lag", f"≤ {sde.TOUCH_FAST_BARS}" if tl <= sde.TOUCH_FAST_BARS else ("4–8" if tl <= 8 else "> 8")), o, so)
+    label = {"sd": "4H", "sd1h": "1H", "sd15m": "15m"}.get(strategy, strategy)
+    table = [["Dilim", "Bölge TP", "Bölge SL", "WR"] + (["Onay W", "Onay L"] if confirm else [])]
+    rows_def = [(("disp", 1), f"displacement: ≥ {sde.DISP_MIN_BIG_BARS} büyük mum + FVG + geri alma < %{sde.DISP_MAX_RETRACE * 100:.0f}"),
+                (("disp", 0), "displacement yok"),
+                (("big", "0"), "ardışık ≥ 1 ATR çıkış mumu: 0"), (("big", "1"), "ardışık ≥ 1 ATR çıkış mumu: 1"),
+                (("big", "2"), "ardışık ≥ 1 ATR çıkış mumu: 2"), (("big", "3+"), "ardışık ≥ 1 ATR çıkış mumu: 3+"),
+                (("lag", f"≤ {sde.TOUCH_FAST_BARS}"), f"oluşumdan dokunuşa ≤ {sde.TOUCH_FAST_BARS} mum (hemen)"),
+                (("lag", "4–8"), "oluşumdan dokunuşa 4–8 mum"), (("lag", "> 8"), "oluşumdan dokunuşa > 8 mum")]
+    for k, name in rows_def:
+        w, l, cw, cl = acc.get(k, [0, 0, 0, 0])
+        if w + l == 0 and not k[0] == "disp":
+            continue
+        table.append([name, str(w), str(l), f"%{100 * w / (w + l):.0f}" if w + l else "-"] + ([str(cw), str(cl)] if confirm else []))
+    d1, d0 = acc.get(("disp", 1), [0, 0, 0, 0]), acc.get(("disp", 0), [0, 0, 0, 0])
+    return Progress(bars=[Bar(f"{label} displacement bölge — çözülmüş", d1[0] + d1[1], 30),
+                          Bar(f"{label} displacement yok — çözülmüş", d0[0] + d0[1], 30)], table=table,
+                    note="bölge limitiyle dolum sonrası TP / SL; alanlar son `features`'tan, 10.11'den sonraki satırlarda")
+
+
+async def _p_sd1h_disp(db: AsyncSession) -> Progress:
+    return await _p_sd_disp(db, "sd1h")
+
+
+async def _p_sd15m_disp(db: AsyncSession) -> Progress:
+    return await _p_sd_disp(db, "sd15m")
 
 
 async def _p_sd_entry_model(db: AsyncSession) -> Progress:
@@ -3526,6 +3665,69 @@ ITEMS: list[WatchItem] = [
         measure="/sd-izleme tablosu (Journal best_stage sd_near / sd_ready)",
         md="S/D çıkış mumu gövdesi — 0,8–1 ATR yakın kaçan bölgeler (05.11.2026)",
         progress_fn=_p_sd_near,
+    ),
+    WatchItem(
+        key="sd_slow_legout", status="open", started="10.11", onem=1, group="sd",
+        title="S/D yavaş çıkışlı base: tek mumu 1 ATR olmayan ama 3 mumda ≥ 2 ATR giden bölgeler de çalışıyor mu?",
+        trigger="4H + 1H'te yavaş çıkışlı bölge (sd_slow) 30 çözülmüş: WR'si ana kuralınkinden en fazla 5 puan geride VE iki yarıda aynı "
+                "→ çıkış mumu gövde şartı kalkar (3 mumda ≥ 2 ATR yeter); 10 puandan fazla gerideyse ölçüm kolu kalır",
+        measure="/sd-izleme tablosu (Journal best_stage sd_slow / sd_ready, features.slow)",
+        md="S/D yavaş çıkışlı base — tek mum gövdesi yok, 3 mumda ≥ 2 ATR (10.11.2026)",
+        progress_fn=_p_sd_slow,
+    ),
+    WatchItem(
+        key="sd_origin_4h", status="open", started="10.11", onem=1, group="sd",
+        title="S/D: hareketi başlatan base mi, ara duraklama mı? — 4H",
+        trigger="taraf başına 30 çözülmüş (bölge limiti): origin bölgelerin WR'si ara duraklamadan ≥ 10 puan iyi VE iki yarıda aynı → "
+                "origin skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ölçüm kalır",
+        measure="/sd-izleme tablosu (Journal features.origin / origin_bars; S/D Skor Tablosu aday satırı)",
+        md="S/D: hareketi başlatan base mi, ara duraklama mı? (10.11.2026)",
+        progress_fn=_p_sd_origin,
+    ),
+    WatchItem(
+        key="sd_origin_1h", status="open", started="10.11", onem=1, group="sd",
+        title="S/D: hareketi başlatan base mi, ara duraklama mı? — 1H",
+        trigger="taraf başına 30 çözülmüş (bölge limiti): origin bölgelerin WR'si ara duraklamadan ≥ 10 puan iyi VE iki yarıda aynı → "
+                "origin skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ölçüm kalır",
+        measure="/sd-izleme tablosu (Journal features.origin / origin_bars; S/D Skor Tablosu aday satırı)",
+        md="S/D: hareketi başlatan base mi, ara duraklama mı? (10.11.2026)",
+        progress_fn=_p_sd1h_origin,
+    ),
+    WatchItem(
+        key="sd_origin_15m", status="open", started="10.11", onem=2, group="sd",
+        title="S/D: hareketi başlatan base mi, ara duraklama mı? — 15m",
+        trigger="taraf başına 30 çözülmüş (bölge limiti): origin bölgelerin WR'si ara duraklamadan ≥ 10 puan iyi VE iki yarıda aynı → "
+                "origin skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ölçüm kalır",
+        measure="/sd-izleme tablosu (Journal features.origin / origin_bars; S/D Skor Tablosu aday satırı)",
+        md="S/D: hareketi başlatan base mi, ara duraklama mı? (10.11.2026)",
+        progress_fn=_p_sd15m_origin,
+    ),
+    WatchItem(
+        key="sd_disp_4h", status="open", started="10.11", onem=1, group="sd",
+        title="S/D displacement (devam eden çıkış) bölgeler daha mı iyi tutuyor? — 4H",
+        trigger="displacement tarafı başına 30 çözülmüş (bölge limiti): displacement bölgelerin WR'si ≥ 10 puan iyi VE iki yarıda aynı → "
+                "skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ya da tersse ölçüm kalır (sert çıkış bugüne kadar kötüydü)",
+        measure="/sd-izleme tablosu (Journal features.disp / legout_bars_big / legout_retrace / touch_lag; S/D Skor Tablosu aday satırları)",
+        md="S/D displacement — devam eden çıkış: 2+ büyük mum + FVG + geri alma < %50 (10.11.2026)",
+        progress_fn=_p_sd_disp,
+    ),
+    WatchItem(
+        key="sd_disp_1h", status="open", started="10.11", onem=1, group="sd",
+        title="S/D displacement (devam eden çıkış) bölgeler daha mı iyi tutuyor? — 1H",
+        trigger="displacement tarafı başına 30 çözülmüş (bölge limiti): displacement bölgelerin WR'si ≥ 10 puan iyi VE iki yarıda aynı → "
+                "skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ya da tersse ölçüm kalır (sert çıkış bugüne kadar kötüydü)",
+        measure="/sd-izleme tablosu (Journal features.disp / legout_bars_big / legout_retrace / touch_lag; S/D Skor Tablosu aday satırları)",
+        md="S/D displacement — devam eden çıkış: 2+ büyük mum + FVG + geri alma < %50 (10.11.2026)",
+        progress_fn=_p_sd1h_disp,
+    ),
+    WatchItem(
+        key="sd_disp_15m", status="open", started="10.11", onem=2, group="sd",
+        title="S/D displacement (devam eden çıkış) bölgeler daha mı iyi tutuyor? — 15m",
+        trigger="displacement tarafı başına 30 çözülmüş (bölge limiti): displacement bölgelerin WR'si ≥ 10 puan iyi VE iki yarıda aynı → "
+                "skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ya da tersse ölçüm kalır (sert çıkış bugüne kadar kötüydü)",
+        measure="/sd-izleme tablosu (Journal features.disp / legout_bars_big / legout_retrace / touch_lag; S/D Skor Tablosu aday satırları)",
+        md="S/D displacement — devam eden çıkış: 2+ büyük mum + FVG + geri alma < %50 (10.11.2026)",
+        progress_fn=_p_sd15m_disp,
     ),
     WatchItem(
         key="sd_plan_0611", status="open", started="06.11", onem=1, group="sd",

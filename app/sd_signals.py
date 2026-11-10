@@ -44,14 +44,14 @@ STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), 
 # 05.11 (kullanici): ana giris LTF onay + retest olan stratejiler (sd_confirm kolu olanlar)
 MAIN_CONFIRM = tuple(sd_confirm.STRATEGIES)
 # 05.11 (kullanici): sonuc ve LTF onay sonucu filtreleri -- filtre -> eslesen outcome kumesi
-RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / no sweep / no retest / RR < 2)"),
+RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / invalidated / no sweep / no retest / RR < 2)"),
                   ("week_close", "Week close"), ("expired", "Expired"), ("other", "Same bar / missed")]
-_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed", "low_rr", "rr_wait", "no_sweep"}, "week_close": {"week_close"},
+_RESULT_SET = {"tp": {"win"}, "sl": {"loss"}, "no_trade": {"failed", "missed", "low_rr", "rr_wait", "no_sweep", "invalid"}, "week_close": {"week_close"},
                "expired": {"no_touch", "open", "no_choch"}, "other": {"ambiguous", "tp_before_entry", "unmeasured"}}
 CONFIRM_FILTERS = [("all", "All"), ("worked", "Worked"), ("failed", "Zone failed"), ("no_sweep", "No LTF sweep"), ("no_retest", "No retest"),
                    ("low_rr", "RR < 2"),
                    ("waiting", "Waiting / in trade"), ("none", "No touch yet")]
-_CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed"}, "no_sweep": {"no_sweep"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
+_CONFIRM_SET = {"worked": {"win"}, "failed": {"loss", "failed", "invalid"}, "no_sweep": {"no_sweep"}, "no_retest": {"missed", "no_touch", "no_choch", "open"},
                 "low_rr": {"low_rr", "rr_wait"}, "waiting": {"wait_choch", "wait_retest", "filled"}, "none": {None}}
 
 # outcome -> (durum sekmesi, etiket, renk, "sonuc" etiketi, sonuc rengi)
@@ -75,6 +75,7 @@ _OUTCOME = {
     "no_choch":        ("closed",  "Expired",         "gray",   "No CHOCH",        "gray"),
     # 07.11 (kullanici): 4H / 1H'te LTF likiditesi alinmadan CHOCH aranmaz -- ufukta sweep yoksa islem yok
     "no_sweep":        ("closed",  "No trade",        "gray",   "No LTF sweep",    "gray"),
+    "invalid":         ("closed",  "No trade",        "gray",   "Zone invalidated", "gray"),   # 10.11: HTF %50 / LTF distal kapanisi
     # 06.11 (kullanici): CHOCH geldi ama hicbir giris adayi RR >= 2 vermedi -- islem yok (adaylar olculmeye devam)
     "rr_wait":         ("closed",  "No trade",        "gray",   "RR < 2",          "gray"),
     "low_rr":          ("closed",  "No trade",        "gray",   "RR < 2",          "gray"),
@@ -174,7 +175,7 @@ def _confirm_trade(r: SetupJournal, sdc: dict) -> dict:
     if o in (None, "pre"):
         oc = row_oc if row_oc in ("pending", "no_touch") else "unmeasured"   # dolmus / kapanmis ama onay izi yok (05.11 oncesi)
         return {"oc": oc, **zone}
-    if o in ("wait_choch", "failed", "no_choch", "no_sweep"):
+    if o in ("wait_choch", "failed", "no_choch", "no_sweep", "invalid"):
         return {"oc": o, **zone}
     sl = sdc.get("sl")
     if sdc.get("e") is not None:
@@ -353,7 +354,7 @@ async def build_sd_signals(
                 s["tp"] += 1
             elif wr_ < 0:
                 s["sl"] += 1
-        elif v["outcome"] in ("failed", "missed", "low_rr", "rr_wait", "no_sweep"):
+        elif v["outcome"] in ("failed", "missed", "low_rr", "rr_wait", "no_sweep", "invalid"):
             s["no_trade"] += 1
         elif v["tab"] != "closed":
             s["open"] += 1
@@ -374,7 +375,7 @@ async def build_sd_signals(
     # sayar (bolge limiti kiyasi), Result = No trade ya da LTF confirm = Zone failed / No retest secilince gorunur.
     hidden = 0
     if result != "no_trade" and confirm not in ("failed", "no_retest", "low_rr", "no_sweep"):
-        shown = [v for v in views if v["outcome"] not in ("failed", "missed", "low_rr", "rr_wait", "no_sweep")]
+        shown = [v for v in views if v["outcome"] not in ("failed", "missed", "low_rr", "rr_wait", "no_sweep", "invalid")]
         hidden, views = len(views) - len(shown), shown
     counts = {k: 0 for k, _ in STATUS_FILTERS}
     for v in views:

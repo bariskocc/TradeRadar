@@ -16,6 +16,9 @@ Akis (LONG; SHORT simetrik):
      aldiysa (`ltf_sweep`, her yanda CHOCH_SWING_K mum; tohum `features.ltf_liq`, sd_scanner) VE 3'lu swing'in MSS girisi
      RR < SHORT_SWING_RR veriyorsa CHOCH seviyesi dipten onceki son 1'li tepe olur (`st["kk"]` = 1).
      Bir LTF kapanisi bu seviyenin ustunde -> CHOCH. Dip satirin SL'ini once gecerse: `failed` (zone failed before CHOCH).
+     10.11 (kullanici, EURCHF 1H 19953): SWEEP_CHOCH akisinda CHOCH seviyesi TEYITLI swing olmak zorunda (CHOCH_PIVOT: pencerede her
+     yanda CHOCH_SWING_K mumla dogrulanmis son dip / tepe); swing yoksa CHOCH aranmaz. 07.11-10.11 arasi pencerenin en dusuk dibi
+     seviyeydi -- tek mumluk pencerede dokunus mumunun dibi 'kiriliyor', islem stop oluyordu (replay: 7 CHOCH'un 2'si islem olmazdi).
   3. CHOCH aninda giris adaylari (hepsi `lo` ile CHOCH kapanisi arasinda), her biri ayri limit emri:
        fvg  -- dip -> CHOCH hamlesinin biraktigi yukselis FVG'si, ust kenar (fiyata en yakini)
        ifvg -- dususun biraktigi dusus FVG'si, CHOCH kapanisi ust kenarinin ustunde (invert), ust kenar (en yakini)
@@ -65,11 +68,12 @@ MIN_GAP_FRAC = 0.15              # FVG / IFVG en kucuk bosluk: son 20 LTF mumunu
 GAP_AVG_BARS = 20
 VARIANTS = ("fvg", "ifvg", "cisd", "mss")
 VARIANT_LABEL = {"fvg": "FVG", "ifvg": "IFVG", "cisd": "CISD", "mss": "MSS level"}
-FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "no_sweep", "open", "week_close", "low_rr")
+FINAL = ("failed", "missed", "win", "loss", "ambiguous", "no_touch", "no_choch", "no_sweep", "open", "week_close", "low_rr", "invalid")
 LABELS = {
     "pre": "—", "wait_choch": "Waiting CHOCH", "wait_retest": "CHOCH — waiting retest", "filled": "Retest — in trade",
     "win": "Worked", "loss": "Zone failed after CHOCH", "ambiguous": "Same bar (?)", "missed": "No retest — price left",
     "failed": "Zone failed before CHOCH", "no_touch": "No retest in horizon", "no_choch": "No CHOCH in horizon",
+    "invalid": "Zone invalidated — no trade",
     "open": "Open at horizon", "week_close": "Closed at week end", "no_sweep": "No LTF sweep — no trade",
     "rr_wait": "CHOCH — RR < 2, no trade", "low_rr": "CHOCH — RR < 2, no trade",
 }
@@ -182,6 +186,18 @@ def _ltf_sweep(rec: dict, st: dict, long: bool) -> list:
 # = son alinan likidite dibi (dokunustan onceyse dokunus) ile sweep dibi arasindaki en yuksek tepe; kapanis bunun ustunde -> CHOCH.
 # Sweep olmadan CHOCH aranmaz (ufukta `no_sweep`). Eski akis (`SWEEP_CHOCH = False`): ilk 3'lu swing kirilimi + kisa swing yedegi.
 SWEEP_CHOCH = True
+# 10.11 (kullanici, EURCHF 1H #19953: 11:05 TSI "CHOCH"u tek mumluk pencerenin dibiydi -- swing yoktu, kucuk geri cekilmeyle fiyat yukari
+# devam etti): CHOCH seviyesi = pencerede (son alinan likidite / dokunus .. sweep mumu oncesi) her yanda CHOCH_SWING_K mumla TEYITLI son
+# swing (LONG tepe / SHORT dip); teyitli swing yoksa CHOCH aranmaz, beklenir. False = 07.11 davranisi (pencerenin en yuksek tepesi / en
+# dusuk dibi, swing sarti yok).
+CHOCH_PIVOT = True
+# 10.11 (kullanici, USDJPY 1H 19726: 1H 03:00 TSI mumu bolgenin %50'sinin ustunde, 5m 03:50 distal'in ustunde kapandi; kol yine 04:10'da
+# CHOCH alip stop oldu): bolge GECERSIZ olunca CHOCH aranmaz -> `invalid` (islem yok). Gecersiz = (1) bir LTF mumu distal'in OTESINDE
+# KAPANDI (fitil sweep serbest, govdeyle gecis kirilim) ya da (2) HTF mumu kutunun INVALID_CLOSE_FRAC'inin (%50) otesinde kapandi
+# (`features.inv_close_at`, sd_engine._walk_after; HTF kapanisindan sonraki ilk LTF mumunda). Yalniz CHOCH oncesi (pre / wait_choch);
+# CHOCH'tan sonra islem kendi stopuyla surer. Replay (7 CHOCH'lu satir, 7'si SL): 6'si islem olmazdi, EURCHF'i CHOCH_PIVOT eler.
+# Bolge limiti kolu etkilenmez (limit ilk dokunusta doluyor; iptal dolumdan once 131 satirda 2 kez ateslerdi, ikisi SL).
+INVALID_CLOSE = True
 # 07.11 (kullanici, CADJPY 4H 28.10 base dibi): bolgenin kendi dibi (distal = base'in en dusuk fitili) de likidite (k = LIQ_K)
 BASE_LOW_LIQ = True
 # 07.11 (kullanici, CADJPY 4H: 15m CHOCH yavas, kucuk mumlarla geldi): LTF displacement = CHOCH'u yapan (seviyenin otesinde kapanan)
@@ -328,6 +344,11 @@ def _sweep_choch_level(rec: dict, st: dict, long: bool, bars: list, ts, ext: flo
     t_touch = _iso(_dt(rec["entry_touched_at"])) if rec.get("entry_touched_at") is not None else None
     start = max(t_liq, t_touch) if t_touch else t_liq
     hi = [b[1] if long else b[2] for b in bars]
+    if CHOCH_PIVOT:
+        # 10.11: sweep mumundan onceki, sag kanadi bu mumdan once tamamlanmis (j + k <= ci - 1) son teyitli swing; yoksa CHOCH yok
+        piv = [j for j in range(st["slo_i"]) if times[j] >= start and j + CHOCH_SWING_K <= ci - 1
+               and _is_piv(hi, j, not long, CHOCH_SWING_K)]
+        return float(hi[piv[-1]]) if piv else None
     win = [hi[j] for j in range(st["slo_i"] + 1) if times[j] >= start]
     if not win:
         return None
@@ -448,6 +469,9 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
         return False
     st["until"] = ts
     long = rec.get("direction") == "LONG"
+    if INVALID_CLOSE and st["o"] in ("pre", "wait_choch") and _zone_invalid(rec, st, long, ts, close):
+        st["o"], st["at"], st["b"] = "invalid", ts, []   # 10.11: bolge gecersiz, CHOCH aranmaz (islem yok)
+        return True
     if st["o"] in FINAL:                          # ana islem bitti, golge kollar suruyor
         _sh_step(rec, st, long, ts, high, low, horizon)
         return True
@@ -550,6 +574,22 @@ def step(rec: dict, bar_ts, high: float, low: float, close: float, horizon: time
     if st.get("e") is not None:
         _sh_step(rec, st, long, ts, high, low, horizon)
     return True
+
+
+def _zone_invalid(rec: dict, st: dict, long: bool, ts, close: float) -> bool:
+    """10.11: LTF kapanisi distal'in otesinde (`inv` = ltf) ya da HTF mumu kutunun %50'sinin otesinde kapandi ve o kapanis gecti (`inv` = htf)."""
+    f = rec.get("features") or {}
+    d = f.get("distal")
+    if d is not None and ((float(close) < float(d)) if long else (float(close) > float(d))):
+        st["inv"] = "ltf"
+        return True
+    inv = f.get("inv_close_at")
+    if inv is not None:
+        t_inv = _naive(_dt(inv))
+        if t_inv is not None and ts >= t_inv + HTF_OF.get(rec.get("strategy"), timedelta(hours=4)):
+            st["inv"] = "htf"
+            return True
+    return False
 
 
 def _eligible(st: dict) -> dict:
@@ -685,6 +725,8 @@ def describe(st: dict | None, ltf: str) -> dict:
     d = retest_depth(st)
     if d is not None:
         extra.append(f"deepest retest {st['rt']:.6g} ({d:.0%} back to the low)")
+    if st.get("inv"):
+        extra.append("invalidated by " + ("LTF close beyond the zone" if st["inv"] == "ltf" else "HTF close beyond 50% of the zone"))
     for k, v in (st.get("sh") or {}).items():
         if v.get("o") not in (None, "invalid"):
             extra.append(f"{SHADOW_LABEL.get(k, k)} → {v['o']}")
@@ -744,7 +786,7 @@ def final_r(st: dict | None) -> float | None:
         return float(st.get("rr") or 0)
     if st.get("o") == "loss":
         return -1.0
-    if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "no_sweep", "open", "low_rr", "rr_wait"):
+    if st.get("o") in ("ambiguous", "missed", "failed", "no_touch", "no_choch", "no_sweep", "open", "low_rr", "rr_wait", "invalid"):
         return 0.0
     if st.get("o") == "week_close":
         return week_close_r(st.get("e"), st.get("sl"), st.get("px"), st.get("dir"))

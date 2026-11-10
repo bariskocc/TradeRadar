@@ -41,8 +41,11 @@ SD_CFG = {
 ALL = tuple(SD_CFG)
 
 # Radar siralamasi icin kapi onceligi (yuksek = daha ileri).
-_STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_near": 4.5, "sd_ready": 5}
+_STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_near": 4.5, "sd_slow": 4.5, "sd_ready": 5}
 NEAR_STAGE = "sd_near"   # 05.11: cikis govdesi NEAR_LEG_BODY_ATR..LEG_BODY_MIN_ATR -- kapilari gecse de Signals'a girmez (olcum)
+SLOW_STAGE = "sd_slow"   # 10.11: cikis mumu govdesi < NEAR_LEG_BODY_ATR ama 3 mumda >= 2 ATR (NZDUSD 4H 05.11 tepesi) -- olcum
+ALT_STAGE = {"near": NEAR_STAGE, "slow": SLOW_STAGE}      # olcum kollari: kapilari gecen bolge bu asamayla yazilir
+LEVEL_STAGES = ("sd_ready", NEAR_STAGE, SLOW_STAGE)       # seviye verilen asamalar
 
 
 def _near_zones(closed: pd.DataFrame, zones: list) -> list:
@@ -50,6 +53,14 @@ def _near_zones(closed: pd.DataFrame, zones: list) -> list:
     main = {(z.side, z.base_start) for z in zones}
     return [q for q in sde.detect_zones(closed, leg_body_min=sde.NEAR_LEG_BODY_ATR)
             if q.legout_body_atr < sde.LEG_BODY_MIN_ATR and (q.side, q.base_start) not in main]
+
+
+def _slow_zones(closed: pd.DataFrame, zones: list, near: list) -> list:
+    """Yavas cikisli bolgeler (10.11, NZDUSD 4H): tek mum govdesi sarti olmadan bulunup ne ana ne yakin kacan kumede olanlar
+    (govde < NEAR_LEG_BODY_ATR; 3 mumda >= 2 ATR uzama detect_zones'ta aynen). Ana ve near kumesi degismez."""
+    seen = {(z.side, z.base_start) for z in zones} | {(q.side, q.base_start) for q in near}
+    return [q for q in sde.detect_zones(closed, leg_body_min=sde.SLOW_LEG_BODY_ATR)
+            if q.legout_body_atr < sde.NEAR_LEG_BODY_ATR and (q.side, q.base_start) not in seen]
 
 
 def week_close(store, now=None) -> int:
@@ -127,7 +138,9 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
         last_close = float(closed["close"].iloc[-1])
         best = None
         n_live = 0
-        for z, is_near in [(z, False) for z in zones] + [(q, True) for q in _near_zones(closed, zones)]:
+        near = _near_zones(closed, zones)
+        for z, kind in [(z, None) for z in zones] + [(q, "near") for q in near] + [(q, "slow") for q in _slow_zones(closed, zones, near)]:
+            is_near = kind is not None            # olcum kolu (yakin kacan / yavas cikisli): Radar'a girmez
             age = _bars_since(closed, z.base_start)
             if age > sde.MAX_AGE_BARS:
                 continue
@@ -135,9 +148,9 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
             parts = sde.score_zone(z, bias)
             feats = sde.zone_features(z, last_close, age, plan)
             stage = _gate(z, plan, bias)
-            if is_near:
-                feats["near"] = 1
-                stage = NEAR_STAGE if stage == "sd_ready" else stage
+            if kind:
+                feats[kind] = 1
+                stage = ALT_STAGE[kind] if stage == "sd_ready" else stage
             # Ilk gorus geri doldurmasi BUGUNKU kapidan bagimsiz (04.11): bolge bugun uzak/olu olsa da gecmiste hazir olup dolmus
             # olabilir (XAUUSD 1H: bugun 4R uzakta, dun TP). Yeni kayitsa HTF mumu mumu yurunur; seviye yalniz o anki sd_ready'de.
             # Izleme serisi: sd1h/sd15m'de 5m varsa 5m (SD_5M_ENABLED), yoksa 15m.
@@ -145,15 +158,15 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
             df15, ltf_delta = (df5, timedelta(minutes=5)) if df5 is not None and len(df5) else (frames.get("15m"), timedelta(minutes=15))
             if not journal.has_record(strategy, display, z.direction, z.base_start)                     and df15 is not None and len(df15) and df15.index[0] <= z.formed_time + cfg["delta"]:
                 _backfill_zone(strategy, display, market, z, closed, df15, d1 if (d1 := frames.get("1d")) is not None else None,
-                               cfg["delta"], now, weekly, ltf_delta, near=is_near)
+                               cfg["delta"], now, weekly, ltf_delta, kind=kind)
             if z.dead and not journal.has_levels(strategy, display, z.direction, z.base_start):
                 continue
-            if is_near and stage != NEAR_STAGE and not journal.has_record(strategy, display, z.direction, z.base_start):
-                continue              # yakin kacan bolge yalniz kapilari gectiyse kaydedilir (Journal kapi sayilari karismasin)
+            if kind and stage != ALT_STAGE[kind] and not journal.has_record(strategy, display, z.direction, z.base_start):
+                continue              # olcum kolu bolgesi yalniz kapilari gectiyse kaydedilir (Journal kapi sayilari karismasin)
             # 04.11: seviyeler YALNIZ butun kapilari gecince donar. Eskiden low_rr/no_target bolgelere de seviye veriliyordu
             # ("kapi koruyor mu" olcumu); NZDUSD 1H 04.11: low_rr aninda donan TP (RR 1.1) ile dolup sonra sd_ready oldu --
             # Signals'ta RR 1.1'lik "sinyal". Kapida kalan bolge artik seviyesiz (asama kaydi var, sonuc yok).
-            has_levels = plan.tp is not None and stage in ("sd_ready", NEAR_STAGE)
+            has_levels = plan.tp is not None and stage in LEVEL_STAGES
             if has_levels:
                 _seed_ltf_liq(strategy, feats, z, df15, now, ltf_delta, plan.sl)
             # Ilk gorus geri doldurmasi (03.11, kullanici: XAUUSD "neden Waiting? retest ve TP oldu"): restart / ilk calismada
@@ -206,7 +219,7 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
 
 
 def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now, weekly,
-                   ltf_delta=timedelta(minutes=15), near: bool = False) -> None:
+                   ltf_delta=timedelta(minutes=15), kind: str | None = None) -> None:
     """Yeni gorulen bolge icin gecmisi yeniden oynat: her HTF kapanisinda o anki plan/kapi ile `journal.note` (dolum oncesi
     TP guncellemesi dahil), aradaki kapanmis 15m mumlariyla `track_bar`. Bugunun kapanisi dahil degil (cagiran yazar)."""
     now_ts = _ts(now, closed.index[0])
@@ -215,7 +228,12 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
     for t in hts:
         past = closed[closed.index <= t]
         zones_at = sde.detect_zones(past)
-        pool = _near_zones(past, zones_at) if near else zones_at
+        if kind == "slow":
+            pool = _slow_zones(past, zones_at, _near_zones(past, zones_at))
+        elif kind == "near":
+            pool = _near_zones(past, zones_at)
+        else:
+            pool = zones_at
         twin = next((q for q in pool if q.base_start == z.base_start and q.side == z.side), None)
         if twin is None:
             continue
@@ -226,14 +244,14 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
             d1p = df1d[df1d.index <= t]
             bias_at = compute_daily_bias(d1p) if not d1p.empty else "NEUTRAL"
         stage_at = _gate(twin, plan_at, bias_at)
-        if near:
-            stage_at = NEAR_STAGE if stage_at == "sd_ready" else stage_at
-        lv = plan_at.tp is not None and stage_at in ("sd_ready", NEAR_STAGE)
+        if kind:
+            stage_at = ALT_STAGE[kind] if stage_at == "sd_ready" else stage_at
+        lv = plan_at.tp is not None and stage_at in LEVEL_STAGES
         parts_at = sde.score_zone(twin, bias_at)
         feats_at = sde.zone_features(twin, last_close, _bars_since(past, twin.base_start), plan_at)
-        if near:
-            feats_at["near"] = 1
-        skip_note = near and stage_at != NEAR_STAGE and not journal.has_record(strategy, display, twin.direction, twin.base_start)
+        if kind:
+            feats_at[kind] = 1
+        skip_note = bool(kind) and stage_at != ALT_STAGE[kind] and not journal.has_record(strategy, display, twin.direction, twin.base_start)
         t_close = (t + delta).to_pydatetime()
         if lv:
             _seed_ltf_liq(strategy, feats_at, twin, df15, t_close, ltf_delta, plan_at.sl)

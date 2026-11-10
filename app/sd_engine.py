@@ -53,6 +53,32 @@ LEG_BODY_MIN_ATR = 1.0
 # 05.11 (kullanici, KAS 4H 02.11 15:00 TSI doji base'i: cikis mumu govdesi 0.91 ATR, bolge goruldu ama sayilmadi): govdesi
 # NEAR_LEG_BODY_ATR..LEG_BODY_MIN_ATR arasi cikislar ayri "yakin kacan bolge" (Journal `sd_near`) -- Signals'a girmez, olcum.
 NEAR_LEG_BODY_ATR = 0.8
+# 10.11 (kullanici, NZDUSD 4H): dususu baslatan 05.11 05:00 TSI tepe base'i bolge sayilmadi -- ilk uc cikis mumunun govdesi 0.49 /
+# 0.56 / 0.85 ATR (base icin buyuk, cikis icin kucuk), 3 mumda uzama 2.01 ATR tutuyordu; motor ilk itkili mumu (06.11 05:00) bulup
+# ara duraklamayi base yapti, o bolge 09.11'de delindi. Yavas cikisli base'ler ayri OLCUM kolu (Journal `sd_slow`,
+# sd_scanner._slow_zones): tek mum govdesi sarti yok, LEG_OUT_BARS mumda >= LEG_OUT_MIN_ATR uzama yeter; govdesi NEAR_LEG_BODY_ATR'nin
+# altindakiler (ustu near / ana kume). Signals / Radar'a girmez. BTC 4H 200 mumda +1 bolge, NZDUSD'de +1 -- gurultu degil.
+SLOW_LEG_BODY_ATR = 0.0
+# 10.11 (ayni vaka): base "hareketi baslatan" mi (ucta) yoksa ara duraklama mi -- base ucu (supply tepe / demand dip) onceki
+# ORIGIN_BARS HTF mumun hicbirinde asilmamissa origin (`SDZone.origin_bars` / `origin`, features.origin). Yalniz olcum (S/D Skor
+# Tablosu adayi, /sd-izleme "hareketi baslatan base mi"). BTC 4H 200 mumda 13 bolgenin 1'i, NZDUSD 4H'te 4'un 1'i origin.
+ORIGIN_BARS = 24
+# 10.11 (kullanici, 1000PEPE 4H 08.11 19:00 TSI supply: cikis tek fitilli mum, sonraki mum hareketi geri alip bolgeye hemen dokundu, FVG
+# yok -- "arkasinda 2-3 saglam mum ve FVG yoksa duzgun supply degil"): DEVAM olcumleri (yalniz olcum; Journal verisi bugune kadar sert
+# cikisi iyi gostermiyor, soru guc degil devam). `legout_bars_big` = base'den sonra ardisik, ayni yonlu, govdesi >= LEG_BODY_MIN_ATR
+# mum sayisi; `legout_retrace` = formed'dan sonraki RETRACE_BARS mumun cikis araligini (govde proximal -> cikis ucu) ne kadar geri
+# aldigi (0 = hic, 1 = proximal'e kadar, > 1 bolgeye girdi); `touch_lag` = formed ile ilk dokunus arasindaki mum sayisi.
+# Bilesik aday `disp` = >= DISP_MIN_BIG_BARS buyuk mum + FVG + geri alma < DISP_MAX_RETRACE; `touch_fast` = touch_lag <= TOUCH_FAST_BARS.
+# Bolge her HTF kapanisinda yeniden cikarildigi icin bu alanlar `features`'ta (son hal) okunur, `features_at_levels`'ta eksik olabilir.
+RETRACE_BARS = 3
+DISP_MIN_BIG_BARS = 2
+# 10.11 (kullanici, USDJPY 1H 19726: 1H 03:00 TSI mumu bolgenin %50'sinin ustunde kapandi, 5m 03:50 distal'in ustunde kapandi, onay kolu
+# yine 04:10'da CHOCH alip stop oldu): HTF mumu kutunun (fitil-fitil) bu kesrinin OTESINDE kapanirsa bolge onay kolu icin gecersiz
+# (`SDZone.inv_close_at`, features.inv_close_at; sd_confirm INVALID_CLOSE). Bolgenin olumu (`dead`, Journal sd_dead, Pine) fitil
+# kurali olarak kaldi (07.11 karari); bu alan yalniz olcum + onay kolu.
+INVALID_CLOSE_FRAC = 0.5
+DISP_MAX_RETRACE = 0.5
+TOUCH_FAST_BARS = 3
 # 05.11 (kullanici, KAS: stop 0.03273, 4 tick ustundeki 02.11 15:00 tepesi 0.03279; fiyat 0.03277'ye dokunup dondu): stopun
 # otesinde STOP_LIQ_ATR icinde alinmamis tepe/dip varsa (base oncesi SWING_LOOKBACK mum, fraktal sarti yok) stop onun otesine --
 # yalniz OLCUM (Journal golge stop "liq", plan.sl degismez).
@@ -143,6 +169,11 @@ class SDZone:
     # 09.11'den beri ZONE_WICK_BOUNDARY ile proximal'in kendisi. `body_prox` = govde kenari (eski proximal, tespit olcumleri).
     wick_prox: Optional[float] = None
     body_prox: Optional[float] = None
+    origin_bars: int = 0               # 10.11: base ucunu asmayan onceki ardisik HTF mumu sayisi (pencere basina kadar); olcum
+    legout_bars_big: int = 0           # 10.11 (PEPE): base'den sonra ardisik >= 1 ATR govdeli ayni yonlu mum sayisi (devam)
+    legout_retrace: Optional[float] = None   # 10.11: formed'dan sonraki RETRACE_BARS mumun cikisi geri alma orani (None = mum yok)
+    touch_lag: Optional[int] = None    # 10.11: formed ile ilk dokunus arasindaki mum sayisi (None = dokunulmadi)
+    inv_close_at: Optional[pd.Timestamp] = None   # 10.11: ilk HTF mumu (acilis) kapanisi kutunun INVALID_CLOSE_FRAC'inin otesinde
     touches: int = 0
     last_touch: Optional[pd.Timestamp] = None
     broken_at: Optional[pd.Timestamp] = None
@@ -159,6 +190,18 @@ class SDZone:
     @property
     def height_atr(self) -> float:
         return abs(self.proximal - self.distal) / self.atr if self.atr else 0.0
+
+    @property
+    def origin(self) -> bool:
+        """10.11: base hareketin basinda (onceki ORIGIN_BARS mumun ucu) -- ara duraklama degil."""
+        return self.origin_bars >= ORIGIN_BARS
+
+    @property
+    def disp(self) -> Optional[bool]:
+        """10.11 (PEPE): devam eden cikis -- >= DISP_MIN_BIG_BARS buyuk mum + FVG + geri alma < DISP_MAX_RETRACE; None = henuz olculemez."""
+        if self.legout_retrace is None:
+            return None
+        return self.legout_bars_big >= DISP_MIN_BIG_BARS and bool(self.fvg) and self.legout_retrace < DISP_MAX_RETRACE
 
 
 @dataclass
@@ -320,6 +363,26 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
         sw_lo = _last_swing_before(l, bs, "low", k=MAJOR_SWING_K, lookback=PD_RANGE_BARS, wing_end=j - 1)
         pd_pos_sw = (round((proximal - sw_lo) / (sw_hi - sw_lo), 3)
                      if sw_hi is not None and sw_lo is not None and sw_hi > sw_lo else None)
+        # 10.11: hareketin basi mi -- base ucunu (supply base_hi / demand base_lo) asmayan onceki ardisik mum sayisi (olcum)
+        ob = 0
+        for q in range(bs - 1, -1, -1):
+            if (l[q] < base_lo) if up else (h[q] > base_hi):
+                break
+            ob += 1
+        # 10.11 (PEPE): devam -- ardisik buyuk mum sayisi (j'den), cikisin RETRACE_BARS mumda geri alinma orani (olcum)
+        nb = 0
+        for q in range(j, n):
+            bq = c[q] - o[q]
+            if (bq > 0) != up or abs(bq) < LEG_BODY_MIN_ATR * a:
+                break
+            nb += 1
+        leg_ext = h[j:formed + 1].max() if up else l[j:formed + 1].min()
+        leg_span = (leg_ext - proximal) if up else (proximal - leg_ext)
+        q0, q1 = formed + 1, min(n, formed + 1 + RETRACE_BARS)
+        retr = None
+        if q1 > q0 and leg_span > 0:
+            back = (leg_ext - l[q0:q1].min()) if up else (h[q0:q1].max() - leg_ext)
+            retr = round(float(max(0.0, back) / leg_span), 3)
         z = SDZone(
             side="demand" if up else "supply",
             direction="LONG" if up else "SHORT",
@@ -332,18 +395,22 @@ def detect_zones(df: pd.DataFrame, lookback: int = LOOKBACK_BARS, leg_body_min: 
             sweep_kind=sweep_kind, sweep_minor=bool(sweep_minor), mss=mss, pd_pos=pd_pos, pd_pos_sw=pd_pos_sw,
             legout_body_atr=round(float(abs(body) / a), 3),
             wick_prox=float(base_hi if up else base_lo), body_prox=float(proximal),
+            origin_bars=int(ob), legout_bars_big=int(nb), legout_retrace=retr,
         )
-        _walk_after(z, h, l, idx)
+        _walk_after(z, h, l, idx, c)
         zones.append(z)
         j = formed + 1
     return zones
 
 
-def _walk_after(z: SDZone, h: np.ndarray, l: np.ndarray, idx) -> None:
-    """Olusumdan sonraki mumlar: dokunus kosulari ve distal kirilmasi."""
+def _walk_after(z: SDZone, h: np.ndarray, l: np.ndarray, idx, c: Optional[np.ndarray] = None) -> None:
+    """Olusumdan sonraki mumlar: dokunus kosulari ve distal kirilmasi. `c` verilirse kapanisla gecersizlik (inv_close_at, 10.11)."""
     buf = SL_BUFFER_ATR * z.atr
     in_run = False
+    inv_lvl = z.proximal + (z.distal - z.proximal) * INVALID_CLOSE_FRAC   # kutunun %50'si (fitil-fitil)
     for i in range(z.formed_iloc + 1, len(h)):
+        if c is not None and z.inv_close_at is None and ((c[i] < inv_lvl) if z.side == "demand" else (c[i] > inv_lvl)):
+            z.inv_close_at = idx[i]
         if z.side == "demand":
             touching = l[i] <= z.proximal
             beyond = l[i] < z.distal - buf
@@ -353,6 +420,8 @@ def _walk_after(z: SDZone, h: np.ndarray, l: np.ndarray, idx) -> None:
         if touching and not in_run:
             z.touches += 1
             z.last_touch = idx[i]
+            if z.touch_lag is None:
+                z.touch_lag = int(i - z.formed_iloc - 1)   # 10.11: formed ile ilk dokunus arasindaki mum (0 = hemen sonraki mum)
             in_run = True
         elif in_run:
             left = (l[i] > z.proximal + TOUCH_EXIT_ATR * z.atr) if z.side == "demand" \
@@ -566,11 +635,24 @@ def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan 
         "in_zone": 1 if z.in_zone else 0,
         "dist_atr": round(float(dist), 3) if dist is not None else None,
         "age_bars": int(n_bars_since),
+        # 10.11 (NZDUSD 4H vakasi): base hareketin basinda mi (onceki ORIGIN_BARS mumun ucu) -- /sd-izleme + S/D Skor Tablosu adayi
+        "origin_bars": int(z.origin_bars),
+        "origin": 1 if z.origin else 0,
+        # 10.11 (PEPE 4H): devam olcumleri -- son halini `features`'tan oku (seviye anindan sonra dolar)
+        "legout_bars_big": int(z.legout_bars_big),
+        "legout_retrace": z.legout_retrace,
+        "touch_lag": z.touch_lag,
+        "disp": None if z.disp is None else int(z.disp),
+        "touch_fast": None if z.touch_lag is None else int(z.touch_lag <= TOUCH_FAST_BARS),
+        # 10.11 (USDJPY 1H): HTF kapanisi kutunun %50'sini gecti -> onay kolu CHOCH aramaz (sd_confirm); None ise Journal yazmaz
+        "inv_close_at": (z.inv_close_at.tz_convert(None) if getattr(z.inv_close_at, "tzinfo", None) else z.inv_close_at).isoformat()
+                        if z.inv_close_at is not None else None,
     }
     if plan is not None:
         out["target_kind"] = plan.target_kind
         out["entry_kind"] = plan.entry_kind
         out["rr_struct"] = plan.rr_struct
+        out["tp_struct"] = plan.tp_struct   # 10.11: yazilmiyordu -> "struct" golge kolu ve onay kolunun yapisal hedefi hep bostu
         out["dist_r"] = plan.dist_r
         out["risk_atr"] = round(abs(plan.entry - plan.sl) / z.atr, 2) if z.atr else None
         out["sl_zone"] = plan.sl_zone

@@ -80,9 +80,12 @@ STAGES: list[tuple[str, str]] = [
     ("sd_low_rr", "S/D: RR < 2"),
     # 05.11: cikis govdesi 0.8-1 ATR (kural disi, kapilari gecti) -- olcum, Signals'a girmez
     ("sd_near", "S/D: near-miss zone (leg-out body 0.8–1 ATR)"),
+    # 10.11 (NZDUSD 4H 05.11 tepesi): cikis mumu govdesi < 0.8 ATR ama 3 mumda >= 2 ATR uzama (yavas cikis) -- olcum, Signals'a girmez
+    ("sd_slow", "S/D: slow leg-out zone (no ≥ 0.8 ATR candle, 3-bar ≥ 2 ATR)"),
     ("sd_ready", "S/D: zone ready (all gates)"),
 ]
 STAGE_LABELS = dict(STAGES)
+SD_LEVEL_STAGES = ("sd_ready", "sd_near", "sd_slow")     # S/D: seviye verilen asamalar (kapilari gecti; near / slow olcum kollari)
 PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak",
                               "c2_doji", "c2_second_sweep", "not_selected"))
 _RANK = {code: i for i, (code, _) in enumerate(STAGES)}
@@ -1393,7 +1396,7 @@ def note(
                 changed = True
         if (
             key[0] in SD_TP_UPDATE_STRATEGIES and tp is not None and rec.get("levels_at") is not None
-            and stage in ("sd_ready", "sd_near")   # yalniz kapilari gecen plan (RR >= 2, hedef fiyatin otesinde); low_rr hedefi TP yapmaz
+            and stage in SD_LEVEL_STAGES   # yalniz kapilari gecen plan (RR >= 2, hedef fiyatin otesinde); low_rr hedefi TP yapmaz
             and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None
             and rec.get("tp") is not None and abs(float(tp) - float(rec["tp"])) > 1e-9 * max(1.0, abs(float(tp)))
             and entry is not None and sl is not None
@@ -1411,10 +1414,10 @@ def note(
                 if path > 0:
                     rec["prefill"]["path"] = round(path, 8)
             changed = True
-        if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in ("sd_ready", "sd_near")
+        if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in SD_LEVEL_STAGES
                 and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None and _sd_old_retarget(rec, features)):
             changed = True
-        if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in ("sd_ready", "sd_near")
+        if (key[0] in SD_TP_UPDATE_STRATEGIES and features and stage in SD_LEVEL_STAGES
                 and rec.get("outcome") == "pending" and rec.get("entry_touched_at") is None and _sd_struct_retarget(rec, features)):
             changed = True
         if entry is not None and sl is not None and tp is not None and rec.get("levels_at") is None:
