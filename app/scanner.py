@@ -1477,6 +1477,37 @@ def pot_step_bar(n: PotentialNotice, bar_ts: datetime, high: float, low: float, 
     return ev
 
 
+def pot_bars(df, since, ltf: timedelta, until=None) -> list[tuple[datetime, float, float]]:
+    """Kapanmis mumlardan (son satir olusan mum, haric) KAPANISI `since`ten sonra ve `until`e kadar olanlar:
+    [(acilis UTC aware, high, low)]. Indeks sirali kabul edilir; ikili arama + numpy (11.11: tum seriyi iterrows ile
+    gezmek Potential Signals sayfasini 58 sn surduruyor, event loop'u bloke ediyordu). `since` / `until` naive UTC."""
+    if df is None or len(df) < 2:
+        return []
+    closed = df.iloc[:-1]
+    idx = closed.index
+
+    def _ts(x):
+        t = pd.Timestamp(x)
+        if idx.tz is not None:
+            t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+        elif t.tzinfo is not None:
+            t = t.tz_convert("UTC").tz_localize(None)
+        return t
+
+    lo = idx.searchsorted(_ts(since) - ltf, side="right") if since is not None else 0   # kapanis > since
+    hi = idx.searchsorted(_ts(until) - ltf, side="right") if until is not None else len(idx)   # kapanis <= until
+    if hi <= lo:
+        return []
+    sub = closed.iloc[lo:hi]
+    out = []
+    for ts, h, l_ in zip(sub.index, sub["high"].to_numpy(), sub["low"].to_numpy()):
+        bts = ts.to_pydatetime()
+        if bts.tzinfo is None:
+            bts = bts.replace(tzinfo=timezone.utc)
+        out.append((bts, float(h), float(l_)))
+    return out
+
+
 async def _track_potential_bar(session: AsyncSession, strategy: str, symbol: str, df_ltf) -> None:
     """Potansiyel zincirin fiyat takibi: kapanmis LTF mumlari (restart'ta `tracked_to`'dan devam). 11.11."""
     if not POTENTIAL_CHAIN_ENABLED or strategy not in POT_STRATEGIES:
@@ -1500,14 +1531,9 @@ async def _track_potential_bar(session: AsyncSession, strategy: str, symbol: str
                 continue
             if df_ltf is not None and len(df_ltf) >= 2 and n.entry is not None and n.sl is not None and n.tp is not None:
                 since = n.tracked_to or n.wait_at
-                for ts, bar in df_ltf.iloc[:-1].iterrows():   # son satir olusan mum
-                    bts = ts.to_pydatetime()
-                    if bts.tzinfo is None:
-                        bts = bts.replace(tzinfo=timezone.utc)
+                for bts, hi_, lo_ in pot_bars(df_ltf, since, ltf):   # yalniz kapanmis, `since`ten sonra kapanan
                     close_at = (bts + ltf).replace(tzinfo=None)
-                    if since is not None and close_at <= since:
-                        continue
-                    for e in pot_step_bar(n, bts, float(bar["high"]), float(bar["low"]), ltf):
+                    for e in pot_step_bar(n, bts, hi_, lo_, ltf):
                         if e == "fill":
                             mid = await _pot_send(format_potential_filled(n.symbol, strategy, n.entry), n.tg_message_id)
                             n.tg_message_id = mid or n.tg_message_id

@@ -187,7 +187,7 @@ def _replay_notice(n, store) -> tuple[str, float | None] | None:
     try:
         from types import SimpleNamespace
         from app.exchange import from_display_symbol
-        from app.scanner import POT_HORIZON, POT_LTF, pot_step_bar
+        from app.scanner import POT_HORIZON, POT_LTF, pot_bars, pot_step_bar
         raw, _ = from_display_symbol(n.symbol)
         ltf_name = "4h" if n.strategy == "1w" else "1h"
         df = store.get_df(raw, ltf_name)
@@ -201,16 +201,9 @@ def _replay_notice(n, store) -> tuple[str, float | None] | None:
         t = SimpleNamespace(state="wait", direction=n.direction, entry=n.entry, sl=n.sl, tp=n.tp, rr=n.rr,
                             filled_at=None, partial_at=None, result=None, result_r=None, result_at=None)
         last_close = None
-        for ts, bar in df.iloc[:-1].iterrows():
-            bts = ts.to_pydatetime()
-            if bts.tzinfo is None:
-                bts = bts.replace(tzinfo=timezone.utc)
+        for bts, hi_, lo_ in pot_bars(df, start, ltf, until=start + horizon):   # 11.11: yalniz pencere (hiz)
             close_at = (bts + ltf).replace(tzinfo=None)
-            if close_at <= start:
-                continue
-            if close_at > start + horizon:
-                break
-            pot_step_bar(t, bts, float(bar["high"]), float(bar["low"]), ltf)
+            pot_step_bar(t, bts, hi_, lo_, ltf)
             last_close = close_at
             if t.state == "done":
                 return t.result, t.result_r
