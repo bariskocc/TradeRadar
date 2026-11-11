@@ -116,6 +116,9 @@ def smt_bonus_for(strategy: str | None, symbol: str | None, market: str | None) 
 # 4H yeni skor tablosu (29.10, crt_engine.SCORE_V2_TFS): her setupa +1 veren C2 kapali kalemi kalkti -> esik 7 -> 6
 # (ayni sinyal kumesi), tavan 9, SMT ile 11. Kume muafiyeti de bir asagi (9 -> 8), sinir skor kapisi kapali.
 MIN_QUALITY_SCORE_4H = 6
+# 11.11 (kullanici karari): 1D de yeni tabloda (key level temasi + CISD mumu guclu; C2 kapali / PD x3 kalkti) -> esik 6.
+MIN_QUALITY_SCORE_1D = 6
+CLUSTER_EXEMPT_MIN_SCORE_1D = 8
 CLUSTER_EXEMPT_MIN_SCORE_4H = 8
 # 1W-4H (28.09): 1D bias (+2) ve 1W uyumu (+1) yerine aylik bias (+2); tavan 8, esik 6.
 MIN_QUALITY_SCORE_1W = 6
@@ -285,6 +288,11 @@ STRATEGY_CFG = {
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1D,
         **_RISK_GATES,
         "cluster_window_hours": 24.0,
+        # 11.11 (kullanici karari): 1D yeni skor tablosu (crt_engine.SCORE_V2_TFS) -- C2 kapali +1 kalkti -> esik 7 -> 6,
+        # kume muafiyeti 9 -> 8, sinir skor kapisi kapali (4H 29.10 ile ayni mantik).
+        "min_score": MIN_QUALITY_SCORE_1D,
+        "cluster_exempt_score": CLUSTER_EXEMPT_MIN_SCORE_1D,
+        "score7_requires_cisd_pd": False,
         # 11.11 (kullanici karari): 1D'ye altcoinler girince "ayni setup tek islem" en fazla 2 -- butun coinler ayni gun
         # mumunu paylasiyor, 1 coin basina 1 kripto 1D sinyali birakiyordu; kume limiti (2) ile tutarli. 4H'te 1 kalir.
         "same_setup_max": 2,
@@ -894,8 +902,8 @@ GATED_MIN_SCORE = 4
 # zincirin kendi sonucu gitmez. Journal 1D (25.09+): skor >= 5 + yapi + RR >= 2 haftada ~6, %54 TP once.
 POTENTIAL_CHAIN_ENABLED = True
 POT_STRATEGIES = frozenset({STRATEGY_1D, STRATEGY_1W})
-POT_WAIT_MIN = {STRATEGY_1D: 5, STRATEGY_1W: 4}      # sinyal esigi - 2 (1D 7, 1W 6)
-POT_CRT_MIN = {STRATEGY_1D: 3, STRATEGY_1W: 2}       # WAITING esigi - 2
+POT_WAIT_MIN = {STRATEGY_1D: 4, STRATEGY_1W: 4}      # sinyal esigi - 2 (1D 6 -- 11.11 yeni tablo, once 7/5; 1W 6)
+POT_CRT_MIN = {STRATEGY_1D: 2, STRATEGY_1W: 2}       # WAITING esigi - 2
 POT_HORIZON = {STRATEGY_1D: timedelta(hours=120), STRATEGY_1W: timedelta(days=9)}   # Journal ufku ile ayni
 POT_LTF = {STRATEGY_1D: timedelta(hours=1), STRATEGY_1W: timedelta(hours=4)}
 # WAITING'e izin veren kapilar: motor almiyor ama firsat suruyor (kalite ayrica olculur).
@@ -1189,7 +1197,7 @@ async def _notify_gated_potential(
     kapi `_GATED_NOTIFY_GATES` icinde olsun, skor `GATED_MIN_SCORE`'u ve RR tabani gecsin.
     """
     if POTENTIAL_CHAIN_ENABLED and strategy in POT_STRATEGIES:
-        if _pot_alt_excluded(setup.symbol, setup.market_type):
+        if setup is None or _pot_alt_excluded(getattr(setup, "symbol", None), getattr(setup, "market_type", None)):
             return   # 11.11 (kullanici): 1D altcoinlerinde potansiyel bildirimi simdilik yok
         await _potential_chain_step(session, setup, preview, gate, strategy=strategy)
         return

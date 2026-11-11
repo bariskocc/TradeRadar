@@ -16,6 +16,7 @@ yaniltir (kalemler birbirine bagli: ceza alan setup zaten dusuk skorlu).
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from math import erf, sqrt
 
 from app.setup_journal import PRE_SETUP_STAGES, analysis_parts, levels_final
@@ -30,8 +31,9 @@ P_MAX = 0.10           # tek yonlu p (iki oran z-testi)
 MIN_TOTAL = 20         # toplam skor sirasi: taraf basina cozulmus
 # 29.10: 4H yeni skor tablosu (crt_engine.SCORE_V2_TFS) esik 6. Eski tablo satirlari (kirilimda `key_level` yok)
 # 4H kumesine girmez -- karar bandi raw'a bagli, iki tablo karisirsa bant anlamsizlasir (`collect(old_4h=)`).
-THR = {"4h": 6, "1d": 7, "1w": 6}
+THR = {"4h": 6, "1d": 6, "1w": 6}   # 11.11: 1D de yeni tabloda (esik 7 -> 6)
 THR_V1_4H = 7
+THR_V1_1D = 7   # 11.11: 1D eski tablo esigi (old_1d=True kumesi)
 BANDS = ((0, 4), (5, 6), (7, 99))
 
 
@@ -55,11 +57,13 @@ def outcome_of(row) -> tuple[str | None, float]:
     return o, (rr if rr is not None else (_get(row, "rr") or 0.0))
 
 
-def collect(rows, strategy: str | None = None, all_levels: bool = False, old_4h: bool = False) -> list[dict]:
+def collect(rows, strategy: str | None = None, all_levels: bool = False, old_4h: bool = False,
+            old_1d: bool = False) -> list[dict]:
     """Journal satirlarindan analiz kumesi: CRT-oncesi aday yok, seviyesi kesin, skor kirilimi olan.
 
     4H: yalniz yeni tablo satirlari (29.10+, kirilimda `key_level` var); `old_4h=True` yalniz ESKI tablo satirlarini
-    verir (esik THR_V1_4H) -- gecmis okumalar icin."""
+    verir (esik THR_V1_4H) -- gecmis okumalar icin. 1D (11.11): ayni ayrim -- yeni tablo satiri = olcumde `v1_raw` var VE
+    satir 1D yeni tablo restart'indan sonra goruldu (`old_1d=True` eskiler, esik THR_V1_1D)."""
     out = []
     for r in rows:
         st = _get(r, "strategy")
@@ -79,6 +83,16 @@ def collect(rows, strategy: str | None = None, all_levels: bool = False, old_4h:
             continue
         if st == "4h" and (("key_level" in pal) == old_4h):
             continue
+        if st == "1d":
+            from app.crt_engine import SCORE_V2_SINCE_TF
+            fs = _get(r, "first_seen")
+            try:
+                fs_dt = datetime.fromisoformat(str(fs)[:19]) if fs is not None else None
+            except ValueError:
+                fs_dt = None
+            is_new = (fe or {}).get("v1_raw") is not None and fs_dt is not None and fs_dt >= SCORE_V2_SINCE_TF["1d"]
+            if is_new == old_1d:
+                continue
         if st == "1w":   # 1W adayi: setup anindaki haftalik bias (bias karnesinden)
             fe = dict(fe or {})
             fe.setdefault("w_bias", weekly_bias_at(_get(r, "symbol"), _get(r, "levels_at")))

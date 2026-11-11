@@ -1254,6 +1254,44 @@ async def _p_score_parts_4h(db: AsyncSession) -> Progress:
                     note=(note + f" · giren {w_in} / düşen {n - w_in}" if n else note))
 
 
+def _p_score_v2_for(strategy: str):
+    """11.11: 1D yeni skor tablosu ayni olcumle (4H 29.10). Eski tablo `features.v1_raw` (1D esik THR_V1_1D 7)."""
+    async def fn(db: AsyncSession) -> Progress:
+        from app import score_outcome as so
+        from app import crt_engine as ce
+        t = SetupJournal.__table__
+        res = await db.execute(select(t).where(
+            t.c.strategy == strategy, t.c.parts_at_levels.is_not(None), t.c.entry.is_not(None),
+            t.c.first_seen >= ce.SCORE_V2_SINCE_TF[strategy],
+        ))
+        sub = [x for x in so.collect(res.mappings().all(), strategy=strategy) if x["rr"] >= so.CAND_MIN_RR]
+        thr_old = so.THR_V1_1D if strategy == "1d" else so.THR_V1_4H
+
+        def old_ok(x):
+            v1 = x.get("v1_raw")
+            if not isinstance(v1, (int, float)):
+                return None
+            smt = x["pal"].get("smt") or 0
+            return min(11, max(0, min(9, int(v1))) + smt) >= thr_old
+
+        thr = so.THR[strategy]
+        new = [x for x in sub if (x["pal"].get("score") or 0) >= thr]
+        added = [x for x in new if old_ok(x) is False]
+        dropped = [x for x in sub if old_ok(x) and (x["pal"].get("score") or 0) < thr]
+        old = [x for x in sub if old_ok(x)]
+        sn, so_, sa, sd = so.stats(new), so.stats(old), so.stats(added), so.stats(dropped)
+
+        def _t(st):
+            return f"{st['w']} TP / {st['l']} SL · WR %{st['wr']:.0f}" if st["res"] else "çözülmüş yok"
+        note = f"yeni (≥ {thr}) {_t(sn)} · eski (≥ {thr_old}) {_t(so_)} · eklenen {_t(sa)} · çıkarılan {_t(sd)}"
+        if sa["res"] and sd["res"]:
+            d, _p_hi, p_lo = so.wr_test(sa, sd)
+            note += f" · eklenen − çıkarılan {d:+.0f} puan (p kötü {p_lo:.2f})"
+        return Progress(bars=[Bar(f"yeni tablonun seçtiği {strategy.upper()} setup (RR ≥ 2, çözülmüş)", sn["res"], 40)],
+                        note=note)
+    return fn
+
+
 async def _p_score_v2_4h(db: AsyncSession) -> Progress:
     """29.10 (kullanici karari): 4H yeni skor tablosu canlida tuttu mu? Ayni setuplarda eski tablo da hesaplanir
     (`features.v1_raw`, eski esik 7). Kume `score_outcome.collect` (yalniz yeni tablo satirlari) + RR >= 2. Tetik: yeni
@@ -1307,8 +1345,8 @@ async def _fx4h_rows(db: AsyncSession) -> list[dict]:
     return out
 
 
-def _fx_split_progress(yes: list, no: list, yes_lbl: str, no_lbl: str) -> Progress:
-    """Iki grup, taraf basina 30 cozulmus; not satirinda WR farki + tek yonlu p (score_outcome.wr_test)."""
+def _fx_split_progress(yes: list, no: list, yes_lbl: str, no_lbl: str, target: int = 30) -> Progress:
+    """Iki grup, taraf basina `target` cozulmus; not satirinda WR farki + tek yonlu p (score_outcome.wr_test)."""
     from app import score_outcome as so
     sy, sn = so.stats(yes), so.stats(no)
 
@@ -1318,7 +1356,7 @@ def _fx_split_progress(yes: list, no: list, yes_lbl: str, no_lbl: str) -> Progre
     if sy["res"] and sn["res"]:
         d, _p_hi, p_lo = so.wr_test(sy, sn)
         note += f" · fark {d:+.0f} puan (p kötü {p_lo:.2f})"
-    return Progress(bars=[Bar(yes_lbl, sy["res"], 30), Bar(no_lbl, sn["res"], 30)], note=note)
+    return Progress(bars=[Bar(yes_lbl, sy["res"], target), Bar(no_lbl, sn["res"], target)], note=note)
 
 
 async def _p_d1_no_confirm(db: AsyncSession) -> Progress:
@@ -1352,7 +1390,8 @@ async def _p_fx4h_no_confirm(db: AsyncSession) -> Progress:
     rows = await _fx4h_rows(db)
     none_ = [x for x in rows if not (int(x["pal"].get("key_level") or 0) or int(x["pal"].get("cisd") or 0))]
     some = [x for x in rows if int(x["pal"].get("key_level") or 0) or int(x["pal"].get("cisd") or 0)]
-    return _fx_split_progress(none_, some, "ikisi de yok", "en az biri var")
+    # 11.11 (kullanici): 30'da -10 puan, yarilar -2 / -12 ama p 0.16 -> 60'a uzatildi, kural ayni
+    return _fx_split_progress(none_, some, "ikisi de yok", "en az biri var", target=60)
 
 
 async def _p_fx4h_w1_against(db: AsyncSession) -> Progress:
@@ -2902,7 +2941,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_c1_shape,
     ),
     WatchItem(
-        key="cisd_mss", status="open", started="29.09", onem=1,
+        key="cisd_mss", status="done", started="29.09", onem=1,
+        result="(11.11) KAPANDI (kullanıcı): MSS şartı yok — karar kümesinde (kapı geçmiş, RR ≥ 2) sadece CISD %55 SL / "
+               "+0.73 R/setup (20), CISD + MSS %67 / +0.31 (89); geniş kümede de %57 / %68. Kural (sadece CISD ≥ 0.3 R kötü → "
+               "MSS şartı) tersine çıktı; skor adayı mss_broken 29.10'da zaten reddedilmişti.",
         title="Sadece CISD onaylı setup, CISD + MSS onaylıdan daha çok mu stop oluyor?",
         trigger="kapılardan geçmiş (RR ≥ 2) her grupta 20 çözülmüş setup: sadece CISD grubu ≥ 0.3 R/setup kötüyse "
                 "MSS şartı, 0.15–0.3 → puan sorusu 'Skor tablosu yeni adaylar'da (21.10), < 0.15 ise değişiklik yok (önce tek replay)",
@@ -3184,9 +3226,20 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_v2_4h,
     ),
     WatchItem(
+        key="score_v2_1d", status="open", started="11.11", onem=1,
+        title="1D yeni skor tablosu canlıda — tuttu mu?",
+        trigger="yeni tablonun seçtiği (skor ≥ 6) RR ≥ 2 1D setup 40 çözülmüş (TP önce mi SL önce mi). Aynı setuplarda eski "
+                "tablo (features.v1_raw, eşik 7) paralel: yeni tablonun EKLEDİKLERİ çıkardıklarından ≥ 5 puan kötü (WR) ve "
+                "tek yönlü p < 0.10 → eski tabloya dönüş kullanıcıya; aksi halde tablo kalır. Kalem hükümleri /skor-tablosu'nda",
+        measure="/izleme sayacı (not satırı) · /skor-tablosu?tf=1d · karşı-olgu IZLEME \"1D yeni skor tablosu — karşı-olgu\"",
+        md="1D yeni skor tablosu — karşı-olgu (11.11.2026, kullanıcı: \"4H gibi 1D'yi de düzeltelim\")",
+        progress_fn=_p_score_v2_for("1d"),
+    ),
+    WatchItem(
         key="fx4h_no_confirm", status="open", started="02.11", onem=1,
         title="4H FX: key level teması da güçlü CISD de olmayan setup daha mı kötü? — kripto filtresi FX'e açılsın mı",
-        trigger="4H FX yeni tablo, RR ≥ 2, −4 cezasız: 'ikisi de yok' ve 'en az biri var' gruplarında 30'ar çözülmüş (TP önce "
+        trigger="4H FX yeni tablo, RR ≥ 2, −4 cezasız: 'ikisi de yok' ve 'en az biri var' gruplarında 60'ar çözülmüş (11.11: "
+                "30'da −10 puan, yarılar −2 / −12, p 0.16 → uzatıldı; TP önce "
                 "mi SL önce mi). Kural: 'ikisi de yok' ≥ 5 puan kötü + iki yarıda aynı yön + tek yönlü p < 0.10 → kriptodaki "
                 "no_confirm kapısını FX'e de aç (kullanıcıya); aksi halde FX'te kapı yok",
         measure="/izleme sayacı (not satırı) · /eliminated (no_confirm, kripto)",
@@ -3204,7 +3257,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_d1_no_confirm,
     ),
     WatchItem(
-        key="fx4h_w1_against", status="open", started="02.11", onem=1,
+        key="fx4h_w1_against", status="done", started="02.11", onem=1,
+        result="(11.11) KAPANDI (kullanıcı): değişiklik yok — 4H FX'te seviye anındaki 1W bias ters setup %72 TP önce (40), "
+               "ters değil %77 (39), fark −4 puan, yarılar −5 / −2, p 0.33; hizalı %80 / NEUTRAL %67 / ters %72 sıralamıyor. "
+               "02.11'deki %52 / %64 son-görülme kolonundandı.",
         title="4H FX: 1W bias işlem yönüne tersken setup daha mı kötü?",
         trigger="4H FX yeni tablo, RR ≥ 2, −4 cezasız, haftalık bias seviye anında (bias karnesi): '1W ters' ve '1W ters değil' "
                 "gruplarında 30'ar çözülmüş. Kural: '1W ters' ≥ 5 puan kötü + iki yarıda aynı yön + tek yönlü p < 0.10 → "
@@ -3256,7 +3312,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_proposals_4h,
     ),
     WatchItem(
-        key="score_proposals_1d", status="open", started="03.10", onem=1,
+        key="score_proposals_1d", status="done", started="03.10", onem=1,
+        result="(11.11) DEVREDİLDİ: öneriler eski 1D tablosuna göreydi; 1D yeni skor tablosu kuruldu, canlı takip "
+               "\"1D yeni skor tablosu canlıda — tuttu mu?\"",
         title="Skor önerileri — 1D",
         trigger="1D 25.09+ bütün veri, A kolu (bugünkü kural @7) 30 setup: 4H ile aynı kural — öneri ≥ +3R ve iki yarıda > 0 "
                 "→ tek replay adayı; ≤ −3R → red. SMT önerileri askıda",
@@ -3265,7 +3323,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_proposals_1d,
     ),
     WatchItem(
-        key="d1_score6", status="open", started="28.10", onem=1,
+        key="d1_score6", status="done", started="28.10", onem=1,
+        result="(11.11) KARARA BAĞLANDI (kullanıcı): 1D yeni skor tablosuna geçildi, eşik 6 (C2 kapalı +1 kalktığı için eski 7'nin "
+               "karşılığı). Takip \"1D yeni skor tablosu canlıda — tuttu mu?\"",
         title="1D giriş eşiği 7 → 6 mı? (skor 6'da elenen setuplar)",
         trigger="skor kapısında elenen, skoru tam 6, RR ≥ 2, seviyesi kesin 1D setup 30 çözülmüş (TP önce mi): R/setup "
                 "≥ +0.15 VE dolum bazlı R/işlem > 0 VE iki zaman yarısında aynı yön → tek replay, sonra eşik 6 kararı "
@@ -3275,7 +3335,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_d1_score6,
     ),
     WatchItem(
-        key="score_parts_1d", status="open", started="16.09", onem=1,
+        key="score_parts_1d", status="done", started="16.09", onem=1,
+        result="(11.11) DEVREDİLDİ: kalem okuması 1D yeni skor tablosunu kurdu (IZLEME \"1D yeni skor tablosu — karşı-olgu\"); "
+               "kalem hükümleri /skor-tablosu?tf=1d, canlı takip \"1D yeni skor tablosu canlıda — tuttu mu?\"",
         title="Skor kalemleri — 1D",
         trigger="300 sonuçlanmış 1D setup (25.09+; 03.10'da tarih doldu, kalemlerin karar bandı < 10 → örneklem "
                 "tetiği): her kalem karar bandında taraf başına 10 çözülmüş, ±0.15 R/setup — hüküm raporda",

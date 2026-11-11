@@ -50,7 +50,7 @@ TABS = (("4h", "4H-15M"), ("1d", "1D-1H"), ("1w", "1W-4H"))
 #   4H 29.10: yeni skor tablosu (crt_engine.SCORE_V2_TFS) -- eski satirlar kural disi puan tasir.
 RULES_SINCE = {
     "4h": ce.SCORE_V2_SINCE.replace(tzinfo=timezone.utc),
-    "1d": datetime(2026, 9, 25, tzinfo=timezone.utc),
+    "1d": ce.SCORE_V2_SINCE_TF["1d"].replace(tzinfo=timezone.utc),   # 11.11: 1D yeni skor tablosu
     "1w": datetime(2026, 9, 28, tzinfo=timezone.utc),
 }
 WINDOW = timedelta(days=7)
@@ -59,7 +59,7 @@ WINDOW = timedelta(days=7)
 # gitti. Pencere 7 gun degil, kalemin bugunku tanimindan beri (TP/SL icin 7 gun cok az). Tanim degisince guncelle.
 OUTCOME_SINCE = {
     "4h": ce.SCORE_V2_SINCE,          # 29.10 yeni tablo (score_outcome.collect eski tablo satirlarini zaten almaz)
-    "1d": datetime(2026, 9, 25),      # 25.09: 1D C2 rengi / c2_closed kurali degisti
+    "1d": ce.SCORE_V2_SINCE_TF["1d"],  # 11.11: 1D yeni tablo (score_outcome.collect eski satirlari almaz)
     "1w": datetime(2026, 9, 28),      # strateji acildi
 }
 ITEM_SINCE = {
@@ -209,22 +209,35 @@ def _score_rows(strategy: str) -> list[dict]:
          "allowed": {0, 1}},
     ]
     if strategy in ce.SCORE_V2_TFS:
-        # 29.10 yeni tablo: degisen kurallar + kalkan kalemler (absent, hep 0)
+        # 29.10 4H / 11.11 1D yeni tablo: degisen kurallar + kalkan kalemler (absent, hep 0)
+        d1v2 = strategy == "1d"
         by = {r["key"]: r for r in rows}
-        by["base"].update(points="+2 / 0", allowed={0, 2},
-                          rule=f"Doğru renk +2 · doji (gövde < %{doji}) 0 — yanlış renk zaten hard filtrede elenir")
-        by["htf"].update(rule="1D bias yönde +2 · ters −2 · NEUTRAL 0 (reversal-at-PD yok)")
+        if not d1v2:   # 4H: doji 0, reversal-at-PD yok, 1W uyumu yok
+            by["base"].update(points="+2 / 0", allowed={0, 2},
+                              rule=f"Doğru renk +2 · doji (gövde < %{doji}) 0 — yanlış renk zaten hard filtrede elenir")
+            by["htf"].update(rule="1D bias yönde +2 · ters −2 · NEUTRAL 0 (reversal-at-PD yok)")
         by["wick"].update(points="+1 / +2", allowed={0, 1, 2},
                           rule=f"C2 fitili ≥ C1 aralığının %{ce.PURGE_WICK_SCORE_PCT * 100:g}'u +1, "
                                f"≥ %{ce.PURGE_WICK_STRONG_PCT * 100:g}'ı +2")
-        for k, why in (("weekly", "1W bias uyumu"), ("c2_closed", "C2 kapalı"), ("pd_major", "PD major"),
-                       ("pd_monthly", "PD aylık"), ("pd_struct", "HTF FVG / OB")):
-            by[k].update(absent=True, allowed={0}, points="—", label=why, rule="29.10'da kaldırıldı (ölçüm olarak kalır)")
+        gone = (("c2_closed", "C2 kapalı"), ("pd_major", "PD major"), ("pd_monthly", "PD aylık"),
+                ("pd_struct", "HTF FVG / OB")) + (() if d1v2 else (("weekly", "1W bias uyumu"),))
+        for k, why in gone:
+            by[k].update(absent=True, allowed={0}, points="—", label=why,
+                         rule=("11.11" if d1v2 else "29.10") + "'da kaldırıldı (ölçüm olarak kalır)")
+        if d1v2:
+            by["key_level"].update(rule="C2 bir key level'a dokunup saygı duydu: 1D FVG (C1'den önce oluşmuş, C2 bölgeye girip "
+                                        "berisinde kapandı) · PWH/PWL/PMH/PML süpürmesi · EQH/EQL ya da SSL/BSL süpürmesi (11.11)")
+            rc = by["reclaim"]
+            rc.update(label="C2 dönüşü", points=f"−{pen} / +1", allowed={-pen, 0, 1},
+                      rule=f"C2, C1 aralığına %{ce.C2_RECLAIM_WEAK_PCT:g}'ten az geri döndüyse −{pen}; "
+                           f"en az %{int(ce.W1_STRONG_RECLAIM_PCT)}'sine geri kapandıysa +1 (11.11)")
         # c2_closed 4H'te puan degil bayrak (1 = C2 kapali; Journal suzgecleri okur), raw'a girmez
         by["c2_closed"].update(allowed={0, 1}, flag=True,
                                rule="29.10'da puan olarak kaldırıldı; kırılımda yalnız \"C2 kapalı\" bayrağı (toplama girmez)")
-        order = ("base", "htf", "key_level", "wick", "ifvg", "cisd", "reclaim", "smt",
-                 "weekly", "c2_closed", "pd_major", "pd_monthly", "pd_struct")
+        order = (("base", "htf", "weekly", "key_level", "wick", "ifvg", "cisd", "reclaim", "smt",
+                  "c2_closed", "pd_major", "pd_monthly", "pd_struct") if d1v2 else
+                 ("base", "htf", "key_level", "wick", "ifvg", "cisd", "reclaim", "smt",
+                  "weekly", "c2_closed", "pd_major", "pd_monthly", "pd_struct"))
         rows = [by[k] for k in order]
     else:
         if strategy in ce.WICK_STRONG_TFS:   # 29.10: 1D'de de fitil kademesi

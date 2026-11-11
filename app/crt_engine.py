@@ -109,8 +109,13 @@ PURGE_WICK_SCORE_PCT = 0.10
 # ⚠️ 4H'te `parts["c2_closed"]` PUAN DEGIL BAYRAKTIR (1 = C2 kapali), raw'a girmez -- kalem toplami raw'i 4H'te
 # c2_closed HARIC verir (score_table `_score_health` bunu bilir).
 # Tavan 9, esik 6 (`scanner.STRATEGY_CFG`), SMT ile 11. 1D / 1W eski tabloda.
-SCORE_V2_TFS = frozenset({"4h"})
-SCORE_V2_SINCE = datetime(2026, 10, 29, 12, 0)   # restart sonrasi; oncesi eski tablo (rapor kumeleri buna gore keser)
+# 11.11 (kullanici karari): 1D de yeni tabloda -- C2 kapali (+1) ve PD major / aylik / FVG-OB (3 x +1) kalkti, yerine key level
+# temasi (+1; 1D FVG + PWH/PWL/PMH/PML + EQ/SSL) ve CISD mumu guclu (+1); esik 7 -> 6. 4H'ten farkli olarak 1D'de C2 doji +1,
+# 1W uyumu +1 ve bias'in reversal-at-PD dali KALIR (Journal 1D'de dojinin yanlis renkten iyi, 1W uyumunun lehte olmasi).
+# Karsi-olgu (Journal 1D 25.09+, RR >= 2, bias ters degil): sinyal 43 -> 59, TP once %69 -> %69 (IZLEME "1D yeni skor tablosu").
+SCORE_V2_TFS = frozenset({"4h", "1d"})
+SCORE_V2_SINCE = datetime(2026, 10, 29, 12, 0)   # 4H: restart sonrasi; oncesi eski tablo (rapor kumeleri buna gore keser)
+SCORE_V2_SINCE_TF = {"4h": SCORE_V2_SINCE, "1d": datetime(2026, 11, 11, 20, 0)}   # 1D: 11.11 restart'i
 PURGE_WICK_STRONG_PCT = 0.40     # fitil +2 esigi (Journal: < %10 %38 · %10-40 %53 · >= %40 %62)
 # 29.10 (kullanici karari): fitil kademesi 1D'de de (yalniz bu kalem; 1D'nin geri kalani eski tabloda). Journal 1D 169 cozulmus:
 # fitil >= %40 +29 WR puani (iki yarida +33 / +24, RR >= 2 +41); esik 7'de sinyal 17 %88 -> 25 %84, giren 8 (6 TP / 2 SL).
@@ -823,7 +828,7 @@ def _calc_live_setup_bias(
         and (correct_c2 or doji_c2)
     )
     v2 = tf in SCORE_V2_TFS
-    if htf_aligned or (reversal_at_pd and not v2):   # 29.10: 4H'te reversal-at-PD yok (key level temasi sayar)
+    if htf_aligned or (reversal_at_pd and not (v2 and tf == "4h")):   # 29.10: 4H'te reversal-at-PD yok; 1D'de kalir
         htf_score = 2
     elif htf_contrary:
         htf_score = -2
@@ -910,20 +915,30 @@ def _calc_live_setup_bias(
         wick_score = 2      # 29.10: 1D fitil kademesi (4H'te asagidaki v2 dali yapar)
         raw += 1
     if v2:
-        # 29.10 4H yeni tablo (SCORE_V2_TFS). Eski ham toplam olcum olarak kalir (reversal-at-PD dahil eski kural).
+        # 29.10 4H / 11.11 1D yeni tablo (SCORE_V2_TFS). Eski ham toplam olcum olarak kalir (reversal-at-PD dahil eski
+        # kural; 1D'de eski fitil kademesi de).
+        strong_wick = bool(wick_score) and _purge_wick_ratio(crt_range, rev, direction) >= PURGE_WICK_STRONG_PCT
         old_htf = 2 if (htf_aligned or reversal_at_pd) else htf_score
-        v2_feats = {"v1_raw": raw - htf_score + old_htf, "w1_align": weekly_score}
-        kl = key_level_touch(df_4h, crt_idx, purge_idx, direction, df_1d, label_set)
+        v1_raw = raw - htf_score + old_htf + (1 if (tf == "1d" and strong_wick) else 0)
+        v2_feats = {"v1_raw": v1_raw, "w1_align": weekly_score}
+        if tf == "1d":
+            # 1D: HTF'in kendisi 1D -- FVG bolgeleri 1D mumlardan (bar 1 gun), sonuc "1D FVG" etiketine yazilir
+            kl = key_level_touch(df_4h, crt_idx, purge_idx, direction, None, label_set, bar=pd.Timedelta(days=1))
+            kl["fvg1d"], kl["fvg4"] = kl.get("fvg4", 0), 0
+        else:
+            kl = key_level_touch(df_4h, crt_idx, purge_idx, direction, df_1d, label_set)
         v2_feats.update({f"kl_{k}": v for k, v in kl.items() if k != "hit"})
         key_level_score = kl["hit"]
-        base_score = 2 if correct_c2 else 0
+        if tf == "4h":
+            base_score = 2 if correct_c2 else 0   # 4H: doji 0; 1D'de doji +1 kalir
+            weekly_score = 0                      # 4H: 1W uyumu yok; 1D'de +1 kalir
         # c2_closed kirilimda BAYRAK olarak kalir (1 = C2 kapali) ama raw'a girmez: Journal'in donmus-C2 suzgecleri
         # (parts_at_levels.c2_closed -- levels_final, C2 kapanisinda yeniden dondurma, raporlar) onu okuyor.
-        weekly_score = 0
         pd_major_score = pd_monthly_score = pd_struct_score = 0
-        if wick_score and _purge_wick_ratio(crt_range, rev, direction) >= PURGE_WICK_STRONG_PCT:
+        if strong_wick:
             wick_score = 2
-        raw = base_score + htf_score + key_level_score + wick_score + ifvg_score + reclaim_score
+        raw = (base_score + htf_score + weekly_score + key_level_score + wick_score + ifvg_score
+               + reclaim_score)
     # SMT'siz tavan 9 (1W: 8); +SMT 2 ile max 11 / 10 (premium).
     score = max(0, min(W1_SCORE_CAP if is_w1 else 9, raw))
 
@@ -1396,7 +1411,7 @@ def _c2_respects_fvg(zones, df_htf: pd.DataFrame, purge_idx: int, is_short: bool
 
 
 def key_level_touch(df_htf: pd.DataFrame, crt_idx: int, purge_idx: int, direction: str,
-                    df_1d: Optional[pd.DataFrame], labels) -> dict:
+                    df_1d: Optional[pd.DataFrame], labels, bar: pd.Timedelta = pd.Timedelta(hours=4)) -> dict:
     """4H key level temasi (29.10, kullanici tanimi): C2 bir key level'a dokunup saygi duydu mu.
 
     Turler (biri yeter, +1): 4H FVG (C1 acilmadan tamamlanmis) · 1D FVG (C1 acilmadan kapanmis gunlerden) -- C2 bolgeye
@@ -1410,7 +1425,7 @@ def key_level_touch(df_htf: pd.DataFrame, crt_idx: int, purge_idx: int, directio
            "liq": int(bool(lab & _KL_LIQ_LABELS))}
     try:
         zones = _fvg_zones_before(df_htf, crt_idx - 1, PD_ARRAY_LOOKBACK_4H, _htf_atr(df_htf, purge_idx),
-                                  is_short, pd.Timedelta(hours=4))
+                                  is_short, bar)   # 11.11: 1D'de HTF = 1D (bar 1 gun)
         out["fvg4"] = int(_c2_respects_fvg(zones, df_htf, purge_idx, is_short))
         if df_1d is not None and not df_1d.empty:
             d1 = df_1d.sort_index()
