@@ -123,8 +123,9 @@
                 </a>
                 {% endfor %}
                 <span class="ml-auto text-xs text-gray-500">
-                    Result: <span class="text-green-400 font-semibold">{{ results.tp }} TP</span> ·
-                    <span class="text-green-400 font-semibold">{{ results.tp_nofill }} TP no fill</span> ·
+                    {# 11.11 (kullanici): toplam TP + kirilim "45 TP (17 TP · 28 TP no fill)" #}
+                    Result: <span class="text-green-400 font-semibold">{{ results.tp + results.tp_nofill }} TP</span>
+                    <span class="text-gray-500">({{ results.tp }} TP · {{ results.tp_nofill }} TP no fill)</span> ·
                     <span class="text-accent-yellow font-semibold">{{ results.be50 }} 50% + BE</span> ·
                     <span class="text-red-400 font-semibold">{{ results.sl }} SL</span> ·
                     {{ results.filled }} filled · {{ results.open }} open

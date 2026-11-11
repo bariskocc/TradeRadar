@@ -96,8 +96,13 @@ def norm_markets(market) -> list[str]:
     keep = {v for v in vals if v in dict(MARKET_FILTERS)}
     return [k for k, _ in MARKET_FILTERS if k in keep]
 DIRECTION_FILTERS = (("all", "All"), ("long", "LONG"), ("short", "SHORT"))
-RESULT_FILTERS = (("all", "All"), ("tp", "TP"), ("tp_nofill", "TP (no fill)"), ("be50", "50% + BE"), ("sl", "SL"),
-                  ("filled", "Filled · open"), ("open", "Open"), ("expired", "Expired"))
+# 11.11 (kullanici): filtrede TP ve Open ayrilmaz -- "TP" = TP + TP (no fill), "Open" = dolmus acik + dolmamis acik.
+RESULT_FILTERS = (("all", "All"), ("tp", "TP"), ("be50", "50% + BE"), ("sl", "SL"), ("open", "Open"), ("expired", "Expired"))
+_RESULT_GROUP = {"tp": {"tp", "tp_nofill"}, "open": {"open", "filled"}}
+
+
+def _result_match(res: str, flt: str) -> bool:
+    return flt == "all" or res in _RESULT_GROUP.get(flt, {flt})
 
 
 def _is_crypto(symbol: str) -> bool:
@@ -177,12 +182,26 @@ def _result(row, notice=None) -> str:
     return "open"
 
 
-def _replay_notice(n, store) -> tuple[str, float | None] | None:
+def _replay_notice(n, store, j=None) -> tuple[str, float | None] | None:
     """11.11 (GBPNZD 1D 11.11: sayfa SL diyordu, fiyat bildirimdeki SL'ye hic gitmemisti): ESKI zincir satirinin sonucu
     BILDIRIMDEKI seviyelerle, store'daki kapanmis LTF mumlarindan -- yeni zincirle ayni kural (`scanner.pot_step_bar`:
     %50'de yarisi + kalan BE, dolum mumunda yalniz SL). Journal'in seviyeleri bildirimdekinden farkli olabiliyor
-    (1D C2 acikken donan kosan SL). Store yoksa / bildirim anini kapsamiyorsa None -> Journal'a dusulur."""
-    if store is None or n.entry is None or n.sl is None or n.tp is None or n.created_at is None:
+    (1D C2 acikken donan kosan SL). Store yoksa / bildirim anini kapsamiyorsa None -> Journal'a dusulur.
+
+    11.11 (XAUUSD 1D #13): bildirim seviyesi 24.10'dan once kaydedilmiyordu -> o satirlarda Journal'in seviyeleri (`j`).
+    Ve TP, C2 acilisindan bildirim anina kadar ZATEN alindiysa sonuc "TP (girise donmeden)" -- kullanici kurali TP once mi;
+    eski zincir "hedef alindi" kapisindaki setuplari da bildiriyordu (XAUUSD: C2 16.09 22:00'de TP, bildirim 18.09, o
+    anda fiyat SL'nin ustundeydi -> oynatma "SL" yaziyordu)."""
+    def _jv(k):
+        try:
+            return j[k] if j is not None else None
+        except (KeyError, IndexError):
+            return None
+    entry = n.entry if n.entry is not None else _jv("entry")
+    sl = n.sl if n.sl is not None else _jv("sl")
+    tp = n.tp if n.tp is not None else _jv("tp")
+    rr = n.rr if n.rr is not None else _jv("rr")
+    if store is None or entry is None or sl is None or tp is None or n.created_at is None:
         return None
     try:
         from types import SimpleNamespace
@@ -195,10 +214,38 @@ def _replay_notice(n, store) -> tuple[str, float | None] | None:
             return None
         ltf, horizon = POT_LTF.get(n.strategy, timedelta(hours=1)), POT_HORIZON.get(n.strategy, timedelta(hours=120))
         start = n.created_at.replace(tzinfo=None) if n.created_at.tzinfo is None else             n.created_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if n.entry is None:
+            # Seviyeler Journal'dan: oynatma o seviyelerin dondugu andan (eski zincir anahtari yeni CRT'ye TASIYABILIYORDU --
+            # #31 US100 bildirim 25.09, C1 21.10; bildirim anindan oynatmak baska CRT'nin seviyesini eski mumlarla sinardi)
+            la = _jv("levels_at") or _jv("first_seen")
+            try:
+                la_dt = datetime.fromisoformat(str(la)[:19]) if la is not None else None
+            except ValueError:
+                la_dt = None
+            if la_dt is not None and la_dt > start:
+                start = la_dt
         first = df.index[0].to_pydatetime().replace(tzinfo=None)
         if first > start:
             return None   # store bildirim anini kapsamiyor
-        t = SimpleNamespace(state="wait", direction=n.direction, entry=n.entry, sl=n.sl, tp=n.tp, rr=n.rr,
+        if n.purge_time is not None and n.crt_bar_time is not None:
+            # Supurmeden bildirime: TP zaten alindi mi. Pencere C2'nin C1 ucunu (setup tarafi) ILK delen mumdan SONRA baslar --
+            # #56 BTC LONG: C2 ilk saatte C1 tepesine (TP) degmis, C1 dibini sonra supurmustu; supurmeden onceki temas TP degil.
+            def _naive(x):
+                return x.replace(tzinfo=None) if x.tzinfo is None else x.astimezone(timezone.utc).replace(tzinfo=None)
+            c1s, c2 = _naive(n.crt_bar_time), _naive(n.purge_time)
+            c1_len = timedelta(days=7) if n.strategy == "1w" else timedelta(days=1)
+            c1_bars = pot_bars(df, c1s, ltf, until=min(c1s + c1_len, c2))
+            if c1_bars:
+                short = n.direction == "SHORT"
+                c1_ext = max(h for _t, h, _l in c1_bars) if short else min(l_ for _t, _h, l_ in c1_bars)
+                swept = False
+                for _bts, hi_, lo_ in pot_bars(df, c2, ltf, until=start):
+                    if not swept:
+                        swept = (hi_ > c1_ext) if short else (lo_ < c1_ext)
+                        continue   # supurme mumunda TP sayilmaz (mum ici sira bilinmez)
+                    if (lo_ <= tp) if short else (hi_ >= tp):
+                        return "tp_nofill", None
+        t = SimpleNamespace(state="wait", direction=n.direction, entry=entry, sl=sl, tp=tp, rr=rr,
                             filled_at=None, partial_at=None, result=None, result_r=None, result_at=None)
         last_close = None
         for bts, hi_, lo_ in pot_bars(df, start, ltf, until=start + horizon):   # 11.11: yalniz pencere (hiz)
@@ -301,7 +348,7 @@ async def build_potential_signals(
         label, color = STATUS_META[st]
         res, res_r = (_chain_result(n) if new_chain and n.state != "lowq" else None), n.result_r
         if res is None:
-            rp = _replay_notice(n, store)
+            rp = _replay_notice(n, store, j)
             res, res_r = rp if rp is not None else (_result(j, n), None)
         # CISD: zincirin kaydi (11.11+), sinyalinki, yoksa Journal'in ilk CISD kirilimi (retrace.brk); CRT asamasinda bos
         cisd = n.cisd_time or (getattr(sig, "cisd_time", None) if sig is not None else None)
@@ -340,13 +387,13 @@ async def build_potential_signals(
         rows = [r for r in rows if _market_key(r["symbol"]) in markets]
     if direction != "all":
         rows = [r for r in rows if (r["direction"] or "").lower() == direction]
-    by_result = rows if result == "all" else [r for r in rows if r["result"] == result]
+    by_result = [r for r in rows if _result_match(r["result"], result)]
     by_status = rows if status == "all" else [r for r in rows if _group(r["status"]) == status]
     counts = {"all": len(by_result)}
     for key, _ in STATUS_FILTERS[1:]:
         counts[key] = sum(1 for r in by_result if _group(r["status"]) == key)
     results = {k: sum(1 for r in by_status if r["result"] == k) for k in RESULT_META}
-    shown = [r for r in by_status if result == "all" or r["result"] == result]
+    shown = [r for r in by_status if _result_match(r["result"], result)]
     # En yuksek skor ustte (01.11, kullanici); skorsuz en altta, esitlikte en yeni bildirim (sorgu sirasi korunur).
     shown.sort(key=lambda r: -(r["score"] if r["score"] is not None else -1))
     pages = max(1, (len(shown) + PAGE_SIZE - 1) // PAGE_SIZE)
