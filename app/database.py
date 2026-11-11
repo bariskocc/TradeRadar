@@ -71,6 +71,15 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("rr", "ALTER TABLE potential_notices ADD COLUMN rr FLOAT"),
         ("model", "ALTER TABLE potential_notices ADD COLUMN model VARCHAR"),
         ("cancel_reason", "ALTER TABLE potential_notices ADD COLUMN cancel_reason VARCHAR"),
+        # 11.11: yeni bildirim zinciri (CRT -> WAITING -> dolum -> sonuc) + sayfadaki CISD sutunu
+        ("cisd_time", "ALTER TABLE potential_notices ADD COLUMN cisd_time DATETIME"),
+        ("wait_at", "ALTER TABLE potential_notices ADD COLUMN wait_at DATETIME"),
+        ("filled_at", "ALTER TABLE potential_notices ADD COLUMN filled_at DATETIME"),
+        ("partial_at", "ALTER TABLE potential_notices ADD COLUMN partial_at DATETIME"),
+        ("result", "ALTER TABLE potential_notices ADD COLUMN result VARCHAR"),
+        ("result_at", "ALTER TABLE potential_notices ADD COLUMN result_at DATETIME"),
+        ("result_r", "ALTER TABLE potential_notices ADD COLUMN result_r FLOAT"),
+        ("tracked_to", "ALTER TABLE potential_notices ADD COLUMN tracked_to DATETIME"),
     ],
 }
 

@@ -226,7 +226,7 @@ async def _p_shadow(db: AsyncSession) -> Progress:
     return Progress(note=f"{n} setup gölge izlemede · sürekli k eğrisi için çözülmüş kazanan {egri}/60")
 
 
-async def _p_retrace(db: AsyncSession, strategy: Optional[str] = None, target: int = 30) -> Progress:
+async def _p_retrace(db: AsyncSession, strategy: Optional[str] = None, target: int = 30, zone_only: bool = False) -> Progress:
     """first_bar'li (26.09+, yanlissiz) bugunku girisle DOLUP TP'ye giden setup (limit seviyesi karar dilimi).
 
     01.10: strateji bazinda uc maddeye bolundu (`strategy`, kullanici: "30 az"); C2 kapali donmus sarti yalniz 4H'te
@@ -240,23 +240,39 @@ async def _p_retrace(db: AsyncSession, strategy: Optional[str] = None, target: i
     ]
     if strategy:
         base.append(t.c.strategy == strategy)
+    if zone_only:   # 11.11 (1D): yalniz bolge girisli setup -- %60 stop sorusu orada (IFVG / BPR)
+        base.append(or_(func.json_extract(t.c.retrace, "$.d_of.ifvg_near").is_not(None),
+                        func.json_extract(t.c.retrace, "$.d_of.bpr_near").is_not(None)))
     n = await db.scalar(select(func.count()).select_from(t).where(*base)) or 0
     # 28.09: kazanan = bugunku girisle DOLUP TP'ye giden (d_of.chosen <= d_tp). Eskiden `tp_first` sayiliyordu;
     # dolmadan TP'ye gidenler de girdigi icin sayac 67/30 gosterirken esli tablolarda varyant basina 5-8 islem
     # doluyordu -- madde erken "aksiyon bekliyor"a dustu (sayac karar kuralinin saydigini saymali).
     d_ch = func.json_extract(t.c.retrace, "$.d_of.chosen")
+    if zone_only:
+        # 11.11: karar kumesi seviyesi KESIN satirlar (setup_journal.levels_final) -- 1D'de cogu satir C2 acikken donuyor
+        from app.setup_journal import levels_final
+        cols = (t.c.strategy, t.c.pre_c2, t.c.levels_at, t.c.purge_time, t.c.parts_at_levels)
+        wins = (await db.execute(select(*cols).where(
+            *base, func.json_extract(t.c.retrace, "$.tp_first") == 1, d_ch >= 0,
+            d_ch <= func.coalesce(func.json_extract(t.c.retrace, "$.d_tp"), 0)))).mappings().all()
+        allr = (await db.execute(select(*cols).where(*base))).mappings().all()
+        win = sum(1 for r in wins if levels_final(r))
+        n = sum(1 for r in allr if levels_final(r))
+        return Progress(bars=[Bar("bölge girişli, seviyesi kesin first_bar'lı dolmuş kazanan", win, target)],
+                        note=f"{n} seviyesi kesin bölge girişli first_bar'lı setup")
     win = await db.scalar(
         select(func.count()).select_from(t).where(
             *base, func.json_extract(t.c.retrace, "$.tp_first") == 1, d_ch >= 0,
             d_ch <= func.coalesce(func.json_extract(t.c.retrace, "$.d_tp"), 0),
         )
     ) or 0
-    return Progress(bars=[Bar("first_bar'lı dolmuş kazanan", win, target)], note=f"{n} first_bar'lı setup ölçekte")
+    label = "bölge girişli first_bar'lı dolmuş kazanan" if zone_only else "first_bar'lı dolmuş kazanan"
+    return Progress(bars=[Bar(label, win, target)], note=f"{n} first_bar'lı setup ölçekte")
 
 
-def _p_retrace_for(strategy: str, target: int):
+def _p_retrace_for(strategy: str, target: int, zone_only: bool = False):
     async def fn(db: AsyncSession) -> Progress:
-        return await _p_retrace(db, strategy, target)
+        return await _p_retrace(db, strategy, target, zone_only)
     return fn
 
 
@@ -2589,10 +2605,12 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="retrace_1d", status="open", started="01.10", onem=1,
         title="Limit giriş seviyesi — 1D",
-        trigger="40 first_bar'lı dolmuş kazanan: bir limit varyantı (CISD/MSS/IFVG/BPR) ya da stop (%80/%60) aynı setuplarda bugünkü girişi +0.15 R/setup geçerse mum re-track'i; geçmezse giriş ve stop kalır",
-        measure="python tmp/tmp_limit_variant_depth.py --strategy 1d",
+        trigger="11.11 (kullanıcı): BÖLGE GİRİŞLİ (IFVG/BPR), seviyesi kesin 40 first_bar'lı dolmuş kazanan (o gün 25): stop %60 ya da bir "
+                "limit varyantı aynı setuplarda bugünkü girişi +0.15 R/setup geçer VE iki zaman yarısında aynı yöndeyse tek "
+                "replay (kısmi kâr/BE + dar stop kapısı); geçmezse giriş ve stop kalır. Rapor levels_final ile okunur",
+        measure="python tmp/tmp_limit_variant_depth.py --strategy 1d (⚠️ 1D'de levels_final süzgeci yok — scratchpad kopyası ekliyordu)",
         md="Limit giriş seviyesi — 1D",
-        progress_fn=_p_retrace_for("1d", 40),
+        progress_fn=_p_retrace_for("1d", 40, zone_only=True),
     ),
     WatchItem(
         key="retrace_1w", status="open", started="01.10", onem=1,
@@ -2797,7 +2815,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_purge_threshold,
     ),
     WatchItem(
-        key="bias_outcome_4h", status="open", started="03.10", onem=0, pinned=True, pin_order=0,
+        key="bias_outcome_4h", status="done", started="03.10", onem=0,
+        result="(11.11) B3, kapandı (kullanıcı): taze 4H'te (hizalı 252 / ters 340 çözülmüş) hizalı setup TP önce %67 vs ters "
+               "%55 (p < 0.001, iki yarıda, kripto ve FX) — htf +2 doğru; ters ≈ NEUTRAL (+3 puan, p 0.11) → filtre "
+               "etkisiz ama zararsız, kalır; ict-only (C1) yok. Değişiklik yok.",
         title="1D bias kazananı seçiyor mu? — 4H",
         trigger="taze (levels_at ≥ 04.10) temiz 4H setupta bias hizalı ve ters her biri 200 çözülmüş (28.10: 100'de B3, uzatıldı): B1 ters − hizalı "
                 "≥ +0.15 R/setup + WR ≥ 0 + iki yarı → filtre/+2 için tek replay · B2 ters − NEUTRAL ≤ −0.15 + iki yarı → "
@@ -3208,7 +3229,11 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_parts_4h,
     ),
     WatchItem(
-        key="smt_variants", status="open", started="03.10", onem=0,  # 03.10: kullanici "SMT cok onemli konfirme"
+        key="smt_variants", status="done", started="03.10", onem=0,  # 03.10: kullanici "SMT cok onemli konfirme"
+        result="(11.11) KAPANDI (kullanıcı): tanım değişmez — 4H karar bandında (satırın kendi skor tablosu, TP önce mi) FX "
+               "bugünkü SMT %83 / %75 (+8, p 0.17, iki yarıda) → +2 kalır; HTF / seviyeye bağlı −3 (R'deki 'ayırıyor' RR "
+               "yanlılığı); altcoin bugünkü −17 puan (puanı 0 kalır), yeni tanımlar da −4 / −6; BTC↔ETH veri yok. FX'te SMT'nin "
+               "tutması \"SMT +2 — segment bazında\"da.",
         title="SMT doğru tanımla — bugünkü / HTF / seviyeye bağlı",
         trigger="çift türüne göre ayrı (FX/metal/endeks ↔ altcoin→BTC): karar bandında taraf başına 10 çözülmüş; bir tanım "
                 "SMT'li − SMT'siz ≥ +0.15 R/setup ve iki yarıda > 0 ise 'kazananı ayırıyor' → o tür için bugünkü tanımın "

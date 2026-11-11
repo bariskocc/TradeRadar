@@ -74,7 +74,10 @@ from app import setup_journal as journal
 from app import session as fx_session
 from app.telegram import is_configured as tg_configured
 from app.telegram import send_signal_active, send_signal_partial, send_signal_result
-from app.telegram import send_potential_cancel, send_signal_potential, send_signal_waiting
+from app.telegram import (
+    format_potential_crt, format_potential_filled, format_potential_lowq, format_potential_result,
+    format_potential_waiting, send_potential_cancel, send_signal_potential, send_signal_waiting, send_text,
+)
 from app.telegram import send_signal_void
 from app.crt_engine import build_rejected_setup
 
@@ -96,11 +99,19 @@ _SMT_MAJORS = frozenset({"BTCUSDT", "ETHUSDT"})
 MAX_QUALITY_SCORE = 11  # baz tavan 9 + SMT 2
 
 
+# 11.11 (kullanici karari): 1D'ye altcoinler eklendi -- SMT puani orada da 0 (4H altcoin bulgusu; 1D altcoin verisi yok,
+# olcum `features.smt_div` ile surer). 1W'de altcoin yok.
+SMT_ALT_1D_BONUS = 0
+
+
 def smt_bonus_for(strategy: str | None, symbol: str | None, market: str | None) -> int:
-    """SMT bulunursa eklenecek puan: 4H altcoin 0 (29.10; 24.10-29.10 +1), digerleri +2. Sembol ham ya da gorunum adi."""
+    """SMT bulunursa eklenecek puan: 4H / 1D altcoin 0 (4H 29.10, 1D 11.11), digerleri +2. Sembol ham ya da gorunum adi."""
     sym = (symbol or "").upper().replace("-", "").replace(".P", "")
-    if (strategy or "4h") == "4h" and (market or "").lower() == "crypto" and sym not in _SMT_MAJORS:
-        return SMT_ALT_4H_BONUS
+    if (market or "").lower() == "crypto" and sym not in _SMT_MAJORS:
+        if (strategy or "4h") == "4h":
+            return SMT_ALT_4H_BONUS
+        if strategy == STRATEGY_1D:
+            return SMT_ALT_1D_BONUS
     return SMT_QUALITY_BONUS
 # 4H yeni skor tablosu (29.10, crt_engine.SCORE_V2_TFS): her setupa +1 veren C2 kapali kalemi kalkti -> esik 7 -> 6
 # (ayni sinyal kumesi), tavan 9, SMT ile 11. Kume muafiyeti de bir asagi (9 -> 8), sinir skor kapisi kapali.
@@ -274,6 +285,9 @@ STRATEGY_CFG = {
         "min_fill_sec": MIN_FILL_BAR_AGE_SEC_1D,
         **_RISK_GATES,
         "cluster_window_hours": 24.0,
+        # 11.11 (kullanici karari): 1D'ye altcoinler girince "ayni setup tek islem" en fazla 2 -- butun coinler ayni gun
+        # mumunu paylasiyor, 1 coin basina 1 kripto 1D sinyali birakiyordu; kume limiti (2) ile tutarli. 4H'te 1 kalir.
+        "same_setup_max": 2,
         "be_arm_r": None,
         "trail_arm_r": None,
         # Kismi kar (11.09): TP yolunun %50'sinde yarisi kapatilir, kalan yari
@@ -664,8 +678,11 @@ async def _is_duplicate_setup(session: AsyncSession, setup: CRTSetup) -> bool:
     return result.scalars().first() is not None
 
 
-async def _same_setup_signal(session: AsyncSession, setup: CRTSetup) -> Signal | None:
-    """Ayni setup'tan (strateji + yon + C1 + C2 zamani) baska kripto sembolde kayitli sinyal (SAME_SETUP_ONE_TRADE)."""
+async def _same_setup_signal(session: AsyncSession, setup: CRTSetup, max_n: int = 1) -> Signal | None:
+    """Ayni setup'tan (strateji + yon + C1 + C2 zamani) baska kripto sembolde kayitli sinyal (SAME_SETUP_ONE_TRADE).
+
+    11.11: `max_n` (STRATEGY_CFG `same_setup_max`, 1D 2): kayitli kopya sayisi `max_n`'e ulastiysa ilki doner (engeller),
+    altindaysa None."""
     result = await session.execute(
         select(Signal).where(
             Signal.market_type == CLUSTER_MARKET,
@@ -676,7 +693,8 @@ async def _same_setup_signal(session: AsyncSession, setup: CRTSetup) -> Signal |
             Signal.purge_time == setup.purge_time,
         ).order_by(Signal.id)
     )
-    return result.scalars().first()
+    twins = result.scalars().all()
+    return twins[0] if len(twins) >= max(1, int(max_n)) else None
 
 
 def _liq_sweep_state(setup: CRTSetup, df_ltf: pd.DataFrame | None, strategy: str) -> dict | None:
@@ -858,9 +876,40 @@ POTENTIAL_NOTICES_ENABLED = False
 # acik -- kullanici dolmadan TP'ye giden 1D/1W setuplardan habersiz kaliyordu. Skor tabani 4 (kullanici
 # karari; Journal 25.09-24.10, TP once mi SL once mi: skor >= 4 1D %50 / 1W %50, 0-2 %18-26). 1D POTANSIYEL
 # zinciri (tum kapilardan gecen setup) kapali kalir, WAITING onu karsiliyor. Motor karari degismez.
-GATED_NOTICES_ENABLED = True
+# 11.11: ESKI "ELENDI" zinciri kapandi -> yerine POTANSIYEL zinciri (asagi). Kod duruyor (eski satirlar okunur).
+GATED_NOTICES_ENABLED = False
 GATED_NOTICE_STRATEGIES = frozenset({STRATEGY_1D, STRATEGY_1W})
 GATED_MIN_SCORE = 4
+
+# 11.11 (kullanici karari): 1D / 1W POTANSIYEL zinciri -- motorun ALMADIGI kaliteli setup icin
+#   CRT (C2 C1 ucunu supurdu, CISD yok)  -> "CRT" mesaji: yapi (C2 rengi yanlis degil, zayif donus cezasi yok)
+#                                           + skor >= POT_CRT_MIN
+#   CISD + kalite                        -> "POTANSIYEL WAITING" (CRT mesajina reply): RR >= min RR, skor >= POT_WAIT_MIN,
+#                                           yapi; portfoy / bias kapilari ENGELLEMEZ (korele acik islem olsa bile)
+#   C2 kapali + CISD var + kalite yok    -> "kalite yetersiz", zincir biter
+#   fiyat girise degdi / sonuc           -> reply (islem acilmasa da; motorun %50 kismi kar + BE kuraliyla,
+#                                           MESAJDAKI seviyelerden -- `_track_potential_bar`)
+# Iptal mesaji YOK (kullanici): CRT asamasinda bozulan / yerine yenisi gelen zincir sessizce biter (sayfada "Iptal").
+# Setup gercek sinyale donerse sinyalin WAITING / ACTIVE / sonuc mesajlari zincire reply olur (`_notify_waiting`),
+# zincirin kendi sonucu gitmez. Journal 1D (25.09+): skor >= 5 + yapi + RR >= 2 haftada ~6, %54 TP once.
+POTENTIAL_CHAIN_ENABLED = True
+POT_STRATEGIES = frozenset({STRATEGY_1D, STRATEGY_1W})
+POT_WAIT_MIN = {STRATEGY_1D: 5, STRATEGY_1W: 4}      # sinyal esigi - 2 (1D 7, 1W 6)
+POT_CRT_MIN = {STRATEGY_1D: 3, STRATEGY_1W: 2}       # WAITING esigi - 2
+POT_HORIZON = {STRATEGY_1D: timedelta(hours=120), STRATEGY_1W: timedelta(days=9)}   # Journal ufku ile ayni
+POT_LTF = {STRATEGY_1D: timedelta(hours=1), STRATEGY_1W: timedelta(hours=4)}
+# WAITING'e izin veren kapilar: motor almiyor ama firsat suruyor (kalite ayrica olculur).
+POT_WAIT_GATES = frozenset({
+    "bias_mismatch", "low_quality", "score7_gate", "cluster_limit", "has_open", "corr_open", "duplicate",
+    "same_setup", "deleted_before",
+})
+# Firsat bitti: TP tarafi tuketildi / fiyat SL'yi gecti / bayat. CRT asamasindaki zincir C2 kapaninca sessizce biter.
+POT_DEAD_GATES = frozenset({
+    "target_taken", "past_tp", "near_tp", "past_sl", "stale", "week_gap", "invalidated", "missed_quality",
+    "liq_unswept", "tight_stop",
+})
+POT_LIVE_STATES = ("crt", "wait", "fill")
+POT_NEW_STATES = frozenset({"crt", "wait", "fill", "lowq", "done", "signal"})
 
 
 def _note_deleted(s: Signal, reason: str) -> None:
@@ -1139,6 +1188,11 @@ async def _notify_gated_potential(
     sweep_small, not_selected — buraya hic gelmez, onlar `setup is None` dalinda kaliyor),
     kapi `_GATED_NOTIFY_GATES` icinde olsun, skor `GATED_MIN_SCORE`'u ve RR tabani gecsin.
     """
+    if POTENTIAL_CHAIN_ENABLED and strategy in POT_STRATEGIES:
+        if _pot_alt_excluded(setup.symbol, setup.market_type):
+            return   # 11.11 (kullanici): 1D altcoinlerinde potansiyel bildirimi simdilik yok
+        await _potential_chain_step(session, setup, preview, gate, strategy=strategy)
+        return
     if not GATED_NOTICES_ENABLED or strategy not in GATED_NOTICE_STRATEGIES:
         return
     try:
@@ -1188,8 +1242,15 @@ async def _cancel_gated_notices(
     her gunluk CRT yenilemesi ve her restart "IPTAL + ayni setup icin yeni ELENDI" ikilisi
     uretiyordu (18.09 anchor degisiminde XAU/XAG/US100/US500'de birebir goruldu).
     Yon degistiyse ya da yeni anahtarda zaten zincir varsa eski davranis: IPTAL.
+
+    11.11: yeni POTANSIYEL zincirinin CRT asamasi (`crt`) burada MESAJSIZ biter (kullanici: iptal mesaji yok);
+    WAITING'i gitmis zincir (`wait` / `fill`) bitmez -- fiyat takibi mesajdaki seviyelerle surer.
     """
-    if not GATED_NOTICES_ENABLED or strategy not in GATED_NOTICE_STRATEGIES:
+    if POTENTIAL_CHAIN_ENABLED and strategy in POT_STRATEGIES:
+        await _end_potential_crt(session, strategy, symbol, reason, keep_purge_time, keep_direction)
+    # 11.11: eski zincir kapali (GATED_NOTICES_ENABLED) ama hala acik eski satirlar (`:gated`) kapanmaya devam eder --
+    # MESAJSIZ (kullanici: iptal mesaji yok); yoksa sayfada sonsuza dek "Watching" kalirdi.
+    if not (GATED_NOTICES_ENABLED or POTENTIAL_CHAIN_ENABLED) or strategy not in GATED_NOTICE_STRATEGIES:
         return
     try:
         keep = _as_naive(keep_purge_time)
@@ -1223,7 +1284,7 @@ async def _cancel_gated_notices(
             n.cancel_reason = reason
             n.updated_at = datetime.now(timezone.utc)
             changed = True
-            if n.tg_message_id:
+            if n.tg_message_id and GATED_NOTICES_ENABLED:
                 _POTENTIAL_OUTBOX.append({
                     "symbol": n.symbol, "direction": n.direction,
                     "reason": reason, "reply_to": int(n.tg_message_id),
@@ -1233,6 +1294,245 @@ async def _cancel_gated_notices(
             await session.commit()
     except Exception:
         log.exception("gated potential cancel failed for %s", symbol)
+
+
+# 11.11 (kullanici): 1D'ye eklenen altcoinler icin potansiyel zinciri simdilik KAPALI (sinyal / WAITING normal gider).
+POT_ALTS_ENABLED = False
+
+
+def _pot_alt_excluded(symbol: str | None, market: str | None) -> bool:
+    sym = (symbol or "").upper().replace("-", "").replace(".P", "")
+    return (not POT_ALTS_ENABLED) and (market or "").lower() == "crypto" and sym not in _SMT_MAJORS
+
+
+async def _pot_send(text: str, reply_to: int | None) -> int | None:
+    if not tg_configured():
+        return None
+    try:
+        return await send_text(text, reply_to=reply_to)
+    except Exception:
+        log.warning("telegram potential chain send failed")
+        return None
+
+
+def _pot_quality(setup: CRTSetup, preview: dict, gate: str, strategy: str) -> tuple[bool, bool, bool]:
+    """(yapi, cisd_seviyeli, waiting_kalitesi)."""
+    parts = setup.score_parts or {}
+    structural = (parts.get("base") or 0) > 0 and (parts.get("reclaim") or 0) >= 0
+    cisd_ok = bool(preview.get("cisd_confirmed")) and all(
+        preview.get(k) is not None for k in ("entry", "sl", "tp"))
+    rr = preview.get("rr")
+    quality = (
+        structural and cisd_ok and gate in POT_WAIT_GATES and rr is not None
+        and float(rr) >= _min_rr_for_market(setup.market_type)
+        and int(setup.bias_score or 0) >= POT_WAIT_MIN[strategy]
+    )
+    return structural, cisd_ok, quality
+
+
+async def _potential_chain_step(
+    session: AsyncSession, setup: CRTSetup, preview: dict, gate: str, *, strategy: str,
+) -> None:
+    """1D / 1W POTANSIYEL zinciri, kapida elenen setup'in her degerlendirmesinde (11.11). Motor karari DEGISMEZ."""
+    try:
+        notice = await _get_potential_notice(session, strategy, setup.symbol, setup.direction, setup.purge_time)
+        if notice is not None and (notice.cancelled or notice.state not in POT_NEW_STATES):
+            return   # eski zincir (open:gated ...) ya da sessizce bitmis
+        if notice is not None and notice.state != "crt":
+            return   # WAITING gitti / bitti / sinyal: fiyat takibi ya da sinyal mesajlari surduruyor
+        structural, cisd_ok, quality = _pot_quality(setup, preview, gate, strategy)
+        score = int(setup.bias_score or 0)
+        now = datetime.now(timezone.utc)
+        if quality:
+            text = format_potential_waiting(
+                setup.symbol, strategy, setup.direction, preview.get("entry"), preview.get("sl"), preview.get("tp"),
+                preview.get("rr"), score, gate, preview.get("model") or "cisd",
+            )
+            mid = await _pot_send(text, notice.tg_message_id if notice is not None else None)
+            if notice is None:
+                notice = PotentialNotice(
+                    strategy=strategy, symbol=setup.symbol, direction=setup.direction,
+                    purge_time=_as_naive(setup.purge_time), crt_bar_time=_as_naive(setup.crt_bar_time),
+                )
+                session.add(notice)
+            if mid:
+                notice.tg_message_id = mid
+            notice.state, notice.gate, notice.score = "wait", gate, score
+            notice.entry, notice.sl, notice.tp = preview.get("entry"), preview.get("sl"), preview.get("tp")
+            notice.rr, notice.model = preview.get("rr"), preview.get("model") or "cisd"
+            notice.cisd_time = _as_naive(preview.get("cisd_time"))
+            notice.wait_at = notice.tracked_to = now.replace(tzinfo=None)
+            notice.updated_at = now
+            await session.commit()
+            log.info("POTENTIAL WAITING %s: %s %s skor %s RR %s gate=%s Entry:%s SL:%s TP:%s (mid=%s)",
+                     strategy.upper(), setup.symbol, setup.direction, score, preview.get("rr"), gate,
+                     preview.get("entry"), preview.get("sl"), preview.get("tp"), mid)
+            return
+        if notice is None:
+            # CRT mesaji: yapi + skor; CISD varsa ve C2 kapaliysa karar kesin (kalite yok) -> hic mesaj yok.
+            if gate in POT_DEAD_GATES or not structural or score < POT_CRT_MIN[strategy]:
+                return
+            if cisd_ok and setup.c2_closed:
+                return
+            target = setup.key_level_low if setup.direction == "SHORT" else setup.key_level_high
+            mid = await _pot_send(format_potential_crt(setup.symbol, strategy, setup.direction, target, score), None)
+            if tg_configured() and not mid:
+                return   # gonderim basarisiz: sonraki degerlendirmede tekrar
+            notice = PotentialNotice(
+                strategy=strategy, symbol=setup.symbol, direction=setup.direction,
+                purge_time=_as_naive(setup.purge_time), crt_bar_time=_as_naive(setup.crt_bar_time),
+                tg_message_id=mid, state="crt", gate=gate, score=score, tp=target, updated_at=now,
+            )
+            session.add(notice)
+            await session.commit()
+            log.info("POTENTIAL CRT %s: %s %s skor %s gate=%s (mid=%s)",
+                     strategy.upper(), setup.symbol, setup.direction, score, gate, mid)
+            return
+        # CRT asamasi, WAITING kalitesi yok
+        if not setup.c2_closed:
+            return   # C2 acik: skor / RR mum icinde oynuyor, kapanisi bekle
+        if gate in POT_DEAD_GATES:
+            notice.cancelled, notice.cancel_reason, notice.updated_at = True, gate, now
+            await session.commit()
+            return
+        if cisd_ok:
+            mid = await _pot_send(format_potential_lowq(setup.symbol, strategy, score, preview.get("rr")),
+                                  notice.tg_message_id)
+            if mid:
+                notice.tg_message_id = mid
+            notice.state, notice.gate, notice.score, notice.rr = "lowq", gate, score, preview.get("rr")
+            notice.cisd_time = _as_naive(preview.get("cisd_time"))
+            notice.updated_at = now
+            await session.commit()
+            log.info("POTENTIAL LOW QUALITY %s: %s %s skor %s RR %s gate=%s",
+                     strategy.upper(), setup.symbol, setup.direction, score, preview.get("rr"), gate)
+    except Exception:
+        log.exception("potential chain step failed for %s", getattr(setup, "symbol", "?"))
+
+
+async def _end_potential_crt(session: AsyncSession, strategy: str, symbol: str, reason: str,
+                             keep_purge_time=None, keep_direction: str | None = None) -> None:
+    """CRT asamasindaki zincir (WAITING gitmemis) setup bozulunca / yerine yenisi gelince MESAJSIZ biter."""
+    try:
+        keep = _as_naive(keep_purge_time)
+        res = await session.execute(select(PotentialNotice).where(
+            PotentialNotice.strategy == strategy, PotentialNotice.symbol == symbol,
+            PotentialNotice.cancelled.is_(False), PotentialNotice.state == "crt",
+        ))
+        rows = [n for n in res.scalars().all()
+                if keep is None or not (n.purge_time == keep and n.direction == keep_direction)]
+        for n in rows:
+            n.cancelled, n.cancel_reason, n.updated_at = True, reason, datetime.now(timezone.utc)
+        if rows:
+            await session.commit()
+    except Exception:
+        log.exception("potential crt end failed for %s", symbol)
+
+
+def _pot_hits(n: PotentialNotice, high: float, low: float) -> tuple[bool, bool, bool, bool]:
+    """(giris, SL, TP, TP yolunun %50'si) -- mesajdaki seviyeler."""
+    if n.direction == "LONG":
+        half = n.entry + 0.5 * (n.tp - n.entry)
+        return low <= n.entry, low <= n.sl, high >= n.tp, high >= half
+    half = n.entry - 0.5 * (n.entry - n.tp)
+    return high >= n.entry, high >= n.sl, low <= n.tp, low <= half
+
+
+def pot_step_bar(n: PotentialNotice, bar_ts: datetime, high: float, low: float, ltf: timedelta) -> list[str]:
+    """Zincirin fiyat adimi (saf; DB / Telegram yok). Donus: olaylar ("fill", "result").
+
+    Motorun kurallari: dolum mumunda yalniz orijinal SL (mum ici sira bilinmez) · dolumdan sonra TP yolunun
+    %50'si gorulunce yarisi kapanir, kalan SL girise -- BE tetik mumundan SONRAKI mumdan gecerli (koruma geriye
+    uygulanmaz) · ayni mumda stop ve TP -> stop. R: tp 0.75 x RR (yarisi %50'de), be50 0.25 x RR, sl -1.
+    """
+    ev: list[str] = []
+    rr = float(n.rr or 0.0)
+    hit_e, hit_sl, hit_tp, hit_half = _pot_hits(n, high, low)
+
+    def _done(res: str, r):
+        n.result, n.result_r, n.state = res, r, "done"
+        n.result_at = (bar_ts + ltf).replace(tzinfo=None)
+        ev.append("result")
+
+    if n.state == "wait":
+        if hit_e:
+            n.state, n.filled_at = "fill", bar_ts.replace(tzinfo=None)
+            ev.append("fill")
+            if hit_sl:
+                _done("sl", -1.0)
+        elif hit_tp:
+            _done("tp_nofill", None)
+        return ev
+    if n.state == "fill":
+        if n.filled_at is not None and bar_ts.replace(tzinfo=None) <= n.filled_at:
+            return ev   # dolum mumu zaten islendi
+        partial = n.partial_at is not None
+        stop_hit = hit_sl if not partial else (low <= n.entry if n.direction == "LONG" else high >= n.entry)
+        if stop_hit:
+            _done("be50", round(0.25 * rr, 2)) if partial else _done("sl", -1.0)
+        elif hit_tp:
+            _done("tp", round(0.75 * rr, 2))
+        elif hit_half and not partial:
+            n.partial_at = bar_ts.replace(tzinfo=None)
+    return ev
+
+
+async def _track_potential_bar(session: AsyncSession, strategy: str, symbol: str, df_ltf) -> None:
+    """Potansiyel zincirin fiyat takibi: kapanmis LTF mumlari (restart'ta `tracked_to`'dan devam). 11.11."""
+    if not POTENTIAL_CHAIN_ENABLED or strategy not in POT_STRATEGIES:
+        return
+    try:
+        res = await session.execute(select(PotentialNotice).where(
+            PotentialNotice.strategy == strategy, PotentialNotice.symbol == symbol,
+            PotentialNotice.cancelled.is_(False), PotentialNotice.state.in_(POT_LIVE_STATES),
+        ))
+        rows = res.scalars().all()
+        if not rows:
+            return
+        ltf, now = POT_LTF[strategy], datetime.now(timezone.utc)
+        changed = False
+        for n in rows:
+            if n.state == "crt":
+                # CISD hic gelmeyen CRT ufukta sessizce biter
+                if now - _as_utc(n.created_at) > POT_HORIZON[strategy]:
+                    n.cancelled, n.cancel_reason, n.updated_at = True, "expired", now
+                    changed = True
+                continue
+            if df_ltf is not None and len(df_ltf) >= 2 and n.entry is not None and n.sl is not None and n.tp is not None:
+                since = n.tracked_to or n.wait_at
+                for ts, bar in df_ltf.iloc[:-1].iterrows():   # son satir olusan mum
+                    bts = ts.to_pydatetime()
+                    if bts.tzinfo is None:
+                        bts = bts.replace(tzinfo=timezone.utc)
+                    close_at = (bts + ltf).replace(tzinfo=None)
+                    if since is not None and close_at <= since:
+                        continue
+                    for e in pot_step_bar(n, bts, float(bar["high"]), float(bar["low"]), ltf):
+                        if e == "fill":
+                            mid = await _pot_send(format_potential_filled(n.symbol, strategy, n.entry), n.tg_message_id)
+                            n.tg_message_id = mid or n.tg_message_id
+                        else:
+                            mid = await _pot_send(format_potential_result(n.symbol, strategy, n.result, n.result_r),
+                                                  n.tg_message_id)
+                            n.tg_message_id = mid or n.tg_message_id
+                            log.info("POTENTIAL RESULT %s: %s %s %s %s", strategy.upper(), n.symbol, n.direction,
+                                     n.result, n.result_r)
+                    n.tracked_to = close_at
+                    changed = True
+                    if n.state == "done":
+                        break
+            if n.state in ("wait", "fill") and n.wait_at is not None and now - _as_utc(n.wait_at) > POT_HORIZON[strategy]:
+                n.result, n.result_r, n.state = "expired", None, "done"
+                n.result_at = now.replace(tzinfo=None)
+                mid = await _pot_send(format_potential_result(n.symbol, strategy, "expired", None), n.tg_message_id)
+                n.tg_message_id = mid or n.tg_message_id
+                changed = True
+            if changed:
+                n.updated_at = now
+        if changed:
+            await session.commit()
+    except Exception:
+        log.exception("potential track failed for %s %s", strategy, symbol)
 
 
 def _calc_planned_rr(entry: float | None, sl: float | None, tp: float | None) -> float | None:
@@ -2979,6 +3279,7 @@ async def _detect_and_create_waiting_locked(
             _STICKY_LOGGED.add(sk)
             log.info("SKIPPED (DELETED BEFORE): %s %s purge=%s bir kez silindi, yeniden acilmaz.",
                      setup.symbol, setup.direction, setup.purge_time)
+        await _gated("deleted_before")
         return None
 
     if (
@@ -2986,7 +3287,7 @@ async def _detect_and_create_waiting_locked(
         and (setup.market_type or "").lower() == CLUSTER_MARKET
         and existing_pending is None
     ):
-        twin = await _same_setup_signal(session, setup)
+        twin = await _same_setup_signal(session, setup, int(cfg.get("same_setup_max", 1)))
         if twin is not None:
             _radar("same_setup", direction=setup.direction,
                        score=setup.bias_score, bias=htf_bias, weekly_bias=weekly_bias,
@@ -3044,6 +3345,7 @@ async def _detect_and_create_waiting_locked(
             _STICKY_LOGGED.add(lk)
             log.info("SKIPPED (LIQ UNSWEPT): %s %s C2 ucu %s, yakin likidite %s alinmadi -- supurulmesi bekleniyor.",
                      setup.symbol, setup.direction, setup.purge_extreme, liq["level"])
+        await _gated("liq_unswept")
         return None
     extend_extreme = liq is not None
     if extend_extreme and liq["ext"] is not None:
@@ -4586,6 +4888,8 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
                     jb = df_bar.iloc[-2]
                     journal.track_bar(ltf_strategy, display_symbol, jb.name, float(jb["high"]), float(jb["low"]),
                                       float(jb["close"]))
+                    # 11.11: 1D / 1W potansiyel zincirinin fiyat takibi (mesajdaki seviyelerle)
+                    await _track_potential_bar(session, ltf_strategy, display_symbol, df_bar)
                     if timeframe == "15m":
                         # sd1h: sembolun 5m serisi varsa 15m ile IKINCI kez izlenmez (5m kapanisi yukarida).
                         df5 = store.get_df(bingx_symbol, "5m")

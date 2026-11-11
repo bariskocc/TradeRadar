@@ -14,7 +14,11 @@ Kume: Journal, CRT-oncesi asamalar haric, features'ta smt_htf olan (korele cift 
 (sinyalde golge). Duz TP/SL. Iki okuma: (a) tum setuplar, (b) KARAR BANDI -- bugunku SMT haric skor esigin 1-2 altinda (+2
 sinyali acardi: 4H/1D 5-6, 1W 4-5), tanimi tasiyan vs tasimayan.
 
-Karar kurali: IZLEME.md "SMT doğru tanımla — bugünkü / HTF / seviyeye bağlı" (03.10, veri gorulmeden).
+11.11 (madde kapandi): karar bandi SATIRIN KENDI skor tablosundan -- 4H yeni tablo (29.10+, parts'ta key_level) esik 6 ->
+bant 4-5, eski satirlar 7 -> 5-6 (once hepsi 7'ye goreydi, yeni satirlar yanlis banda dusuyordu). Sonuc ayrica "TP once mi"
+(24.10 kullanici kurali; tp_before_entry = TP) -- hukum ondan okunur, dolum bazli R RR'si yuksek grubu kayirir (29.10).
+
+Karar kurali: IZLEME.md "SMT doğru tanımla — bugünkü / HTF / seviyeye bağlı" (03.10, veri gorulmeden; 11.11 kapandi).
 Kullanim: python scripts/smt_variants_stat.py [--strategy 4h] [--since YYYY-MM-DD]
 """
 from __future__ import annotations
@@ -35,6 +39,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REPO = Path(__file__).resolve().parent.parent
 PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_doji", "c2_second_sweep", "not_selected"}
 THR = {"4h": 7, "1d": 7, "1w": 6}
+THR_4H_V2 = 6      # 29.10 4H yeni skor tablosu (crt_engine.SCORE_V2_TFS; satirda parts.key_level var)
 # --- IZLEME.md'ye veri GORULMEDEN yazilan esikler (03.10) ---
 MIN_SIDE = 10      # karar bandinda tanimi tasiyan ve tasimayan, cozulmus
 EDGE = 0.15        # R/setup farki
@@ -77,22 +82,36 @@ def load(db, strategy, since):
         if o == "signal":
             sh = (_j(r["shadow"]) or {}).get("1") or {}
             o, rr = sh.get("o"), sh.get("rr", rr)
-        if o not in ("win", "loss") or rr is None:
+        if o not in ("win", "loss", "tp_before_entry") or rr is None:
             continue
+        thr = THR_4H_V2 if strategy == "4h" and "key_level" in p else THR[strategy]
         smt_now = int((p.get("smt") or 0) > 0 or f.get("smt_div") == 1)   # 29.10: 4H altcoin SMT puansiz, smt_div
         out.append(dict(t=t, kind=f.get("smt_kind") or "?", win=o == "win", R=rr if o == "win" else -1.0,
+                        fill=o != "tp_before_entry", tp=o != "loss", thr=thr,
                         bugun=smt_now, htf=int(f.get("smt_htf") or 0), lvl=int(f.get("smt_lvl") or 0),
                         wo=(p.get("score") or 0) - (p.get("smt") or 0)))
     return out
 
 
 def st(rs):
+    """(dolan n, dolum WR, R/setup) -- dolum bazli; dolmadan TP'ye giden satir burada yok."""
+    rs = [x for x in rs if x["fill"]]
     n = len(rs)
     return (n, 100 * sum(x["win"] for x in rs) / n, sum(x["R"] for x in rs) / n) if n else (0, None, None)
 
 
+def tp_first(rs):
+    """(n, TP once %) -- 24.10 kullanici kurali: dolum fark etmez, tp_before_entry = TP."""
+    n = len(rs)
+    return (n, 100 * sum(x["tp"] for x in rs) / n) if n else (0, None)
+
+
 def fmt(s):
     return "n=   0" if not s[0] else f"n={s[0]:4d} WR %{s[1]:5.1f} R/setup {s[2]:+.3f}"
+
+
+def fmt_tp(s):
+    return "n=   0" if not s[0] else f"n={s[0]:4d} TP once %{s[1]:5.1f}"
 
 
 def main():
@@ -102,7 +121,6 @@ def main():
     ap.add_argument("--since", default=None)
     ap.add_argument("--all-levels", action="store_true", help="1D/1W: C2 acikken donmus (yanli) eski satirlar da")
     A = ap.parse_args()
-    thr = THR[A.strategy]
     recs = load(A.db, A.strategy, A.since)
     print(f"Strateji {A.strategy} · SMT olcumu olan cozulmus setup {len(recs)} (olcum 03.10 restart'indan sonra baslar)")
     if not recs:
@@ -112,7 +130,7 @@ def main():
         print(f"\n## {kname} -- {len(rs)} setup")
         if not rs:
             continue
-        band = [x for x in rs if thr - 2 <= x["wo"] <= thr - 1]
+        band = [x for x in rs if x["thr"] - 2 <= x["wo"] <= x["thr"] - 1]   # 11.11: satirin kendi esigi
         half = sorted(x["t"] for x in band)[len(band) // 2] if band else None
         for d, dname in DEFS:
             a, b = st([x for x in rs if x[d]]), st([x for x in rs if not x[d]])
@@ -133,6 +151,17 @@ def main():
                       + f" -> {verdict}")
             else:
                 print(f" · veri az (taraf basina {MIN_SIDE})")
+            ta, tb = tp_first([x for x in band if x[d]]), tp_first([x for x in band if not x[d]])
+            print(f"      bant TP once: tasiyan {fmt_tp(ta)} · tasimayan {fmt_tp(tb)}", end="")
+            if ta[0] and tb[0]:
+                hs = []
+                for h in ([x for x in band if x["t"] < half], [x for x in band if x["t"] >= half]):
+                    ha, hb = tp_first([x for x in h if x[d]]), tp_first([x for x in h if not x[d]])
+                    hs.append(ha[1] - hb[1] if ha[0] and hb[0] else None)
+                print(f" · fark {ta[1] - tb[1]:+.1f} puan, yarilar "
+                      + " / ".join(f"{v:+.1f}" if v is not None else "-" for v in hs))
+            else:
+                print()
     print("\nKarar kurali: IZLEME.md 'SMT doğru tanımla — bugünkü / HTF / seviyeye bağlı'. Motor puani bugunku tanimdan.")
 
 

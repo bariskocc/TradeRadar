@@ -50,8 +50,10 @@ _CRYPTO: list[str] = [
     "1000PEPE-USDT",
 ]
 
-# 1D-1H CRT: kripto yalnizca BTC + ETH (alt yok).
+# 1D-1H CRT: kripto BTC + ETH; 11.11'den beri (kullanici karari: 1D'de sinyal cok az) 4H'in altcoinleri de
+# (`D1_ALTS_ENABLED`). 1W-4H ve S/D 1H / 15m evreni ESKI liste (BTC/ETH + kripto-disi) kalir -- `get_w1_*`.
 _D1H_CRYPTO: list[str] = ["BTC-USDT", "ETH-USDT"]
+D1_ALTS_ENABLED = True
 
 SYMBOLS_BY_MARKET: dict[str, list[str]] = {
     "crypto": _CRYPTO,
@@ -256,12 +258,19 @@ def get_active_symbols_flat() -> list[str]:
     return result
 
 
-def get_d1h_markets() -> dict[str, list[str]]:
-    """1D-1H CRT evreni: kripto yalnizca BTC+ETH; global marketler 4H ile ayni.
+def _d1h_crypto() -> list[str]:
+    """1D kripto listesi: BTC + ETH, 11.11'den beri + 4H altcoinleri (sira korunur, tekrar yok)."""
+    if not D1_ALTS_ENABLED:
+        return list(_D1H_CRYPTO)
+    return list(dict.fromkeys(_D1H_CRYPTO + list(SYMBOLS_BY_MARKET["crypto"])))
 
-    Hafta sonu yalnizca BTC ve ETH (FX/metal/endeks/petrol kapali).
+
+def get_d1h_markets() -> dict[str, list[str]]:
+    """1D-1H CRT evreni: kripto BTC+ETH + (11.11) altcoinler; global marketler 4H ile ayni.
+
+    Hafta sonu yalnizca kripto (FX/metal/endeks/petrol kapali).
     """
-    active: dict[str, list[str]] = {"crypto": list(_D1H_CRYPTO)}
+    active: dict[str, list[str]] = {"crypto": _d1h_crypto()}
     if not is_weekend():
         active["metal"] = SYMBOLS_BY_MARKET["metal"]
         active["oil"] = SYMBOLS_BY_MARKET["oil"]
@@ -278,20 +287,40 @@ def get_d1h_symbols_flat() -> list[str]:
     return result
 
 
-_D1H_ALL: set[str] = set(_D1H_CRYPTO)
+_W1_ALL: set[str] = set(_D1H_CRYPTO)
 for _m in ("metal", "oil", "index", "fx"):
-    _D1H_ALL.update(SYMBOLS_BY_MARKET[_m])
+    _W1_ALL.update(SYMBOLS_BY_MARKET[_m])
+_D1H_ALL: set[str] = set(_W1_ALL) | (set(SYMBOLS_BY_MARKET["crypto"]) if D1_ALTS_ENABLED else set())
 
 
 def is_d1h_symbol(bingx_symbol: str) -> bool:
     return bingx_symbol in _D1H_ALL
 
 
-# 1W-4H evreni (28.09): 1D-1H ile ayni -- BTC/ETH + FX/metal/endeks/petrol, altcoin yok.
-# Veri de ayni: 4H kripto WS'ten, seansta 1H'ten sentez; haftalik mum 1D'den.
-get_w1_markets = get_d1h_markets
-get_w1_symbols_flat = get_d1h_symbols_flat
-is_w1_symbol = is_d1h_symbol
+def is_d1_alt(bingx_symbol: str) -> bool:
+    """11.11: 1D'ye eklenen altcoin (BTC/ETH ve kripto-disi degil)."""
+    return bingx_symbol in _D1H_ALL and bingx_symbol not in _W1_ALL
+
+
+# 1W-4H evreni (28.09): BTC/ETH + FX/metal/endeks/petrol, altcoin yok. 11.11'e kadar 1D-1H ile ayniydi (alias);
+# 1D altcoinleri alinca ayrildi -- 1W ve S/D 1H / 15m (is_w1_symbol, get_h1_5m_symbols) bu listede kalir.
+def get_w1_markets() -> dict[str, list[str]]:
+    active: dict[str, list[str]] = {"crypto": list(_D1H_CRYPTO)}
+    if not is_weekend():
+        for m in ("metal", "oil", "index", "fx"):
+            active[m] = SYMBOLS_BY_MARKET[m]
+    return active
+
+
+def get_w1_symbols_flat() -> list[str]:
+    out: list[str] = []
+    for syms in get_w1_markets().values():
+        out.extend(syms)
+    return out
+
+
+def is_w1_symbol(bingx_symbol: str) -> bool:
+    return bingx_symbol in _W1_ALL
 
 
 # Kripto-disi (FX/metal/endeks/petrol) semboller: gercek piyasa seansina tabi,
@@ -349,7 +378,7 @@ def get_h1_5m_symbols() -> list[str]:
     03.11: 1H CRT kapaliyken S/D 1H olcumu icin 1D evreni (SD_5M_ENABLED) -- liste 1h ile ayni, olu seans / hafta sonu
     kurallari `get_d1h_markets`'ten gelir (spot FX'e olu seansta istek atilmaz)."""
     if not H1_5M_ENABLED:
-        return list(get_d1h_symbols_flat()) if SD_5M_ENABLED else []
+        return list(get_w1_symbols_flat()) if SD_5M_ENABLED else []   # 11.11: 1D'nin altcoinleri S/D 1H'ye girmez
     out: list[str] = []
     seen: set[str] = set()
     for s in _H1_CRT + _H1_SMT_EXTRA:

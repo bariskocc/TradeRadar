@@ -234,6 +234,11 @@ def _score_rows(strategy: str) -> list[dict]:
                           f"≥ %{ce.PURGE_WICK_STRONG_PCT * 100:g}'ı +2 (29.10)")
         for r in rows[-2:]:
             r.update(absent=True, allowed={0}, points="—", rule="Yalnız 4H (29.10)")
+        if strategy in ce.STRONG_RECLAIM_TFS:   # 11.11: 1D'de guclu C2 donusu +1 (ayni kalem)
+            rc = next(r for r in rows if r["key"] == "reclaim")
+            rc.update(label="C2 dönüşü", points=f"−{pen} / +1", allowed={-pen, 0, 1},
+                      rule=f"C2, C1 aralığına %{ce.C2_RECLAIM_WEAK_PCT:g}'ten az geri döndüyse −{pen}; "
+                           f"en az %{int(ce.W1_STRONG_RECLAIM_PCT)}'sine geri kapandıysa +1 (11.11)")
     for r in rows:
         r.setdefault("absent", False)
         r["note"] = _RECLAIM_NOTE if r["key"] == "reclaim" else _NOTES.get((strategy, r["key"]), "")
@@ -420,7 +425,8 @@ SEGMENTS = {
     "fx": ("FX", {"fx"}),
     "fxmajor": ("FX + BTC/ETH", {"fx", "major"}),
 }
-_SEG_TABS = {"4h": ("all", "alt", "major", "fx", "fxmajor")}   # 1D/1W evreninde altcoin yok
+_SEG_TABS = {"4h": ("all", "alt", "major", "fx", "fxmajor"),
+             "1d": ("all", "alt", "major", "fx", "fxmajor")}   # 11.11: 1D'ye altcoinler eklendi; 1W'de altcoin yok
 
 
 def segments_for(strategy: str) -> tuple:

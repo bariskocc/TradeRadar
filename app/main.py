@@ -1463,7 +1463,6 @@ async def potential_signals_page(
     date_from: str = Query(default=""),
     date_to: str = Query(default=""),
     status: str = Query(default="all"),
-    market: str = Query(default="all"),
     direction: str = Query(default="all"),
     result: str = Query(default="all"),
     page: int = Query(default=1),
@@ -1476,10 +1475,13 @@ async def potential_signals_page(
     from app.potential_signals import build_potential_signals, week_start_tsi
     if "date_from" not in request.query_params:
         date_from = week_start_tsi()
+    market = request.query_params.getlist("market")   # 11.11: coklu secim (market=fx&market=metal)
     data = await build_potential_signals(db, tf=tf, date_from=date_from, date_to=date_to, status=status,
-                                         market=market, direction=direction, result=result, page=page)
+                                         market=market, direction=direction, result=result, page=page,
+                                         store=getattr(market_data, "store", None))   # 11.11: eski satir sonucu mumdan
     base_qs = urlencode({"tf": data["tf"], "date_from": data["date_from"], "date_to": data["date_to"],
-                         "market": data["market"], "direction": data["direction"], "result": data["result"]})
+                         "market": data["markets"], "direction": data["direction"], "result": data["result"]},
+                        doseq=True)
     return templates.TemplateResponse(request=request, name="potential_signals.html", context={
         "user": user,
         "active_page": "potential_signals",

@@ -61,6 +61,11 @@ C2_DOJI_FILTER_TFS = frozenset({"4h"})
 #     `pd_monthly` = guclu C2 donusu (geri kapanis >= W1_STRONG_RECLAIM_PCT). Anahtarlar ayni (Journal semasi).
 W1_TIMEFRAME = "1w"
 W1_STRONG_RECLAIM_PCT = 50.0
+# 11.11 (kullanici karari, XAGUSD 1D SHORT 10.11: C2 %94 geri kapandi, RR 5.19, TP -- skor 4): 1D'de de guclu C2 donusu +1.
+# 1W'deki `pd_monthly` yuvasi yerine `reclaim` kaleminin icinde: -4 (< %25) / 0 / +1 (>= W1_STRONG_RECLAIM_PCT).
+# Journal 1D (25.09+, levels_final, cezasiz, RR >= 2, TP once mi): >= %50 10 TP / 2 SL (%83), %25-50 17 / 25 (%40).
+# Orneklem kucuk; aday beklenmeden kullanici karariyla skora girdi -- izleme "Skor kalemleri — 1D".
+STRONG_RECLAIM_TFS = frozenset({"1d"})
 W1_C2_HOURS = 168.0
 W1_SCORE_CAP = 8
 _W1_TAUTOLOGICAL_PD = frozenset({"PDH", "PDL", "PWH", "PWL"})
@@ -871,6 +876,8 @@ def _calc_live_setup_bias(
         # W1_STRONG_RECLAIM_PCT'sine geri kapandi. Journal: %60 / %13; cezasizlarda %60 / %44.
         pd_monthly_score = 1 if (reclaim is not None and reclaim >= W1_STRONG_RECLAIM_PCT) else 0
         pd_score = pd_major_score + pd_monthly_score + pd_struct_score
+    elif tf in STRONG_RECLAIM_TFS and reclaim is not None and reclaim >= W1_STRONG_RECLAIM_PCT:
+        reclaim_score = 1   # 11.11: 1D guclu C2 donusu (ceza ile ayni kalem, ayni anda olamaz)
 
     ifvg_score = 0
     ifvg_zone = None

@@ -313,7 +313,7 @@ class PotentialNotice(Base):
     crt_bar_time = Column(DateTime, nullable=True)
 
     tg_message_id = Column(Integer, nullable=True)      # zincirin SON mesaji (reply hedefi)
-    state = Column(String, nullable=True)               # open:gated / closed:gated / open:pass / ...
+    state = Column(String, nullable=True)               # 11.11: crt / wait / fill / lowq / done / signal (eski: open:gated ...)
     gate = Column(String, nullable=True)                # son bildirilen kapi (bias_mismatch, low_rr, ...)
     cancelled = Column(Boolean, default=False)          # IPTAL reply'i gitti
     # 24.10 (/potential-signals sayfasi): bildirim anindaki seviyeler + iptal nedeni. Telegram kapaliyken de
@@ -325,6 +325,17 @@ class PotentialNotice(Base):
     rr = Column(Float, nullable=True)
     model = Column(String, nullable=True)
     cancel_reason = Column(String, nullable=True)       # crt_gone / crt_replaced / ...
+    # 11.11 (kullanici): yeni zincir CRT -> WAITING -> girise degdi -> sonuc. state: crt / wait / fill / lowq / done /
+    # signal (eskiler: open|closed:gated|pass). Sonuc motorun %50 kismi kar + BE kuraliyla, MESAJDAKI seviyelerden
+    # (scanner._track_potential_bar), Journal'dan degil: Journal 1D seviyeleri C2 kapanisinda yeniden donuyor.
+    cisd_time = Column(DateTime, nullable=True)         # CISD onay ani (CRT asamasinda bos)
+    wait_at = Column(DateTime, nullable=True)           # WAITING mesaji
+    filled_at = Column(DateTime, nullable=True)         # giris dokunusu (mum acilisi)
+    partial_at = Column(DateTime, nullable=True)        # TP yolunun %50'si (kalan BE)
+    result = Column(String, nullable=True)              # tp / tp_nofill / be50 / sl / expired
+    result_at = Column(DateTime, nullable=True)
+    result_r = Column(Float, nullable=True)             # kismi kar agirlikli R (tp 0.75 x RR, be50 0.25 x RR)
+    tracked_to = Column(DateTime, nullable=True)        # islenen son LTF mumunun KAPANISI (restart'ta store'dan devam)
 
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

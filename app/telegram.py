@@ -29,83 +29,52 @@ _ENTRY_MODEL_LABELS = {
 }
 
 
+# 11.11 (kullanici: "mesajlari anlamaya calisirken kayboluyorum"): butun mesajlar kisa -- baslik
+# "<yon> <SEMBOL> <TF> <YON> · <TUR>" + en fazla 2 satir. Aciklama cumlesi, bias, CISD saati, key level yok.
+_TF_SHORT = {"1d": "1D", "1h": "1H", "1w": "1W", "4h": "4H"}
+
+
+def _tf_short(tf: str | None) -> str:
+    return _TF_SHORT.get(tf or "4h", "4H")
+
+
 def _strategy_label(sig: "Signal") -> str:
-    tf = getattr(sig, "timeframe", None) or "4h"
-    if tf == "1d":
-        return "1D-1H"
-    if tf == "1h":
-        return "1H-5M"
-    if tf == "1w":
-        return "1W-4H"
-    return "4H-15M"
+    return _tf_short(getattr(sig, "timeframe", None))
+
+
+def _dir_emoji(direction: str) -> str:
+    return "🟢" if direction == "LONG" else "🔴"
+
+
+def _rr_txt(rr) -> str:
+    # RR'yi ASLA yukari yuvarlama (2.45 -> 2.4).
+    return f"{math.floor(float(rr) * 100 + 1e-9) / 100:.2f}" if rr is not None else "-"
+
+
+def _plan_rr(sig: "Signal"):
+    """Plan RR: planned_rr, yoksa ORIJINAL SL ile (trail/BE sonrasi SL bozulmasin)."""
+    if sig.planned_rr is not None:
+        return sig.planned_rr
+    sl_ref = sig.initial_stop_loss if sig.initial_stop_loss is not None else sig.stop_loss
+    risk = abs(sig.entry_price - sl_ref) if sig.entry_price and sl_ref else 0
+    reward = abs(sig.take_profit - sig.entry_price) if sig.take_profit and sig.entry_price else 0
+    return reward / risk if risk > 0 else None
+
+
+def _levels_line(entry, sl, tp, model: str | None = None) -> str:
+    m = f" ({_ENTRY_MODEL_LABELS.get(model or 'cisd', 'CISD')})" if model else ""
+    return f"Giriş <code>{entry}</code>{m} · SL <code>{sl}</code> · TP <code>{tp}</code>"
+
+
+def _r(v: float) -> str:
+    return f"{v:+.2f}R".replace("+-", "−").replace("-", "−")
 
 
 def _format_active_signal(sig: Signal) -> str:
-    direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
-    # Bias satirlari bilgi amacli; 1W filtre olarak KULLANILMAZ.
-    htf_bias = sig.htf_bias or "NEUTRAL"
-    weekly_bias = sig.weekly_bias or "NEUTRAL"
-    bias_emoji = {
-        "BULLISH": "\U0001f4c8",
-        "BEARISH": "\U0001f4c9",
-        "NEUTRAL": "\u2796",
-    }.get(htf_bias, "")
-    weekly_emoji = {
-        "BULLISH": "\U0001f4c8",
-        "BEARISH": "\U0001f4c9",
-        "NEUTRAL": "\u2796",
-    }.get(weekly_bias, "")
-
-    # Potansiyel RR: planned_rr veya orijinal SL ile hesap (trail/BE sonrasi SL bozulmasin).
-    if sig.planned_rr is not None:
-        rr_ratio = f"{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
-    else:
-        sl_ref = sig.initial_stop_loss if sig.initial_stop_loss is not None else sig.stop_loss
-        risk = abs(sig.entry_price - sl_ref) if sig.entry_price and sl_ref else 0
-        reward = abs(sig.take_profit - sig.entry_price) if sig.take_profit and sig.entry_price else 0
-        # RR'yi ASLA yukari yuvarlama (2.45 -> 2.4).
-        rr_ratio = f"{math.floor(reward / risk * 100 + 1e-9) / 100:.2f}" if risk > 0 else "?"
-
-    smt_line = (
-        f"\U0001f517 <b>SMT:</b> {sig.smt_pair} \u2705\n"
-        if sig.smt_pair else "\U0001f517 <b>SMT:</b> Yok\n"
-    )
-
-    # CISD saati UTC+3 (TSI) olarak gosterilir. cisd_time naive/aware UTC kabul edilir.
-    if sig.cisd_time:
-        ct = sig.cisd_time
-        if ct.tzinfo is None:
-            ct = ct.replace(tzinfo=timezone.utc)
-        cisd_txt = ct.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M") + " UTC+3"
-    else:
-        cisd_txt = "-"
-
-    pd_line = f"\n\U0001f9f1 <b>Key Level:</b> {sig.pd_array}" if sig.pd_array else "\n\U0001f9f1 <b>Key Level:</b> Yok"
-
-    # C2 (purge) mumunun kapanmis olmasi setup'i daha guvenilir kilar.
-    c2_line = (
-        "\n\U0001f56f\ufe0f <b>C2:</b> Kapali \u2705"
-        if sig.c2_closed else "\n\U0001f56f\ufe0f <b>C2:</b> Kapanmadi \u26a0\ufe0f"
-    )
-
-    strat = _strategy_label(sig)
     return (
-        f"{direction_emoji} <b>{sig.symbol} - {sig.direction} {strat} Signal ACTIVE</b>\n"
-        f"\n"
-        f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>"
-        f"  ·  {_ENTRY_MODEL_LABELS.get(getattr(sig, 'entry_model', None) or 'cisd', 'CISD')}\n"
-        f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
-        f"\U00002705 <b>Take Profit:</b> <code>{sig.take_profit}</code>\n"
-        f"\U0001f4ca <b>Plan R:R:</b> 1:{rr_ratio}\n"
-        f"\n"
-        f"{bias_emoji} <b>1D Bias:</b> {htf_bias}\n"
-        f"{weekly_emoji} <b>1W Bias:</b> {weekly_bias}\n"
-        f"\U00002b50 <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
-        f"{'  ·  <b>Premium</b>' if int(sig.bias_score or 0) >= 11 else ''}\n"
-        f"{smt_line}"
-        f"\U0001f552 <b>CISD:</b> {cisd_txt}"
-        f"{c2_line}"
-        f"{pd_line}"
+        f"{_dir_emoji(sig.direction)} <b>{sig.symbol} {_strategy_label(sig)} {sig.direction} · AKTİF</b>\n"
+        f"{_levels_line(sig.entry_price, sig.stop_loss, sig.take_profit, getattr(sig, 'entry_model', None) or 'cisd')}\n"
+        f"RR {_rr_txt(_plan_rr(sig))} · skor {int(sig.bias_score or 0)}"
     )
 
 
@@ -126,55 +95,21 @@ def _partial_banked_r(sig: Signal) -> float | None:
 def _format_signal_result(sig: Signal) -> str:
     """Kapanan islem icin sonuc mesaji (aktif sinyale reply olarak gonderilir)."""
     rr = float(sig.rr_value) if sig.rr_value is not None else 0.0
-    if sig.planned_rr is not None:
-        plan_txt = f"1:{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
-    else:
-        plan_txt = "-"
-    dur = f"{sig.duration_hours}s" if sig.duration_hours is not None else "-"
-
     exit_kind = getattr(sig, "_exit_kind", None) or getattr(sig, "exit_reason", None)
-    partial_line = ""
-    banked = _partial_banked_r(sig)
-    if banked is not None:
-        partial_line = (
-            f"\U0001f4b0 <b>Kismi kar:</b> %{int(float(sig.partial_size) * 100)} @ "
-            f"<code>{sig.partial_price}</code> (+{banked:.2f}R)\n"
-        )
-
-    strat = _strategy_label(sig)
+    head = f"{sig.symbol} {_strategy_label(sig)}"
     if exit_kind == "be" and rr > 0:
         # Kismi kar alinip kalan yari giriste kapandi: toplamda kar + BE.
-        # Kismi kar satiri zaten asagida; baslik sade.
-        head = f"✅ <b>BREAKEVEN – {sig.symbol} ({strat})</b>"
-        rr_txt = f"+{rr:g}R"
-        exit_line = f"\U0001f6d1 <b>Kalan cikis:</b> <code>{sig.entry_price}</code> (giris)\n"
-    elif sig.status == "breakeven" or sig.result == "breakeven" or exit_kind == "be":
-        head = f"\u2796 <b>BREAKEVEN – {sig.symbol} ({strat})</b>"
-        rr_txt = "0R"
-        exit_line = f"\U0001f6d1 <b>Cikis:</b> <code>{sig.entry_price}</code> (giris)\n"
-    elif sig.result == "win" and exit_kind == "trail":
-        head = f"\u2705 <b>TRAIL EXIT – {sig.symbol} ({strat})</b>"
-        rr_txt = f"+{rr:g}R"
-        exit_line = f"\U0001f6d1 <b>Cikis (trail):</b> <code>{sig.stop_loss}</code>\n"
-    elif sig.result == "win":
-        head = f"\u2705 <b>TP HIT – {sig.symbol} ({strat})</b>"
-        rr_txt = f"+{rr:g}R"
-        exit_line = f"\U00002705 <b>Cikis (TP):</b> <code>{sig.take_profit}</code>\n"
-    else:  # loss
-        head = f"\U0001f6d1 <b>SL HIT – {sig.symbol} ({strat})</b>"
-        rr_txt = f"{rr:g}R"
-        exit_line = f"\U0001f6d1 <b>Cikis (SL):</b> <code>{sig.stop_loss}</code>\n"
-
-    return (
-        f"{head}\n"
-        f"\n"
-        f"\U0001f4cd <b>{sig.direction}</b> | <b>Gerceklesen:</b> {rr_txt}\n"
-        f"\U0001f4ca <b>Plan R:R:</b> {plan_txt}\n"
-        f"\U0001f3af <b>Giris:</b> <code>{sig.entry_price}</code>\n"
-        f"{partial_line}"
-        f"{exit_line}"
-        f"\U000023f1 <b>Sure:</b> {dur}"
-    )
+        return f"🟡 <b>{head} · %50 + BE {_r(rr)}</b>"
+    if sig.status == "breakeven" or sig.result == "breakeven" or exit_kind == "be":
+        return f"➖ <b>{head} · BE 0R</b>"
+    if exit_kind == "week_close":
+        icon = "✅" if rr > 0 else ("❌" if rr < 0 else "➖")
+        return f"{icon} <b>{head} · HAFTA KAPANIŞI {_r(rr)}</b>"
+    if sig.result == "win" and exit_kind == "trail":
+        return f"✅ <b>{head} · TRAIL {_r(rr)}</b>"
+    if sig.result == "win":
+        return f"✅ <b>{head} · TP {_r(rr)}</b>"
+    return f"❌ <b>{head} · SL {_r(rr)}</b>"
 
 
 def is_configured() -> bool:
@@ -236,15 +171,11 @@ async def send_signal_result(sig: Signal) -> bool:
 
 def _format_signal_partial(sig: Signal) -> str:
     """Kismi kar bildirimi: pozisyonun bir kismi kapatildi, kalan SL girise cekildi."""
-    strat = _strategy_label(sig)
     pct = int(float(sig.partial_size or 0) * 100)
     banked = _partial_banked_r(sig) or 0.0
     return (
-        f"\U0001f4b0 <b>KISMI KAR – {sig.symbol} ({strat})</b>\n"
-        f"\n"
-        f"\U0001f4cd <b>{sig.direction}</b> | <b>%{pct} kapatildi:</b> +{banked:.2f}R kazanildi\n"
-        f"\U0001f3af <b>Fiyat:</b> <code>{sig.partial_price}</code>\n"
-        f"\U0001f6e1️ <b>Kalan SL:</b> <code>{sig.entry_price}</code> (giris) · en kotu toplam +{banked:.2f}R"
+        f"💰 <b>{sig.symbol} {_strategy_label(sig)} · %{pct} KAPANDI {_r(banked)}</b>\n"
+        f"Kalan SL girişte"
     )
 
 
@@ -260,48 +191,41 @@ async def send_signal_partial(sig: Signal) -> bool:
 
 _TSI = timezone(timedelta(hours=3))
 
-# Potansiyel 1D setup'in sinyale donusmeden silinme nedenleri (scanner reason kodlari).
+# Sinyal / zincir dolmadan silinme nedenleri (scanner reason kodlari) -- 11.11 kisa metin.
 _POTENTIAL_CANCEL_REASONS = {
-    "crt_gone": "CRT yapısı bozuldu",
-    "crt_replaced": "Yerine yeni bir CRT yapısı oluştu",
-    "bias_mismatch": "1D bias ters döndü",
-    "past_tp": "Fiyat entry'ye gelmeden hedefe gitti",
-    "low_quality": "Kalite skoru 7'nin altına düştü",
-    "score7_gate": "Skor-7 kapısı (yapısal entry / key level şartı)",
-    "no_levels": "Entry/MSS seviyeleri kayboldu",
-    "low_rr": "R:R 2'nin altına düştü",
-    "tight_stop": "Stop çok dar",
-    "past_sl": "Fiyat entry'ye gelmeden SL'i geçti",
+    "crt_gone": "CRT bozuldu",
+    "crt_replaced": "yeni CRT geldi",
+    "bias_mismatch": "bias ters döndü",
+    "past_tp": "girişsiz TP'ye gitti",
+    "near_tp": "girişsiz TP'ye yaklaştı",
+    "low_quality": "skor düştü",
+    "score7_gate": "skor kapısı",
+    "no_levels": "seviyeler kayboldu",
+    "low_rr": "RR düştü",
+    "tight_stop": "stop çok dar",
+    "past_sl": "girişsiz SL'i geçti",
     "crt_50": "CRT %60 geçildi",
     "invalidated": "CRT %60 geçildi",
-    "missed_quality": "Retest anında skor 7'nin altındaydı",
-    "stale": "Entry daha önce test edilmişti (bayat retest)",
-    "week_close": "Hafta kapanışı",
-    "week_gap": "CISD hafta kapanışından önceydi (hafta sonu boşluğu)",
+    "missed_quality": "retestte skor düşük",
+    "stale": "bayat retest",
+    "week_close": "hafta kapanışı",
+    "week_gap": "hafta sonu boşluğu",
+    "liq_unswept": "likidite alınmadı",
+    "same_setup": "aynı setup başka coinde",
 }
 
-# Kapida elenen setup'in POTANSIYEL bildiriminde gosterilen kapi adi (radar state /
-# silme nedeni kodlari). Iptal metinleri "artik gecersiz" der; bunlar "motor su an
-# neden almiyor" der, setup hala yasiyor olabilir.
+# Motorun almadigi (kapida elenen) setup icin kisa kapi adi.
 _POTENTIAL_GATE_LABELS = {
-    "bias_mismatch": "1D bias ters",
-    "low_quality": "Kalite skoru 7'nin altında",
-    "score7_gate": "Skor-7 kapısı (yapısal entry / key level şartı)",
-    "low_rr": "R:R 2'nin altında",
-    "tight_stop": "Stop çok dar",
-    "missed": "Fiyat entry'ye gelmeden hedefe gitti",
-    "past_tp": "Fiyat entry'ye gelmeden hedefe gitti",
-    "target_taken": "C1 hedef tarafı C2 sonrası tüketildi",
-    "past_sl": "Fiyat entry'ye gelmeden SL'i geçti",
-    "invalidated": "CRT %60 geçildi",
-    "missed_quality": "Retest anında skor 7'nin altındaydı",
-    "stale": "Entry daha önce test edilmişti (bayat retest)",
-    "has_open": "Bu sembolde zaten açık işlem var",
-    "corr_open": "Korele paritede zaten açık işlem var",
-    "duplicate": "Aynı setup zaten kayıtlı",
-    "cluster_limit": "Aynı yönde küme limiti dolu",
-    "same_setup": "Aynı setup başka coinde zaten sinyal",
-    "no_cisd": "Entry/MSS seviyeleri henüz yok",
+    "bias_mismatch": "bias ters",
+    "low_quality": "skor eşik altı",
+    "score7_gate": "skor kapısı",
+    "low_rr": "RR 2 altı",
+    "has_open": "sembolde açık işlem",
+    "corr_open": "korele açık işlem",
+    "duplicate": "aynı setup kayıtlı",
+    "cluster_limit": "küme limiti",
+    "same_setup": "aynı setup başka coinde",
+    "deleted_before": "daha önce silindi",
 }
 
 
@@ -310,63 +234,16 @@ def _fmt_tsi(dt) -> str:
         return "-"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(_TSI).strftime("%d.%m.%Y %H:%M") + " UTC+3"
+    return dt.astimezone(_TSI).strftime("%d.%m %H:%M")
 
 
 def _format_signal_potential(sig: Signal, c2_close_at=None, gate: str | None = None) -> str:
-    """1D CISD/MSS onayli setup: bilgi mesaji (C2 acik veya kapali).
-
-    `gate` doluysa setup bir kapida elenmistir: motor bu setup'i ALMAZ, mesaj yalnizca
-    manuel karar icin gider (18.09 kullanici istegi). `gate` None ise setup tum
-    kapilardan gecmistir ve motor onu izliyordur.
-    """
-    c2_open = not bool(sig.c2_closed)
-    direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
-    rr = (
-        f"1:{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
-        if sig.planned_rr is not None else "-"
-    )
-    model = _ENTRY_MODEL_LABELS.get(getattr(sig, "entry_model", None) or "cisd", "CISD")
-    if c2_open:
-        tail = (
-            f"⏳ <b>C2 kapanışı:</b> {_fmt_tsi(c2_close_at)}\n"
-            f"\n"
-            f"⚠️ Sinyal değil: motor C2 kapanışını bekliyor. C2 kapanmadan girilen benzer "
-            f"1D yapılar geçmişte zararda; seviyeler C2 kapanışına kadar değişebilir."
-        )
-    else:
-        tail = (
-            f"\n"
-            f"ℹ️ Motor limit emri entry'de bekliyor; dolarsa ACTIVE mesajı buna yanıt olarak gelir."
-        )
-    if gate:
-        gate_label = _POTENTIAL_GATE_LABELS.get(gate, gate)
-        if gate == "low_quality":
-            # 24.10: esik stratejiye gore (1W 6, digerleri 7) -- etiket sabit 7 yaziyordu.
-            gate_label = f"Kalite skoru eşiğin ({6 if getattr(sig, 'timeframe', None) == '1w' else 7}) altında"
-        c2_line = f"⏳ <b>C2 kapanışı:</b> {_fmt_tsi(c2_close_at)}\n" if c2_open and c2_close_at else ""
-        tail = (
-            f"{c2_line}"
-            f"\n"
-            f"⛔️ <b>Motor almıyor:</b> {gate_label}\n"
-            f"Seviyeler bilgi amaçlı; bu setup için emir girilmeyecek. Kapı sonradan "
-            f"açılırsa bu mesaja yanıt olarak haber verilir."
-        )
-    icon = "\U0001f6ab" if gate else "\U0001f440"
-    tag = " – ELENDİ" if gate else ""
-    # 24.10: 1W de bildiriliyor -- baslik stratejiyi yazar (1D eski metniyle ayni kalir).
-    tf_label = "1W-4H" if getattr(sig, "timeframe", None) == "1w" else "1D"
+    """ESKI potansiyel mesaji (1D POTANSIYEL zinciri, 29.09'dan beri kapali; kod duruyor)."""
+    tag = f" · motor almıyor: {_POTENTIAL_GATE_LABELS.get(gate, gate)}" if gate else ""
     return (
-        f"{icon} <b>POTANSİYEL {tf_label} CRT{tag} ({'C2 AÇIK' if c2_open else 'C2 KAPALI'}) – {sig.symbol}</b>\n"
-        f"\n"
-        f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
-        f" | <b>R:R:</b> {rr}\n"
-        f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>  ·  {model}\n"
-        f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
-        f"\U00002705 <b>Take Profit:</b> <code>{sig.take_profit}</code>\n"
-        f"\U0001f4c8 <b>1D Bias:</b> {sig.htf_bias or 'NEUTRAL'}  ·  <b>1W:</b> {sig.weekly_bias or 'NEUTRAL'}\n"
-        f"\U0001f552 <b>CISD:</b> {_fmt_tsi(sig.cisd_time)}\n"
-        f"{tail}"
+        f"\U0001f440 <b>{sig.symbol} {_strategy_label(sig)} {sig.direction} · POTANSİYEL</b>\n"
+        f"{_levels_line(sig.entry_price, sig.stop_loss, sig.take_profit)}\n"
+        f"RR {_rr_txt(sig.planned_rr)} · skor {int(sig.bias_score or 0)}{tag}"
     )
 
 
@@ -377,52 +254,32 @@ async def send_signal_potential(
     reply_to: Optional[int] = None,
     gate: str | None = None,
 ) -> Optional[int]:
-    """Potansiyel 1D bildirimi; C2 kapaninca ilk mesaja reply olarak tekrar gonderilir.
-
-    `gate` doluysa setup o kapida elenmistir (motor almaz, bilgi mesaji).
-    """
+    """ESKI potansiyel bildirimi (kapali zincir); 11.11'den beri kapida elenen 1D/1W zinciri
+    `format_potential_*` + `send_text` ile gider."""
     if not is_configured():
         return None
     mid = await _send_message(
         _format_signal_potential(sig, c2_close_at, gate=gate), reply_to_message_id=reply_to,
     )
     if mid:
-        log.info(
-            "Telegram: potential sent for %s %s (mid=%s reply_to=%s gate=%s)",
-            sig.symbol, sig.direction, mid, reply_to, gate or "-",
-        )
+        log.info("Telegram: potential sent for %s %s (mid=%s reply_to=%s gate=%s)",
+                 sig.symbol, sig.direction, mid, reply_to, gate or "-")
     return mid
 
 
 def _format_signal_waiting(sig: Signal) -> str:
-    """Sinyal waiting_entry oldu (limit emri entry'de bekliyor). 27.09 kullanici istegi: dolmadan
-    once de takip edebilsin (BCH 4H #128). 29.09'dan beri tum stratejilerde (1D POTANSIYEL kapali)."""
-    direction_emoji = "\U0001f7e2" if sig.direction == "LONG" else "\U0001f534"
-    rr = (
-        f"1:{math.floor(float(sig.planned_rr) * 100 + 1e-9) / 100:.2f}"
-        if sig.planned_rr is not None else "-"
-    )
-    model = _ENTRY_MODEL_LABELS.get(getattr(sig, "entry_model", None) or "cisd", "CISD")
+    """Sinyal waiting_entry oldu (limit emri entry'de bekliyor)."""
     return (
-        f"⏳ <b>WAITING ENTRY – {sig.symbol} ({_strategy_label(sig)})</b>\n"
-        f"\n"
-        f"{direction_emoji} <b>{sig.direction}</b> | <b>Kalite:</b> {int(sig.bias_score or 0)}/11"
-        f" | <b>R:R:</b> {rr}\n"
-        f"\U0001f3af <b>Entry:</b> <code>{sig.entry_price}</code>  ·  {model}\n"
-        f"\U0001f6d1 <b>Stop Loss:</b> <code>{sig.stop_loss}</code>\n"
-        f"\U00002705 <b>Take Profit:</b> <code>{sig.take_profit}</code>\n"
-        f"\U0001f4c8 <b>1D Bias:</b> {sig.htf_bias or 'NEUTRAL'}  ·  <b>1W:</b> {sig.weekly_bias or 'NEUTRAL'}\n"
-        f"\U0001f552 <b>CISD:</b> {_fmt_tsi(sig.cisd_time)}\n"
-        f"\n"
-        f"ℹ️ Motor limit emri entry'de bekliyor; seviyeler dolana kadar güncellenebilir. Dolarsa "
-        f"ACTIVE, dolmadan silinirse İPTAL mesajı buna yanıt olarak gelir."
+        f"⏳ <b>{sig.symbol} {_strategy_label(sig)} {sig.direction} · WAITING</b>\n"
+        f"{_levels_line(sig.entry_price, sig.stop_loss, sig.take_profit, getattr(sig, 'entry_model', None) or 'cisd')}\n"
+        f"RR {_rr_txt(sig.planned_rr)} · skor {int(sig.bias_score or 0)}"
     )
 
 
 async def send_signal_waiting(sig: Signal, reply_to: Optional[int] = None) -> Optional[int]:
     """waiting_entry bildirimi; message_id doner (ACTIVE / IPTAL buna reply olur).
 
-    `reply_to`: setup once kapida elenip POTANSIYEL bildirildiyse o mesaj (24.10, 1D/1W).
+    `reply_to`: setup once potansiyel zincirinde bildirildiyse (1D/1W) o mesaj.
     """
     if not is_configured():
         return None
@@ -436,26 +293,15 @@ async def send_signal_waiting(sig: Signal, reply_to: Optional[int] = None) -> Op
 def _format_potential_cancel(
     symbol: str, direction: str, reason: str, strategy: str | None = None, gated: bool = False,
 ) -> str:
-    # Strateji biliniyorsa zincir WAITING'dir (1D dahil, 29.09); `gated` = kapida elenen setup zinciri
-    # (24.10, 1D/1W); stratejisiz = eski kapida elenen zincir.
-    if strategy:
-        label = {"1h": "1H-5M", "1w": "1W-4H", "1d": "1D-1H"}.get(strategy, "4H-15M")
-        kind = "POTANSİYEL" if gated else "WAITING"
-        title = f"❌ <b>{kind} İPTAL – {symbol} ({label})</b>"
-    else:
-        title = f"❌ <b>POTANSİYEL 1D CRT İPTAL – {symbol}</b>"
-    return (
-        f"{title}\n"
-        f"\n"
-        f"\U0001f4cd <b>{direction}</b> | <b>Neden:</b> {_POTENTIAL_CANCEL_REASONS.get(reason, reason)}"
-    )
+    return (f"❌ <b>{symbol} {_tf_short(strategy or '1d')} · İPTAL</b> — "
+            f"{_POTENTIAL_CANCEL_REASONS.get(reason, reason)}")
 
 
 async def send_potential_cancel(
     symbol: str, direction: str, reason: str, reply_to: int, strategy: str | None = None,
     *, gated: bool = False,
 ) -> bool:
-    """Potansiyel (kapida elenen 1D/1W) ya da waiting setup sinyale donusmeden silindi: zincire reply."""
+    """Waiting setup sinyale donusmeden silindi: zincire reply."""
     if not is_configured():
         return False
     mid = await _send_message(
@@ -467,22 +313,13 @@ async def send_potential_cancel(
 
 
 def _format_signal_void(symbol: str, direction: str, strategy: str | None, score_asof, min_score) -> str:
-    label = {"1h": "1H-5M", "1w": "1W-4H", "1d": "1D-1H"}.get(strategy or "", "4H-15M")
-    return (
-        f"❌ <b>İPTAL – {symbol} ({label})</b>\n"
-        f"\n"
-        f"\U0001f4cd <b>{direction}</b> | <b>Neden:</b> dolum anındaki skor {score_asof} "
-        f"(eşik {min_score}) — işlem geçersiz sayıldı ve silindi."
-    )
+    return f"❌ <b>{symbol} {_tf_short(strategy)} · İPTAL</b> — dolum skoru {score_asof} (eşik {min_score})"
 
 
 async def send_signal_void(
     symbol: str, direction: str, strategy: str | None, reply_to: int, score_asof, min_score,
 ) -> bool:
-    """Dolmus sinyal VOID FILL ile silindi (04.10): aktif mesajina IPTAL reply'i.
-
-    Eskiden sessizdi; kullanicida 'aktif' mesaji asili kaliyor, Open Signals'ta islem yoktu.
-    """
+    """Dolmus sinyal VOID FILL ile silindi (04.10): aktif mesajina IPTAL reply'i."""
     if not is_configured():
         return False
     mid = await _send_message(
@@ -492,6 +329,53 @@ async def send_signal_void(
     if mid:
         log.info("Telegram: void sent for %s %s (reply_to=%s)", symbol, direction, reply_to)
     return mid is not None
+
+
+# ──────────────────── 1D / 1W potansiyel zinciri (11.11) ────────────────────
+# Motorun ALMADIGI ama kaliteli 1D/1W setup: CRT -> WAITING -> girise degdi -> sonuc. Sonuc motorun kuraliyla
+# (%50'de yarisi + kalan BE), mesajdaki seviyelerden, islem acilmasa da. Durum `potential_notices`ta.
+_POT_RESULT = {
+    "tp": ("✅", "TP"),
+    "tp_nofill": ("✅", "TP (girişe dönmeden)"),
+    "be50": ("\U0001f7e1", "%50 + BE"),
+    "sl": ("❌", "SL"),
+    "expired": ("⌛", "süre doldu"),
+}
+
+
+def format_potential_crt(symbol: str, strategy: str, direction: str, target, score: int) -> str:
+    return (f"\U0001f514 <b>{symbol} {_tf_short(strategy)} {direction} · CRT</b>\n"
+            f"Hedef <code>{target}</code> · skor {score} · CISD bekleniyor")
+
+
+def format_potential_waiting(symbol: str, strategy: str, direction: str, entry, sl, tp, rr, score: int,
+                             gate: str | None, model: str | None = None) -> str:
+    g = _POTENTIAL_GATE_LABELS.get(gate, gate) if gate else None
+    return (f"⏳ <b>{symbol} {_tf_short(strategy)} {direction} · POTANSİYEL WAITING</b>\n"
+            f"{_levels_line(entry, sl, tp, model)}\n"
+            f"RR {_rr_txt(rr)} · skor {score}" + (f" · motor almıyor: {g}" if g else ""))
+
+
+def format_potential_lowq(symbol: str, strategy: str, score: int, rr) -> str:
+    return (f"⚪️ <b>{symbol} {_tf_short(strategy)} · kalite yetersiz</b> — skor {score}"
+            f" · RR {_rr_txt(rr)}, takip bitti")
+
+
+def format_potential_filled(symbol: str, strategy: str, entry) -> str:
+    return f"\U0001f4e5 <b>{symbol} {_tf_short(strategy)} · girişe değdi</b> <code>{entry}</code>"
+
+
+def format_potential_result(symbol: str, strategy: str, result: str, r: float | None) -> str:
+    icon, label = _POT_RESULT.get(result, ("ℹ️", result))
+    tail = f" {_r(r)}" if r is not None and result in ("tp", "be50", "sl") else ""
+    return f"{icon} <b>{symbol} {_tf_short(strategy)} · {label}{tail}</b>"
+
+
+async def send_text(text: str, reply_to: Optional[int] = None) -> Optional[int]:
+    """Hazir metni gonder (potansiyel zinciri); message_id doner."""
+    if not is_configured():
+        return None
+    return await _send_message(text, reply_to_message_id=reply_to)
 
 
 async def send_test_message() -> bool:
