@@ -902,8 +902,12 @@ GATED_MIN_SCORE = 4
 # zincirin kendi sonucu gitmez. Journal 1D (25.09+): skor >= 5 + yapi + RR >= 2 haftada ~6, %54 TP once.
 POTENTIAL_CHAIN_ENABLED = True
 POT_STRATEGIES = frozenset({STRATEGY_1D, STRATEGY_1W})
-POT_WAIT_MIN = {STRATEGY_1D: 4, STRATEGY_1W: 4}      # sinyal esigi - 2 (1D 6 -- 11.11 yeni tablo, once 7/5; 1W 6)
+POT_WAIT_MIN = {STRATEGY_1D: 5, STRATEGY_1W: 4}      # 1D 12.11 kullanici: 4 -> 5 (sinyal esigi 6 - 1); 1W sinyal esigi 6 - 2
 POT_CRT_MIN = {STRATEGY_1D: 2, STRATEGY_1W: 2}       # WAITING esigi - 2
+# 12.11 (kullanici: "mesaj kalabaligi"): CRT asamasi Telegram'a GITMEZ -- ilk mesaj CISD + kalitede POTANSIYEL WAITING.
+# CRT satiri yine kaydedilir (Potential Signals "CRT · waiting CISD"), "kalite yetersiz" de yalniz CRT mesaji
+# gitmis eski zincirlere reply. True = eski davranis.
+POT_CRT_MESSAGE = False
 POT_HORIZON = {STRATEGY_1D: timedelta(hours=120), STRATEGY_1W: timedelta(days=9)}   # Journal ufku ile ayni
 POT_LTF = {STRATEGY_1D: timedelta(hours=1), STRATEGY_1W: timedelta(hours=4)}
 # WAITING'e izin veren kapilar: motor almiyor ama firsat suruyor (kalite ayrica olculur).
@@ -1244,12 +1248,8 @@ async def _cancel_gated_notices(
     Yalniz `:gated` durumundakiler; sinyale donusmus olanlarin iptalini `_note_deleted`
     zaten yapiyor (Signal.tg_potential_id uzerinden).
 
-    **Ayni yonde yeni CRT = tasima, olum degil (18.09).** Motor ayni sembolde ayni yonde
-    baska bir CRT'ye gectiginde zincir IPTAL edilmez, anahtari yeni setup'a tasinir ve
-    **mesaj gitmez** — `state` degismedigi icin `_send_potential` de sessiz kalir. Yoksa
-    her gunluk CRT yenilemesi ve her restart "IPTAL + ayni setup icin yeni ELENDI" ikilisi
-    uretiyordu (18.09 anchor degisiminde XAU/XAG/US100/US500'de birebir goruldu).
-    Yon degistiyse ya da yeni anahtarda zaten zincir varsa eski davranis: IPTAL.
+    ~~Ayni yonde yeni CRT = tasima (18.09)~~ -- **12.11'de kaldirildi**: anahtar tasiniyor, seviyeler eski
+    setup'ta kaliyordu (AUDJPY 1D #112). Artik her eski satir kendi anahtariyla (mesajsiz) kapanir.
 
     11.11: yeni POTANSIYEL zincirinin CRT asamasi (`crt`) burada MESAJSIZ biter (kullanici: iptal mesaji yok);
     WAITING'i gitmis zincir (`wait` / `fill`) bitmez -- fiyat takibi mesajdaki seviyelerle surer.
@@ -1273,21 +1273,14 @@ async def _cancel_gated_notices(
         stale = [n for n in res.scalars().all() if keep is None or n.purge_time != keep]
         if not stale:
             return
-        # Ayni yonde birden fazla acik zincir varsa **en yenisi** tasinir, eskiler iptal:
-        # en guncel CRT'ye en yakin olan odur (normalde tek zincir olur).
-        stale.sort(key=lambda n: (n.purge_time is None, n.purge_time), reverse=True)
+        # 12.11 (kullanici): TASIMA KALDIRILDI. Satir yeni CRT'nin anahtarina tasiniyor ama seviyeleri eski
+        # setup'ta kaliyordu -- AUDJPY 1D #112: 10.11 C2'sinin bildirimi (Entry 109.27) 12.11 C2'sine tasindi,
+        # sayfada 12.11 setup'unun tarihi + durumu ile 10.11'in seviyeleri ayni satirda. Eski zincir mesaj
+        # gondermedigi icin (GATED_NOTICES_ENABLED kapali) tasimanin onledigi "IPTAL + yeni ELENDI" ikilisi de yok:
+        # eski satir kendi anahtariyla kapanir, sonucu /potential-signals bildirimdeki seviyelerle hesaplar.
+        # (`keep_direction` / `keep_crt_bar_time` artik kullanilmiyor; cagiranlar ayni kalsin diye imzada.)
         changed = False
         for n in stale:
-            if keep is not None and keep_direction and n.direction == keep_direction:
-                # Yeni anahtarda zincir varsa tasima cakisir (uq_potential_key) -> IPTAL.
-                clash = await _get_potential_notice(session, strategy, symbol, n.direction, keep)
-                if clash is None:
-                    n.purge_time = keep
-                    if keep_crt_bar_time is not None:
-                        n.crt_bar_time = _as_naive(keep_crt_bar_time)
-                    n.updated_at = datetime.now(timezone.utc)
-                    changed = True
-                    continue
             n.cancelled = True
             n.cancel_reason = reason
             n.updated_at = datetime.now(timezone.utc)
@@ -1383,8 +1376,10 @@ async def _potential_chain_step(
             if cisd_ok and setup.c2_closed:
                 return
             target = setup.key_level_low if setup.direction == "SHORT" else setup.key_level_high
-            mid = await _pot_send(format_potential_crt(setup.symbol, strategy, setup.direction, target, score), None)
-            if tg_configured() and not mid:
+            mid = None
+            if POT_CRT_MESSAGE:
+                mid = await _pot_send(format_potential_crt(setup.symbol, strategy, setup.direction, target, score), None)
+            if POT_CRT_MESSAGE and tg_configured() and not mid:
                 return   # gonderim basarisiz: sonraki degerlendirmede tekrar
             notice = PotentialNotice(
                 strategy=strategy, symbol=setup.symbol, direction=setup.direction,
@@ -1404,8 +1399,11 @@ async def _potential_chain_step(
             await session.commit()
             return
         if cisd_ok:
-            mid = await _pot_send(format_potential_lowq(setup.symbol, strategy, score, preview.get("rr")),
-                                  notice.tg_message_id)
+            mid = None
+            if notice.tg_message_id:   # CRT mesaji gitmemisse (12.11+) tek basina "kalite yetersiz" anlamsiz
+                mid = await _pot_send(format_potential_lowq(setup.symbol, strategy, score, preview.get("rr"),
+                                                            setup.direction),
+                                      notice.tg_message_id)
             if mid:
                 notice.tg_message_id = mid
             notice.state, notice.gate, notice.score, notice.rr = "lowq", gate, score, preview.get("rr")
@@ -1543,10 +1541,12 @@ async def _track_potential_bar(session: AsyncSession, strategy: str, symbol: str
                     close_at = (bts + ltf).replace(tzinfo=None)
                     for e in pot_step_bar(n, bts, hi_, lo_, ltf):
                         if e == "fill":
-                            mid = await _pot_send(format_potential_filled(n.symbol, strategy, n.entry), n.tg_message_id)
+                            mid = await _pot_send(format_potential_filled(
+                                n.symbol, strategy, n.direction, n.entry, n.sl, n.tp, n.rr, n.score, n.model), n.tg_message_id)
                             n.tg_message_id = mid or n.tg_message_id
                         else:
-                            mid = await _pot_send(format_potential_result(n.symbol, strategy, n.result, n.result_r),
+                            mid = await _pot_send(format_potential_result(n.symbol, strategy, n.result, n.result_r,
+                                                                          n.direction),
                                                   n.tg_message_id)
                             n.tg_message_id = mid or n.tg_message_id
                             log.info("POTENTIAL RESULT %s: %s %s %s %s", strategy.upper(), n.symbol, n.direction,
@@ -1558,7 +1558,7 @@ async def _track_potential_bar(session: AsyncSession, strategy: str, symbol: str
             if n.state in ("wait", "fill") and n.wait_at is not None and now - _as_utc(n.wait_at) > POT_HORIZON[strategy]:
                 n.result, n.result_r, n.state = "expired", None, "done"
                 n.result_at = now.replace(tzinfo=None)
-                mid = await _pot_send(format_potential_result(n.symbol, strategy, "expired", None), n.tg_message_id)
+                mid = await _pot_send(format_potential_result(n.symbol, strategy, "expired", None, n.direction), n.tg_message_id)
                 n.tg_message_id = mid or n.tg_message_id
                 changed = True
             if changed:
