@@ -69,6 +69,7 @@ RESULT_META = {
     "tp": ("TP", "green"),
     "tp_nofill": ("TP (no fill)", "green"),
     "be50": ("50% + BE", "yellow"),
+    "be": ("BE 0R", "gray"),   # 22.11: 1D kismi kar kapali -- %50'de BE, girise donus
     "sl": ("SL", "red"),
     "expired": ("Expired", "gray"),
     "filled": ("Filled · open", "blue"),
@@ -97,7 +98,7 @@ def norm_markets(market) -> list[str]:
     return [k for k, _ in MARKET_FILTERS if k in keep]
 DIRECTION_FILTERS = (("all", "All"), ("long", "LONG"), ("short", "SHORT"))
 # 11.11 (kullanici): filtrede TP ve Open ayrilmaz -- "TP" = TP + TP (no fill), "Open" = dolmus acik + dolmamis acik.
-RESULT_FILTERS = (("all", "All"), ("tp", "TP"), ("be50", "50% + BE"), ("sl", "SL"), ("open", "Open"), ("expired", "Expired"))
+RESULT_FILTERS = (("all", "All"), ("tp", "TP"), ("be50", "50% + BE"), ("be", "BE 0R"), ("sl", "SL"), ("open", "Open"), ("expired", "Expired"))
 _RESULT_GROUP = {"tp": {"tp", "tp_nofill"}, "open": {"open", "filled"}}
 
 
@@ -245,7 +246,7 @@ def _replay_notice(n, store, j=None) -> tuple[str, float | None] | None:
                         continue   # supurme mumunda TP sayilmaz (mum ici sira bilinmez)
                     if (lo_ <= tp) if short else (hi_ >= tp):
                         return "tp_nofill", None
-        t = SimpleNamespace(state="wait", direction=n.direction, entry=entry, sl=sl, tp=tp, rr=rr,
+        t = SimpleNamespace(state="wait", strategy=n.strategy, direction=n.direction, entry=entry, sl=sl, tp=tp, rr=rr,
                             filled_at=None, partial_at=None, result=None, result_r=None, result_at=None)
         last_close = None
         for bts, hi_, lo_ in pot_bars(df, start, ltf, until=start + horizon):   # 11.11: yalniz pencere (hiz)
@@ -286,12 +287,12 @@ async def build_potential_signals(
     db: AsyncSession, *, tf: str = "all", date_from: str = "", date_to: str = "", status: str = "all",
     market="all", direction: str = "all", result: str = "all", page: int = 1, store=None,
 ) -> dict:
-    tf = tf if tf in ("all", "1d", "1w") else "all"
+    tf = tf if tf in ("all", "1d") else "all"   # 22.11: 1W kapatildi -- sayfada yok (zincirleri arka planda sonuclanir)
     status = status if status in dict(STATUS_FILTERS) else "all"
     markets = norm_markets(market)
     direction = direction if direction in dict(DIRECTION_FILTERS) else "all"
     result = result if result in dict(RESULT_FILTERS) else "all"
-    q = select(PotentialNotice)
+    q = select(PotentialNotice).where(PotentialNotice.strategy != "1w")
     if tf != "all":
         q = q.where(PotentialNotice.strategy == tf)
     dfrom, dto = _tsi_day(date_from), _tsi_day(date_to, end=True)

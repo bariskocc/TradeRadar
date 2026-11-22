@@ -88,7 +88,7 @@
         </a>
     </div>
     <div class="flex flex-wrap items-center gap-1">
-        {% for key, label in [('all', 'All TF'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
+        {% for key, label in [('all', 'All TF'), ('4h', '4H-15M'), ('1d', '1D-1H')] %}
         <a href="/open-signals?tab={{ tab }}&tf={{ key }}" data-tf="{{ key }}"
             class="px-3 py-1.5 rounded-lg text-xs font-medium transition {% if tf == key %}bg-accent-blue text-white{% else %}bg-dark-800 text-gray-400 hover:bg-dark-700 hover:text-white{% endif %}">
             {{ label }} <span class="ml-0.5 opacity-70">{{ counts.tf.get(key, 0) }}</span>

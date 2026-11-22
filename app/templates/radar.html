@@ -29,7 +29,6 @@
                     <div class="flex items-center gap-1 mt-3">
                         <a href="{{ rq(tf_='4h') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '4h' else off_cls }}">4H-15M</a>
                         <a href="{{ rq(tf_='1d') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '1d' else off_cls }}">1D-1H</a>
-                        <a href="{{ rq(tf_='1w') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == '1w' else off_cls }}">1W-4H</a>
                         {# Supply / Demand (03.11): CRT'den ayri strateji, kendi sekmesi; olcum modu (sinyal acmaz). #}
                         <span class="w-px h-5 bg-dark-600 mx-1"></span>
                         <a href="{{ rq(tf_='sd') }}" class="px-3 py-1.5 rounded-lg text-xs font-medium transition {{ on_cls if tf == 'sd' else off_cls }}" title="Supply / Demand zones on 4H — measurement mode, no signals yet">S/D 4H</a>

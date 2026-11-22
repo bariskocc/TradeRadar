@@ -88,7 +88,7 @@
                         <select name="tf"
                             class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-accent-blue">
                             <option value="all">All</option>
-                            {% for key, label in tf_labels.items() if key != '1h' %}
+                            {% for key, label in tf_labels.items() if key not in ('1h', '1w') %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>

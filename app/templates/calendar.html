@@ -23,7 +23,7 @@
                     <div>
                         <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
                         <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            {% for key, lab in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
+                            {% for key, lab in [('all', 'All'), ('4h', '4H-15M'), ('1d', '1D-1H')] %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ lab }}</option>
                             {% endfor %}
                         </select>

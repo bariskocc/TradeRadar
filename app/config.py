@@ -72,6 +72,10 @@ W1_SESSION_1H_BARS = int(os.getenv("W1_SESSION_1H_BARS", "4400"))
 # 5m aboneliklerini, bootstrap'i ve 1H tespitini geri acar (scanner.STRATEGY_CFG'deki yorumlu
 # 1H blogu da acilmali).
 H1_5M_ENABLED = False
+# 1W-4H CRT stratejisi 22.11'de KAPATILDI (kullanici karari: 28.09'dan beri 8 haftada 1 sinyal). Kod, ayar
+# (STRATEGY_CFG["1w"]) ve veri yuklemesi ("1d_deep": S/D 1H/15m evreni + Charts 1W de kullaniyor) duruyor; yalniz TESPIT
+# durur -- acik 1W Journal satirlari / potansiyel zincirleri fiyatla sonuclanmaya devam eder. Geri acmak: True.
+W1_ENABLED = False
 # S/D 1H olcumu icin 5m veri (03.11, kullanici): 1D evreni (BTC/ETH + FX/metal/endeks/petrol, 30 sembol) 5m abonelik +
 # bootstrap. 1H CRT stratejisini ACMAZ (get_h1_symbols_flat bos kalir); 5m kapanisi yalniz Journal `sd1h` izlemesine gider.
 SD_5M_ENABLED = os.getenv("SD_5M_ENABLED", "1") == "1"

@@ -144,10 +144,39 @@ async def _p_noncrypto(db: AsyncSession) -> Progress:
     return Progress(bars=[Bar("kripto-dışı kapalı işlem", n, 20)])
 
 
+BE_1R_SINCE = datetime(2026, 11, 22)   # 4H +1R BE (scanner STRATEGY_CFG["4h"]["be_arm_r"]); restart'ta canli
+
+
+async def _p_be_1r(db: AsyncSession) -> Progress:
+    """22.11: 4H +1R BE canlida -- kuraldan sonra dolup kapanan 4H islemler (FX / kripto ayri)."""
+    rows = (await db.execute(
+        select(Signal.market_type, Signal.rr_value, Signal.exit_reason, Signal.partial_size).where(
+            Signal.timeframe == "4h", Signal.closed_at.is_not(None),
+            Signal.entry_filled_time >= BE_1R_SINCE,
+        )
+    )).all()
+    n = len(rows)
+    tot = sum(float(r.rr_value or 0) for r in rows)
+    be0 = sum(1 for r in rows if r.exit_reason == "be" and not r.partial_size)
+    sl = sum(1 for r in rows if r.exit_reason == "sl")
+    fx = sum(1 for r in rows if r.market_type != "crypto")
+    note = (f"{n} işlem · toplam {tot:+.2f}R · +1R'de BE 0R {be0} · SL {sl} · FX {fx} / kripto {n - fx}"
+            if n else "kuraldan sonra kapanan 4H işlem yok")
+    return Progress(bars=[Bar("kuraldan sonra kapanan 4H işlem", n, 30)], note=note)
+
+
+PARTIAL_OFF_SINCE = datetime(2026, 11, 22)   # 22.11: 4H/1D kismi kar kapandi (scanner STRATEGY_CFG)
+
+
 async def _p_partial(db: AsyncSession) -> Progress:
-    n = await _closed_count(db, Signal.partial_size.is_not(None), Signal.partial_rr.is_not(None))
-    # 03.10 (kullanici): esik 25 -> 100 (fark islem basina cok oynak; ~1 islem/gun -> ~80 gun)
-    return Progress(bars=[Bar("kısmi kârlı kapalı işlem", n, 100)])
+    # 03.10 (kullanici): esik 25 -> 100; 22.11 (kullanici): kismi kar 4H/1D'de kapandi, olcum iki yonlu surer, esik 150.
+    # A = kismi kar almis kapali islem; B = 22.11 sonrasi kismi karsiz 4H/1D islem, TP yolunun %50'sini gormus
+    # (`reached_50pct`) -- scripts/partial_vs_be.py ile ayni kume.
+    a = await _closed_count(db, Signal.partial_size.is_not(None), Signal.partial_rr.is_not(None))
+    b = await _closed_count(db, Signal.partial_size.is_(None), Signal.reached_50pct.is_(True),
+                            Signal.timeframe.in_(("4h", "1d")), Signal.entry_filled_time >= PARTIAL_OFF_SINCE)
+    return Progress(bars=[Bar("%50'ye ulaşmış kapalı işlem (kısmi kârlı + 22.11 sonrası kısmi kârsız)", a + b, 150)],
+                    note=f"kısmi kâr almış {a} · 22.11 sonrası kısmi kârsız {b}")
 
 
 async def _p_partial_flat(db: AsyncSession) -> Progress:
@@ -503,7 +532,7 @@ async def _p_reclaim_penalty(db: AsyncSession) -> Progress:
     res = or_(t.c.outcome.in_(("win", "loss")),
               (t.c.outcome == "signal") & func.json_extract(t.c.shadow, '$."1".o').in_(("win", "loss")))
     bars = []
-    for strat, thr in (("4h", 7), ("1d", 7), ("1w", 6)):
+    for strat, thr in (("4h", 7), ("1d", 7)):   # 22.11: 1W kapatildi -- cubugu madde tetigini bekletmesin
         if strat == "4h":
             def part(k):
                 return func.json_extract(pal, f"$.{k}")
@@ -2652,7 +2681,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_retrace_for("1d", 40, zone_only=True),
     ),
     WatchItem(
-        key="retrace_1w", status="open", started="01.10", onem=1,
+        key="retrace_1w", status="done", started="01.10", onem=1,
+        result="(22.11) KAPANDI — 1W-4H STRATEJİSİ KAPATILDI (kullanıcı kararı: 28.09'dan beri 8 haftada 1 sinyal, AUDUSD +0.57R). Ölçüm durdu (yeni 1W setup tespit edilmiyor, config.W1_ENABLED = False); karar verilmeden kapandı.",
         title="Limit giriş seviyesi — 1W",
         trigger="10 first_bar'lı dolmuş kazanan: bir limit varyantı (CISD/MSS/IFVG/BPR) ya da stop (%80/%60) aynı setuplarda bugünkü girişi +0.15 R/setup geçerse mum re-track'i; geçmezse giriş ve stop kalır. 01.10'dan beri 1W girişi yalnız CISD + %80 stop (kullanıcı kararı): bugünkü giriş = o kural. 10'da fark iki zaman yarısında da aynı yöndeyse karar, değilse eşik 20'ye uzar",
         measure="python tmp/tmp_limit_variant_depth.py --strategy 1w",
@@ -2787,7 +2817,8 @@ ITEMS: list[WatchItem] = [
                                               "R/setup, komisyonsuz da eksi"),
     ),
     WatchItem(
-        key="market_vs_limit_1w", status="open", started="01.10", onem=1,  # 03.10: 0 -> 1, kapiyi gecen 1W setup yok, aylar
+        key="market_vs_limit_1w", status="done", started="01.10", onem=1,  # 03.10: 0 -> 1, kapiyi gecen 1W setup yok, aylar
+        result="(22.11) KAPANDI — 1W-4H STRATEJİSİ KAPATILDI (kullanıcı kararı: 28.09'dan beri 8 haftada 1 sinyal, AUDUSD +0.57R). Ölçüm durdu (yeni 1W setup tespit edilmiyor, config.W1_ENABLED = False); karar verilmeden kapandı.",
         title="Market vs limit giriş — 1W",
         trigger="03.10'dan beri 4H/1D gibi: kapıları geçmiş + first_bar dilimi, market %90 / %80 RR ≥ 2 kolu 50 çözülmüş "
                 "işlem → komisyonlu VE komisyonsuz hüküm ayrı (+0.15 R/setup, iki yarı), karar kullanıcının. 01.10'dan beri "
@@ -3088,7 +3119,8 @@ ITEMS: list[WatchItem] = [
     WatchItem(
         key="partial_vs_be", status="open", started="17.09", onem=1,
         title="Kısmi kâr vs BE-only",
-        trigger="100 kısmi kârlı kapalı işlem (03.10'da 25 → 100, kullanıcı)",
+        trigger="150 kapalı işlem TP yolunun %50'sine ulaşmış (03.10'da 25 → 100; 22.11'de kısmi kâr 4H/1D'de kapandı, "
+                "ölçüm iki yönlü sürer, 100 → 150, kullanıcı): kısmi kârın toplam katkısı belirgin artıysa (BE > TP) geri açılır",
         measure="python scripts/partial_vs_be.py",
         md="Kısmi kâr vs BE-only — canlı takip (başladı 17.09.2026, ⏰ tetik: 25 işlem)",
         progress_fn=_p_partial,
@@ -3134,7 +3166,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_tight_stop_tf("1d"),
     ),
     WatchItem(
-        key="tight_stop_1w", status="open", started="22.10", onem=1,
+        key="tight_stop_1w", status="done", started="22.10", onem=1,
+        result="(22.11) KAPANDI — 1W-4H STRATEJİSİ KAPATILDI (kullanıcı kararı: 28.09'dan beri 8 haftada 1 sinyal, AUDUSD +0.57R). Ölçüm durdu (yeni 1W setup tespit edilmiyor, config.W1_ENABLED = False); karar verilmeden kapandı.",
         title="Dar stop kapısı — 1W",
         trigger="dar grupta çözülmüş 10 (kapıya kadar bütün kapıları geçmiş setuplar, stop oranı < 1.0 = dar, düz TP/SL): dar − normal ≤ −0.15 R/setup + iki yarıda aynı yön + tek yönlü p < 0.10 → KAPI DOĞRU, kalır; dar normalden 0.15'ten az kötü VE dar R/setup > 0 → kapı kazanç kesiyor → tek replay → kullanıcıya (kaldır / eşiği düşür); arada 20'ye uzat. Dinamik eşik: stop oranı kovaları (bilgi) (1W'de kapıyı geçen setup ayda birkaç tane — rapordaki geniş küme erken işaret verir)",
         measure="python scripts/tight_stop_stat.py",
@@ -3347,7 +3380,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_parts_1d,
     ),
     WatchItem(
-        key="score_parts_1w", status="open", started="01.10", onem=1,
+        key="score_parts_1w", status="done", started="01.10", onem=1,
+        result="(22.11) KAPANDI — 1W-4H STRATEJİSİ KAPATILDI (kullanıcı kararı: 28.09'dan beri 8 haftada 1 sinyal, AUDUSD +0.57R). Ölçüm durdu (yeni 1W setup tespit edilmiyor, config.W1_ENABLED = False); karar verilmeden kapandı.",
         title="Skor kalemleri — 1W",
         trigger="kalem başına karar bandında (kalemin sinyali değiştirdiği setuplar) taraf başına 10 çözülmüş: puan alan "
                 "almayandan 0.15 R/setup kötüyse (cezada iyiyse) kalem TERS → kullanıcıya; aylık bias, haftalık, PMH/PML 1W'ye özgü",
@@ -3385,7 +3419,8 @@ ITEMS: list[WatchItem] = [
     ),
     WatchItem(
         # 24.10 (kullanici, 1W skor kalemleri incelemesi): 5 yalniz-1W aday eklendi, madde pasiften cikti (onem 3 -> 1).
-        key="score_candidates_1w", status="open", started="21.10", onem=1,
+        key="score_candidates_1w", status="done", started="21.10", onem=1,
+        result="(22.11) KAPANDI — 1W-4H STRATEJİSİ KAPATILDI (kullanıcı kararı: 28.09'dan beri 8 haftada 1 sinyal, AUDUSD +0.57R). Ölçüm durdu (yeni 1W setup tespit edilmiyor, config.W1_ENABLED = False); karar verilmeden kapandı.",
         title="Skor tablosu yeni adaylar — 1W",
         trigger="BÜTÜN adaylarda (28.10, kullanıcı; eskiden ilk dolan) karar bandında (adayın puanı sinyali değiştirecek setuplar, RR ≥ 2) taraf başına 30 çözülmüş, sonra aday aday: lehte WR farkı ≥ 5 puan (TP önce mi; 29.10'a kadar 0.15 R/setup) + iki yarıda aynı yön + tek yönlü p < 0.10 → tek replay → kullanıcıya; < 5 puan RED; arada taraf başına 60'a uzat. Filtre (≥ 0.3 R) adayın eski maddesinde. "
                 "Sonuç = TP önce mi SL önce mi (24.10, giriş dolmadan TP de TP). 1W'de birikme yavaş (haftada ~10 setup)",
@@ -3418,7 +3453,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_smt_segment,
     ),
     WatchItem(
-        key="w1_live", status="open", started="28.09", onem=2,
+        key="w1_live", status="done", started="28.09", onem=2,
+        result="(22.11) KAPANDI — 1W-4H STRATEJİSİ KAPATILDI (kullanıcı kararı: 28.09'dan beri 8 haftada 1 sinyal, AUDUSD +0.57R). Ölçüm durdu (yeni 1W setup tespit edilmiyor, config.W1_ENABLED = False); karar verilmeden kapandı.",
         title="1W-4H stratejisi canlıda (1H-5M'in yerine)",
         trigger="3 kapanan 1W sinyal: no_data yok mu (veri derinliği), kaç setup/sinyal, Cuma kapanışı kaç 1W "
                 "işlemi kesti; skor eşiği 6 ve aylık bias +2 için yalnız 'veri birikiyor' notu",
@@ -3882,6 +3918,15 @@ ITEMS: list[WatchItem] = [
         measure="/sd-izleme tablosu (Journal features_at_levels.obst_rr)",
         md="S/D: en yakın engel RR < 1 — setup sayılsın mı? (06.11.2026)",
         progress_fn=_p_sd_near_obstacle,
+    ),
+    WatchItem(
+        key="be_1r_4h", status="open", started="22.11", onem=1,
+        title="4H +1R BE canlıda — kayıpları kurtarıyor mu, kazanan kesiyor mu?",
+        trigger="kuraldan sonra 30 kapanan 4H işlem: R/işlem 22.11 öncesi 4H'ten (93 işlem −0,02) iyi değilse VE '+1R'de BE 0R' "
+                "kapananların çoğu sonra TP'ye gittiyse → +1R tetiği kalkar (BE yine TP yolunun %50'si); kullanıcı ayrıca takip ediyor",
+        measure="Dashboard 4H kartları · bu sayaç (signals: exit_reason='be' + partial_size boş = +1R'de BE 0R)",
+        md="4H +1R BE canlıda (22.11.2026, kullanıcı kararı)",
+        progress_fn=_p_be_1r,
     ),
     WatchItem(
         key="sd_stop_width", status="done", started="03.11", onem=1, group="sd",

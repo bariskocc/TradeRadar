@@ -12,6 +12,12 @@ BE-only varyanti = tam boyutla ayni yol => R = kalan R. Simetrik sonuc:
 Yani kural tek satir: **%50'ye cikip girise donen isler, TP'ye gidenlerden (RR agirlikli) fazlaysa
 kismi kar kazandirir.** Karar kurali ve esik: IZLEME.md -> "Kismi kar vs BE-only".
 
+22.11 (kullanici karari): 4H ve 1D'de KISMI KAR KAPANDI (BE kaldi). Olcum iki yonlu surer:
+  A) kismi kar almis eski islemler: gercek vs BE-only (yukaridaki formul)
+  B) 22.11 sonrasi kismi karsiz 4H/1D islemler: `reached_50pct` = TP yolunun %50'si goruldu (TP mumu haric, motor o
+     mumda kismi almazdi) ise "kismi alinsaydi" R = f x (0.5 x RR) + (1 - f) x gercek R; gormediyse fark yok.
+Esik: %50'ye ulasmis (A + B) islem sayisi.
+
 Kullanim:
     python scripts/partial_vs_be.py                  # tum kayitlar
     python scripts/partial_vs_be.py --days 60        # son 60 gun (kapanisa gore)
@@ -30,7 +36,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 # IZLEME.md'deki onceden yazilmis esik: bu kadar "kismi kar almis" islem birikmeden karar verilmez.
-MIN_TRADES = 100   # 03.10 (kullanici): 25 -> 100, fark islem basina cok oynak
+MIN_TRADES = 150   # 03.10 (kullanici): 25 -> 100; 22.11 (kullanici): 100 -> 150, kismi kar kapandi, olcum surer
+PARTIAL_OFF_SINCE = "2026-11-22"   # 4H/1D kismi kar kapanisi (B kolu bu tarihten sonra dolanlar)
+PART_FRAC = 0.5                    # karsi-olgu: eski kural (yarisi TP yolunun %50'sinde)
 
 
 def head(title: str) -> None:
@@ -58,12 +66,22 @@ def main() -> None:
         sql += " AND timeframe = ?"
         params.append(args.strategy)
     rows = [dict(r) for r in con.execute(sql + " ORDER BY closed_at", params)]
+    sql_b = ("SELECT id, symbol, timeframe, direction, exit_reason, entry_price, initial_stop_loss, take_profit, rr_value, "
+             "reached_50pct, closed_at FROM signals WHERE status IN ('expired', 'breakeven') AND rr_value IS NOT NULL "
+             "AND partial_size IS NULL AND timeframe IN ('4h', '1d') AND entry_filled_time >= ?")
+    params_b: list = [PARTIAL_OFF_SINCE]
+    if args.days:
+        sql_b += " AND closed_at >= ?"
+        params_b.append(params[0])
+    if args.strategy:
+        sql_b += " AND timeframe = ?"
+        params_b.append(args.strategy)
+    rows_b = [dict(r) for r in con.execute(sql_b + " ORDER BY closed_at", params_b)]
     con.close()
 
     head("Kismi kar (%50 yari + BE) vs sadece BE")
     if not rows:
         print("  Kismi kar almis kapanmis islem yok. Kismi kar 11.09.2026'da canliya alindi (4H/1D).")
-        return
 
     print(f"  {'id':>4} {'sembol':11s} {'tf':3s} {'cikis':10s} {'gercek R':>9} {'BE-only R':>10} {'fark':>7}")
     tot_act = tot_be = 0.0
@@ -88,11 +106,43 @@ def main() -> None:
     if n:
         print(f"  Islem basina fark: {(tot_act - tot_be) / n:+.3f}R")
 
+    head(f"B) {PARTIAL_OFF_SINCE} sonrasi kismi karsiz 4H/1D: kismi kar alinsaydi?")
+    reached = [r for r in rows_b if r["reached_50pct"]]
+    tot_b_act = tot_b_part = 0.0
+    kb = {"be": 0, "tp": 0, "diger": 0}
+    if not reached:
+        print(f"  %50'ye ulasan kismi karsiz islem yok ({len(rows_b)} kapanmis islem).")
+    else:
+        print(f"  {'id':>4} {'sembol':11s} {'tf':3s} {'cikis':10s} {'gercek R':>9} {'kismi R':>9} {'fark':>7}")
+    for r in reached:
+        e, isl, tp, act = float(r["entry_price"]), float(r["initial_stop_loss"]), float(r["take_profit"]), float(r["rr_value"])
+        risk = abs(e - isl)
+        rr = abs(tp - e) / risk if risk else 0.0
+        with_part = PART_FRAC * (0.5 * rr) + (1 - PART_FRAC) * act
+        tot_b_act += act
+        tot_b_part += with_part
+        ex = (r["exit_reason"] or "").lower()
+        kb["be" if ex == "be" else ("tp" if ex == "tp" else "diger")] += 1
+        print(f"  {r['id']:4d} {r['symbol']:11s} {(r['timeframe'] or ''):3s} {ex:10s} "
+              f"{act:+9.2f} {with_part:+9.2f} {with_part - act:+7.2f}")
+    if reached:
+        print(f"\n  TOPLAM  gercek (BE-only): {tot_b_act:+.2f}R    kismi alinsaydi: {tot_b_part:+.2f}R    "
+              f"kismi karin katkisi: {tot_b_part - tot_b_act:+.2f}R")
+        print(f"  Cikis: BE {kb['be']} / TP {kb['tp']} / diger {kb['diger']}")
+
+    head("A + B birlikte")
+    n_all = n + len(reached)
+    contrib = (tot_act - tot_be) + (tot_b_part - tot_b_act)
+    print(f"  %50'ye ulasan islem {n_all} (A {n} + B {len(reached)}) · kismi karin toplam katkisi {contrib:+.2f}R"
+          + (f" · islem basina {contrib / n_all:+.3f}R" if n_all else ""))
+    print(f"  Kalan yari / tam pozisyon: BE {kind['be'] + kb['be']} / TP {kind['tp'] + kb['tp']} (BE > TP ise kismi kar lehine)")
+
     head("Karar")
+    n = n_all
     if n < MIN_TRADES:
         print(f"  {n}/{MIN_TRADES} islem — KARAR VERME. Esik dolmadan okunan fark gurultudur:")
         print("  tek bir yuksek RR'li islem isareti cevirir (replay'de donemden doneme +8.5R / -0.2R).")
-        print(f"  Dashboard 'Dikkat' panosu {MIN_TRADES}'e ulasinca kendiliginden hatirlatir.")
+        print(f"  Dashboard 'Dikkat' panosu ve /izleme {MIN_TRADES}'e ulasinca kendiliginden hatirlatir.")
     else:
         print(f"  {n} islem birikti — IZLEME.md 'Kismi kar vs BE-only' karar kuralini uygula:")
         print("  isaret + islem basina fark + BE/TP sayaci birlikte okunur; sonucu oraya yaz.")

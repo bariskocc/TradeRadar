@@ -53,7 +53,7 @@
                     <div>
                         <label class="block text-xs text-gray-500 mb-1">STRATEGY</label>
                         <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            {% for key, label in [('all', 'All'), ('1d', '1D-1H'), ('1w', '1W-4H')] %}
+                            {% for key, label in [('all', 'All'), ('1d', '1D-1H')] %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
@@ -127,6 +127,7 @@
                     Result: <span class="text-green-400 font-semibold">{{ results.tp + results.tp_nofill }} TP</span>
                     <span class="text-gray-500">({{ results.tp }} TP · {{ results.tp_nofill }} TP no fill)</span> ·
                     <span class="text-accent-yellow font-semibold">{{ results.be50 }} 50% + BE</span> ·
+                    {% if results.be %}<span class="text-gray-400 font-semibold">{{ results.be }} BE 0R</span> ·{% endif %}
                     <span class="text-red-400 font-semibold">{{ results.sl }} SL</span> ·
                     {{ results.filled }} filled · {{ results.open }} open
                 </span>

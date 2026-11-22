@@ -639,6 +639,8 @@ SCORE_FEATURE_KEYS = (
     "key_level_n", "liq_beyond_atr", "liq_beyond_frac", "liq_beyond_kind",
     # 28.10: o likiditenin fiyati -- scanner'in "yakin asil likidite alinmadan girme" kapisi (LIQ_SWEEP_*) kullanir
     "liq_beyond_level",
+    # 13.11: kapinin LTF asil likidite seviyesinin C2 ucuna uzakligi (x HTF ATR; scanner._liq_sweep_state yazar)
+    "ltf_liq_atr",
     # 29.09: C1 sekli -- C2 ile ayni renk (1/0), govde orani, TP tarafindaki fitil / C1 range
     "c1_same_color", "c1_body_frac", "c1_tp_wick_frac",
     # 03.10: SMT'nin C1 ucuna bagli tanimlari (yalniz olcum, `smt_level_features`) + cift turu
@@ -1781,6 +1783,56 @@ def liquidity_beyond_purge(df: pd.DataFrame, purge_idx: int, direction: str,
     out["liq_beyond_kind"] = kind
     out["liq_beyond_level"] = round(float(lvl), 8)
     return out
+
+
+# LTF asil likidite (13.11, kullanici karari -- XLM 1D #211): C2 ucunun otesinde alinmamis BUYUK LTF swing dibi/tepesi
+# (her yanda LTF_LIQ_K mum). Pivot C1'den LTF_LIQ_PRE_BARS HTF mumu once ile C2 acilisi arasinda olusmali (sag kanadi
+# C2'ye tasabilir); C2 sonuna kadar alinmamis olmali. HTF 5'li fraktal (`liquidity_beyond_purge`) C1'den hemen onceki
+# mumun dibini goremiyordu (sag kanadi C1 + C2) ve kapi yalniz 0.10 ATR'ye bakiyordu.
+LTF_LIQ_K = 5
+LTF_LIQ_PRE_BARS = 5
+
+
+def ltf_liquidity_beyond(df_ltf: Optional[pd.DataFrame], direction: str, crt_bar_time, purge_time,
+                         purge_extreme: float, htf_hours: float, c2_hours: float) -> list[float]:
+    """C2 ucunun OTESINDEKI alinmamis buyuk LTF swing seviyeleri (C2 ucuna yakindan uzaga).
+
+    Tanim yalniz C2 sonuna kadarki mumlara bakar: C2'den sonra supurulse de seviye ayni kalir (kapi o anda
+    "swept" der). C2 aciksa (1D) "simdiye kadar" alinmamis olanlar.
+    """
+    if df_ltf is None or df_ltf.empty or crt_bar_time is None or purge_time is None or purge_extreme is None:
+        return []
+    is_short = direction == "SHORT"
+    c1 = _as_utc_ts(crt_bar_time)
+    c2 = _as_utc_ts(purge_time)
+    c2_end = c2 + pd.Timedelta(hours=c2_hours)
+    seg = df_ltf[(df_ltf.index >= c1 - pd.Timedelta(hours=htf_hours * LTF_LIQ_PRE_BARS)) & (df_ltf.index < c2_end)]
+    if len(seg) < 2 * LTF_LIQ_K + 1:
+        return []
+    col = "high" if is_short else "low"
+    vals = seg[col].values.astype(float)
+    idx = seg.index
+    ext = float(purge_extreme)
+    out = []
+    for i in range(LTF_LIQ_K, len(vals) - LTF_LIQ_K):
+        if idx[i] >= c2:
+            break
+        x = vals[i]
+        if not ((x > ext) if is_short else (x < ext)):
+            continue
+        left, right = vals[i - LTF_LIQ_K:i], vals[i + 1:i + 1 + LTF_LIQ_K]
+        if is_short:
+            if not ((left < x).all() and (right < x).all()):
+                continue
+            if vals[i + 1:].max() > x:
+                continue
+        else:
+            if not ((left > x).all() and (right > x).all()):
+                continue
+            if vals[i + 1:].min() < x:
+                continue
+        out.append(float(x))
+    return sorted(set(out), key=lambda v: abs(v - ext))
 
 
 @dataclass

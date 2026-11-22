@@ -31,12 +31,13 @@ import pandas as pd
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import BOOTSTRAP_LIMITS, SESSION_1H_BARS
+from app.config import BOOTSTRAP_LIMITS, SESSION_1H_BARS, W1_ENABLED
 from app.crt_engine import (
     CRTSetup,
     check_cisd_confirmation,
     check_signal_invalidation,
     check_smt_divergence,
+    ltf_liquidity_beyond,
     smt_level_features,
     compute_daily_bias,
     compute_ict_bias,
@@ -179,6 +180,12 @@ SAME_SETUP_ONE_TRADE = True
 # gruba (4H RR >= 2) 47 setup; dolan islemlerde sistematik kotu degildi -- kazanc beklentisi yeniden giristen.
 LIQ_SWEEP_REQUIRED_TFS = frozenset({"4h", "1d", "1w"})
 LIQ_NEAR_MAX_ATR = 0.10
+# 13.11 (kullanici karari, XLM 1D #211 -- C2 dibi 0.14233, 0.17 ATR altinda 10.11 18:00 TSI'nin alinmamis 1H dibi
+# 0.14082; HTF fraktali onu goremiyordu): ayni kapi LTF'teki asil likiditeye de bakar -- C2 ucunun <= 0.25 ATR
+# otesinde alinmamis buyuk LTF swing'i (her yanda 5 mum, `crt_engine.ltf_liquidity_beyond`). Esik XLM'i yakalayan en
+# kucuk deger; 0.5 cok setup'i bekletir. Veri karari desteklemiyordu (4H/15m 62 setup: <= 0.25 %60 vs taban %55).
+LTF_LIQ_SWEEP_ENABLED = True
+LTF_LIQ_NEAR_MAX_ATR = 0.25
 
 # Dolmadan TP'ye yaklasma (28.10, kullanici karari "garanti olsun"): bekleyen sinyalde fiyat girise donmeden ONCE
 # giris -> TP yolunun bu kesrini gorduyse firsat kacmis sayilir -- sinyal acilmaz / bekleyen silinir (Journal
@@ -264,12 +271,18 @@ STRATEGY_CFG = {
         # trail TP %75'e cekildi (ikisi de _RISK_GATES'ten; burada yalnizca BE
         # acik edilir).
         "be_arm_tp_fraction": 0.50,
+        # 22.11 (kullanici karari, dogrudan canli): BE ayrica +1R'de (hangisi once). Kismi kar TP yolunun %50'sinde
+        # kalir -- RR <= 2'de %50 zaten <= +1R, degisiklik yok. Gerekce: 54 SL'nin 13'u once >= +1R gordu.
+        "be_arm_r": 1.0,
         # Kismi kar (11.09): TP yolunun %50'sinde yarisi kapatilir, kalan yari
         # SL=entry ile devam eder; trail kapali. Replay 22.06-10.09 (175 islem):
         # ayni setup'larda +8.3R ama donemler arasi tutarsiz (GA sifiri iceriyor).
         # BE zaten %50'de oldugu icin SL sayisi degismez; WR %22 -> %47.
         # Bkz. IZLEME.md "Kismi kar - 4H replay".
-        "partial_close_fraction": 0.50,
+        # 22.11 (kullanici karari): KISMI KAR KAPALI -- BE kalir (%50 ya da +1R). Canli 45 islemde kismi kar -1.97R
+        # (kalan yari TP 24 / BE 21, simetrik). Olcum surer: `reached_50pct` = TP yolunun %50'si goruldu (kismi kar
+        # alinsaydi), scripts/partial_vs_be.py iki yonu de sayar.
+        "partial_close_fraction": None,
         "trail_arm_tp_fraction": None,
         # 29.10 yeni skor tablosu: esik 6, kume muafiyeti 8. Sinir skor kapisi (`_score7_strict_ok`, esikte bolge
         # girisi yok + key level sarti) KAPALI: yeni esikte sinirdaki 79 setupun 59'unu eliyordu, gecen %75 / elenen %76.
@@ -304,7 +317,7 @@ STRATEGY_CFG = {
         # BE'ye donus artik 0R degil. Replay 01.11.25-10.09.26 (108 islem): ayni
         # setup'larda fark 0R, WR %31 -> %44. Bkz. IZLEME.md "Kismi kar - 1D replay".
         "be_arm_tp_fraction": 0.50,
-        "partial_close_fraction": 0.50,
+        "partial_close_fraction": None,   # 22.11 (kullanici karari): kismi kar kapali, BE %50'de kalir (4H ile ayni gerekce)
         "trail_arm_tp_fraction": None,
         # 25.09 (kullanici karari): 1D C2 kapanisini BEKLEMEZ, IFVG girisi de C2 acikken
         # serbest. 11.09'da "C2 yeni dip/tepe yapip SL'yi yiyebilir" diye geri alinmisti;
@@ -373,7 +386,8 @@ STRATEGY_CFG = {
     },
 }
 
-ENABLED_STRATEGIES = tuple(STRATEGY_CFG)
+# 22.11: 1W kapali (config.W1_ENABLED) -- ayari STRATEGY_CFG'de durur (eski kayitlar, Skor Tablosu), tespit/tarama yok.
+ENABLED_STRATEGIES = tuple(s for s in STRATEGY_CFG if s != STRATEGY_1W or W1_ENABLED)
 
 
 def _min_score(cfg: dict | None) -> int:
@@ -714,9 +728,28 @@ def _liq_sweep_state(setup: CRTSetup, df_ltf: pd.DataFrame | None, strategy: str
     if strategy not in LIQ_SWEEP_REQUIRED_TFS or df_ltf is None or df_ltf.empty:
         return None
     feats = setup.score_features or {}
-    dist, level = feats.get("liq_beyond_atr"), feats.get("liq_beyond_level")
-    if dist is None or level is None or float(dist) > LIQ_NEAR_MAX_ATR or setup.purge_time is None:
+    if setup.purge_time is None:
         return None
+    levels = []
+    dist, level = feats.get("liq_beyond_atr"), feats.get("liq_beyond_level")
+    if dist is not None and level is not None and float(dist) <= LIQ_NEAR_MAX_ATR:
+        levels.append(float(level))
+    # 13.11: LTF asil likidite (`crt_engine.ltf_liquidity_beyond`), <= LTF_LIQ_NEAR_MAX_ATR x HTF ATR
+    # (ATR = C1 araligi / range_atr). Bant icindeki EN UZAK seviye alinmali -- yakini alip donen setup yine sahte.
+    ra = feats.get("range_atr")
+    c1_rng = float(setup.key_level_high or 0) - float(setup.key_level_low or 0)
+    if LTF_LIQ_SWEEP_ENABLED and ra and c1_rng > 0:
+        atr = c1_rng / float(ra)
+        hrs = float(STRATEGY_CFG.get(strategy, {}).get("c2_hours", 4.0))
+        ltf = ltf_liquidity_beyond(df_ltf, setup.direction, setup.crt_bar_time, setup.purge_time,
+                                   setup.purge_extreme, hrs, hrs)
+        near = [lv for lv in ltf if abs(lv - float(setup.purge_extreme)) <= LTF_LIQ_NEAR_MAX_ATR * atr]
+        if near and isinstance(setup.score_features, dict):
+            setup.score_features["ltf_liq_atr"] = round(abs(near[-1] - float(setup.purge_extreme)) / atr, 4)
+        levels += near
+    if not levels:
+        return None
+    level = min(levels) if setup.direction == "LONG" else max(levels)
     start = pd.Timestamp(setup.purge_time)
     start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
     seg = df_ltf[df_ltf.index >= start]
@@ -1444,12 +1477,27 @@ def _pot_hits(n: PotentialNotice, high: float, low: float) -> tuple[bool, bool, 
     return high >= n.entry, high >= n.sl, low <= n.tp, low <= half
 
 
+POT_PARTIAL_OFF_SINCE = datetime(2026, 11, 22)   # 22.11: 1D kismi kar kapandi (STRATEGY_CFG); oncesinde dolan zincir eski kural
+
+
+def _pot_partial_frac(n) -> float | None:
+    """Zincirin kismi kar kesri: motorun strateji ayari (`partial_close_fraction`; 1D 22.11'den beri None, 1W 0.5).
+    22.11'den once dolmus zincir eski kuralla (0.5) kapanir -- mesaji o kurala gore gitti."""
+    fa = getattr(n, "filled_at", None)
+    if fa is not None and fa.replace(tzinfo=None) < POT_PARTIAL_OFF_SINCE:
+        return 0.5
+    cfg = STRATEGY_CFG.get(getattr(n, "strategy", None) or "") or {}
+    f = cfg.get("partial_close_fraction")
+    return float(f) if f else None
+
+
 def pot_step_bar(n: PotentialNotice, bar_ts: datetime, high: float, low: float, ltf: timedelta) -> list[str]:
     """Zincirin fiyat adimi (saf; DB / Telegram yok). Donus: olaylar ("fill", "result").
 
     Motorun kurallari: dolum mumunda yalniz orijinal SL (mum ici sira bilinmez) · dolumdan sonra TP yolunun
-    %50'si gorulunce yarisi kapanir, kalan SL girise -- BE tetik mumundan SONRAKI mumdan gecerli (koruma geriye
-    uygulanmaz) · ayni mumda stop ve TP -> stop. R: tp 0.75 x RR (yarisi %50'de), be50 0.25 x RR, sl -1.
+    %50'si gorulunce SL girise (`partial_at` = o mum) -- kismi kar aciksa (`_pot_partial_frac`, 1W) yarisi da o seviyeden
+    kapanir; BE tetik mumundan SONRAKI mumdan gecerli (koruma geriye uygulanmaz) · ayni mumda stop ve TP -> stop.
+    R: kismi kar acik (f = 0.5): tp 0.75 x RR, be50 0.25 x RR · kapali (22.11, 1D): tp RR, be 0 · sl -1.
     """
     ev: list[str] = []
     rr = float(n.rr or 0.0)
@@ -1472,12 +1520,19 @@ def pot_step_bar(n: PotentialNotice, bar_ts: datetime, high: float, low: float, 
     if n.state == "fill":
         if n.filled_at is not None and bar_ts.replace(tzinfo=None) <= n.filled_at:
             return ev   # dolum mumu zaten islendi
-        partial = n.partial_at is not None
+        partial = n.partial_at is not None          # %50 goruldu -> BE (kismi kar aciksa yarisi da alindi)
+        frac = _pot_partial_frac(n)
         stop_hit = hit_sl if not partial else (low <= n.entry if n.direction == "LONG" else high >= n.entry)
         if stop_hit:
-            _done("be50", round(0.25 * rr, 2)) if partial else _done("sl", -1.0)
+            if not partial:
+                _done("sl", -1.0)
+            elif frac:
+                _done("be50", round(frac * 0.5 * rr, 2))
+            else:
+                _done("be", 0.0)
         elif hit_tp:
-            _done("tp", round(0.75 * rr, 2))
+            f_tp = frac if partial and frac else 0.0
+            _done("tp", round(f_tp * 0.5 * rr + (1.0 - f_tp) * rr, 2))
         elif hit_half and not partial:
             n.partial_at = bar_ts.replace(tzinfo=None)
     return ev
@@ -4263,39 +4318,57 @@ async def manage_symbol_on_price(
                 trail_frac = float(trail_frac) if trail_frac is not None else None  # None = trail kapali
                 partial_frac = prot.get("partial_close_fraction")
                 trail_r = prot.get("trail_arm_r")
-                if (be_r or be_frac) and not sig.partial_hit:
+                if be_r or be_frac:
+                    # 22.11 (kullanici karari, 4H): BE tetigi ile kismi kar AYRILDI. BE = TP yolunun
+                    # `be_arm_tp_fraction`'i ya da +`be_arm_r`R, hangisi once; kismi kar yalniz TP yolunun
+                    # `be_arm_tp_fraction`'inde (be_frac yoksa BE seviyesinde -- eski davranis). Gerekce: 4H'te
+                    # 54 SL'nin 13'u once >= +1R gordu, TP %50'sine varmadan dondu (IZLEME "4H FX girisi").
+                    frac_lvl = (
+                        _tp_path_level(sig.direction, entry, tp, float(be_frac)) if be_frac else None
+                    )
+                    frac_hit = frac_lvl is not None and _hits_level(
+                        sig.direction, high, low, frac_lvl, favorable=True,
+                    )
                     be_lvl = None
                     be_why = ""
-                    if be_frac:
-                        lvl = _tp_path_level(sig.direction, entry, tp, float(be_frac))
-                        if _hits_level(sig.direction, high, low, lvl, favorable=True):
-                            be_lvl, be_why = lvl, f"TP yolunun %{int(float(be_frac) * 100)}'i"
-                    if be_lvl is None and be_r:
-                        lvl = _r_price_level(sig.direction, entry, risk, float(be_r))
-                        if _hits_level(sig.direction, high, low, lvl, favorable=True):
-                            be_lvl, be_why = lvl, f"+{be_r}R"
-                    if be_lvl is not None:
-                        sig.partial_hit = True
+                    if not sig.partial_hit:
+                        if frac_hit:
+                            be_lvl, be_why = frac_lvl, f"TP yolunun %{int(float(be_frac) * 100)}'i"
+                        elif be_r:
+                            lvl = _r_price_level(sig.direction, entry, risk, float(be_r))
+                            if _hits_level(sig.direction, high, low, lvl, favorable=True):
+                                be_lvl, be_why = lvl, f"+{be_r}R"
+                        if be_lvl is not None:
+                            sig.partial_hit = True
+                            sig.stop_loss = entry
+                            # Bu andan ONCEKI mumlar cekilmis stopa tabi degil.
+                            sig.protection_armed_time = bar_ts or now
+                            changed = True
+                    # 22.11: `reached_50pct` = TP yolunun `be_frac`'i (kismi kar seviyesi) bu mumda ya da once goruldu --
+                    # kismi kar kapaliyken "alinsaydi" olcumu (scripts/partial_vs_be.py). TP mumunda set edilmez: motor da
+                    # o mumda kismi kar almazdi. be_frac yoksa eski anlam (BE acildi).
+                    if (frac_hit or (not be_frac and be_lvl is not None)) and not sig.reached_50pct:
                         sig.reached_50pct = True
-                        sig.stop_loss = entry
-                        # Bu andan ONCEKI mumlar cekilmis stopa tabi degil.
-                        sig.protection_armed_time = bar_ts or now
-                        partial_txt = ""
-                        if partial_frac and sig.partial_size is None:
-                            # Kismi kar: pozisyonun `partial_frac` kadari BE esiginde
-                            # (limit TP gibi) kapatilir; kalan kisim SL=entry ile devam.
-                            sig.partial_size = float(partial_frac)
-                            sig.partial_price = round(float(be_lvl), 8)
-                            sig.partial_rr = round(
-                                _rr_at_exit(sig.direction, entry, float(be_lvl), risk), 4,
-                            )
-                            sig.partial_time = bar_ts or now
-                            partial_taken.append(sig)
-                            partial_txt = (
-                                f" + %{int(sig.partial_size * 100)} kar alindi"
-                                f" (+{sig.partial_size * sig.partial_rr:.2f}R)"
-                            )
                         changed = True
+                    part_lvl = frac_lvl if be_frac else be_lvl
+                    part_hit = frac_hit if be_frac else be_lvl is not None
+                    partial_txt = ""
+                    if partial_frac and sig.partial_size is None and sig.partial_hit and part_hit:
+                        # Kismi kar: pozisyonun `partial_frac` kadari (limit TP gibi) kapatilir;
+                        # kalan kisim SL=entry ile devam.
+                        sig.partial_size = float(partial_frac)
+                        sig.partial_price = round(float(part_lvl), 8)
+                        sig.partial_rr = round(
+                            _rr_at_exit(sig.direction, entry, float(part_lvl), risk), 4,
+                        )
+                        sig.partial_time = bar_ts or now
+                        partial_taken.append(sig)
+                        partial_txt = (
+                            f" + %{int(sig.partial_size * 100)} kar alindi"
+                            f" (+{sig.partial_size * sig.partial_rr:.2f}R)"
+                        )
+                        changed = True
+                    if be_lvl is not None:
                         await record_event(
                             "be_arm",
                             f"BE acildi @{be_why} ({be_lvl}) SL->entry{partial_txt}",
@@ -4306,12 +4379,19 @@ async def manage_symbol_on_price(
                             "BE ARM: %s %s @%s level=%s",
                             sig.symbol, sig.direction, be_why, be_lvl,
                         )
-                        if partial_txt:
-                            log.info(
-                                "PARTIAL: %s %s %.0f%% @%s (+%.2fR)",
-                                sig.symbol, sig.direction, sig.partial_size * 100,
-                                sig.partial_price, sig.partial_rr,
-                            )
+                    elif partial_txt:
+                        await record_event(
+                            "be_arm",
+                            f"Kismi kar @TP yolunun %{int(float(be_frac) * 100)}'i ({part_lvl}){partial_txt}",
+                            symbol=sig.symbol, direction=sig.direction,
+                            market_type=sig.market_type, level="info", session=session,
+                        )
+                    if partial_txt:
+                        log.info(
+                            "PARTIAL: %s %s %.0f%% @%s (+%.2fR)",
+                            sig.symbol, sig.direction, sig.partial_size * 100,
+                            sig.partial_price, sig.partial_rr,
+                        )
                 if not sig.trail_active and (trail_frac is not None or trail_r):
                     arm_lvl = (
                         _trail_arm_level(sig.direction, entry, tp, trail_frac)
@@ -4884,6 +4964,10 @@ async def on_candle_closed(bingx_symbol: str, timeframe: str, store: object) -> 
         async with async_session() as session:
             await journal.ensure_loaded(session, store, _journal_bingx)
             for strategy in strategies:
+                if strategy not in ENABLED_STRATEGIES:
+                    # 22.11: 1W kapali -- tespit yok (yeni setup / sinyal / potansiyel zincir dogmaz); listede kalir ki
+                    # 4h LTF'si acik 1W Journal satirlarini ve zincirlerini sonuclandirmaya devam etsin (asagi, ltf_strategy).
+                    continue
                 await detect_and_create_waiting(
                     session, bingx_symbol, frames, store=store, strategy=strategy,
                 )
@@ -5010,8 +5094,10 @@ async def run_scan(
     """
     if timeframe in (None, "", "all", "both"):
         strategies = list(ENABLED_STRATEGIES)
-    elif timeframe in STRATEGY_CFG:
+    elif timeframe in ENABLED_STRATEGIES:
         strategies = [timeframe]
+    elif timeframe in STRATEGY_CFG:
+        strategies = []   # 22.11: kapali strateji (1W) -- manuel tarama da yapmaz
     else:
         strategies = [STRATEGY_4H]
 

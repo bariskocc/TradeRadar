@@ -101,9 +101,20 @@ def _signal_realized_rr(signal) -> float | None:
 scan_state: dict = {"running": False, "last_run": None, "last_result": None}
 
 
+# 22.11 (kullanici): 1W-4H stratejisi kapatildi (config.W1_ENABLED) -- butun sayfalardan (Dashboard, Signals, Open Signals,
+# Radar, Calendar, Analytics, Journal, Eliminated, Potential, Score Table, Charts isaretleri) ve TOPLAM R'den cikar.
+# Kayitlar DB'de duruyor. 1H (28.09 kapali) bu listede DEGIL: gecmis islemleri sayilmaya devam ediyor.
+HIDDEN_TFS = ("1w",)
+
+
+def _visible_tf():
+    """Sinyal sorgularina eklenen kosul: gizli strateji (1W) disi. timeframe NULL = eski 4H kayit."""
+    return or_(Signal.timeframe.is_(None), Signal.timeframe.notin_(HIDDEN_TFS))
+
+
 def _parse_tf(raw: str | None) -> str:
     v = (raw or "").strip().lower()
-    if v in ("1d", "1h", "1w", "sd", "sd1h", "sd15m"):
+    if v in ("1d", "1h", "sd", "sd1h", "sd15m"):
         return v
     return "4h"
 
@@ -426,9 +437,9 @@ _TSI = timezone(TSI_OFFSET)
 # Kismi kar (%50'de yari + BE) vs sadece BE karsilastirmasi: bu kadar kismi karli islem birikince
 # Dashboard "Dikkat" panosu olcumu hatirlatir (scripts/partial_vs_be.py). Karar kurali ve sinirlar:
 # IZLEME.md -> "Kismi kar vs BE-only". Olcum yapilinca esigi yukselt ya da hatirlatmayi kaldir.
-PARTIAL_REVIEW_MIN_TRADES = 100   # 03.10 (kullanici): 25 -> 100
+PARTIAL_REVIEW_MIN_TRADES = 150   # 03.10 (kullanici): 25 -> 100; 22.11: 100 -> 150 (kismi kar 4H/1D'de kapandi)
 # 1H-5M 28.09'da kapandi (1W-4H geldi); gecmis 1H islemleri Signals sayfasinda duruyor.
-_DASH_TFS = ("4h", "1d", "1w")
+_DASH_TFS = ("4h", "1d")   # 22.11: 1W kapatildi (HIDDEN_TFS)
 # "FX" = kripto disi tum seans sembolleri (fx/metal/endeks/petrol).
 _DASH_MARKETS = (
     ("crypto", "Crypto", ("crypto",)),
@@ -664,13 +675,13 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
         status, status_label = "ok", "Healthy"
 
     totals = (await db.execute(
-        select(func.count(), func.sum(Signal.rr_value)).where(Signal.result.isnot(None))
+        select(func.count(), func.sum(Signal.rr_value)).where(Signal.result.isnot(None), _visible_tf())
     )).one()
     # W/L/BE: _trade_outcome ile ayni kural (kismi karli BE -> BE).
     outcome_n = {"win": 0, "loss": 0, "breakeven": 0}
     for res, ex, n in (await db.execute(
         select(Signal.result, Signal.exit_reason, func.count())
-        .where(Signal.result.isnot(None)).group_by(Signal.result, Signal.exit_reason)
+        .where(Signal.result.isnot(None), _visible_tf()).group_by(Signal.result, Signal.exit_reason)
     )).all():
         key = "breakeven" if ex == "be" else res
         outcome_n[key] = outcome_n.get(key, 0) + int(n)
@@ -700,7 +711,7 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
     open_rows = open_ctx["rows"][:8]
 
     res = await db.execute(
-        select(Signal).where(Signal.result.isnot(None)).order_by(Signal.closed_at.desc()).limit(6)
+        select(Signal).where(Signal.result.isnot(None), _visible_tf()).order_by(Signal.closed_at.desc()).limit(6)
     )
     recent_closed = []
     for s in res.scalars().all():
@@ -758,6 +769,16 @@ async def _dashboard_live_context(db: AsyncSession) -> dict:
             Signal.partial_rr.is_not(None),
         )
     )
+    # 22.11: kismi kar 4H/1D'de kapandi -- "alinsaydi" kolu da sayilir (TP yolunun %50'sini gormus kismi karsiz islem).
+    partial_done = (partial_done or 0) + (await db.scalar(
+        select(func.count(Signal.id)).where(
+            Signal.closed_at.is_not(None),
+            Signal.partial_size.is_(None),
+            Signal.reached_50pct.is_(True),
+            Signal.timeframe.in_(("4h", "1d")),
+            Signal.entry_filled_time >= datetime(2026, 11, 22),
+        )
+    ) or 0)
     if (partial_done or 0) >= PARTIAL_REVIEW_MIN_TRADES:
         _add("info", None,
              f"Partial profit vs BE-only: {partial_done} trades collected — "
@@ -800,7 +821,7 @@ async def dashboard(
         prev_start, prev_end, _ = _period_range(kind, offset - 1, now)
 
     result = await db.execute(
-        select(Signal).where(Signal.status.notin_(["waiting_entry", "pending_cisd"]))
+        select(Signal).where(Signal.status.notin_(["waiting_entry", "pending_cisd"]), _visible_tf())
     )
     all_signals = result.scalars().all()
     # (kapanis ani, sinyal): donem ozeti ve kartlardaki "son 7 gun" isleme kapandigina gore bakar.
@@ -881,7 +902,7 @@ async def _render_signals_page(
 
     # Tek sayfada uc strateji (TF sutunu); tf yalniz istege bagli filtre (14.09).
     tf = (tf or "all").strip().lower()
-    tf = tf if tf in ("4h", "1d", "1w", "1h") else "all"
+    tf = tf if tf in ("4h", "1d", "1h") else "all"
     arrival_date_col = Signal.created_at
 
     # Arrival date varsayilani: bu haftanin Pazartesi'si (TSI). Parametre HIC yoksa uygulanir;
@@ -911,7 +932,7 @@ async def _render_signals_page(
             return None
 
     # Sekme DISINDAKI tum filtreler: liste ve sekme sayaclari ayni kosullarla sayilir.
-    conds = []
+    conds = [_visible_tf()]
     if tf != "all":
         conds.append(_tf_filter(tf))
     if selected_markets:
@@ -1159,8 +1180,8 @@ def _fmt_age(ts) -> str:
 
 async def _open_signals_context(db: AsyncSession, tab: str, tf: str) -> dict:
     tab = tab if tab in ("all", "active", "waiting") else "all"
-    tf = tf if tf in ("all", "4h", "1d", "1w", "1h") else "all"
-    result = await db.execute(select(Signal).where(Signal.status.in_(_OPEN_STATUSES)))
+    tf = tf if tf in ("all", "4h", "1d", "1h") else "all"
+    result = await db.execute(select(Signal).where(Signal.status.in_(_OPEN_STATUSES), _visible_tf()))
     open_signals = result.scalars().all()
 
     def _tf_of(s) -> str:
@@ -1380,12 +1401,12 @@ async def calendar_page(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
     from app.signal_calendar import build_month, _day
-    tf = tf if tf in ("all", "4h", "1d", "1w") else "all"
+    tf = tf if tf in ("all", "4h", "1d") else "all"
     market = market if market in ("all", "crypto", "fx") else "all"
     offset = max(-520, min(0, offset))
     start, end, label = _period_range("month", offset)
     naive = lambda dt: dt.replace(tzinfo=None)  # noqa: E731
-    conds = []
+    conds = [_visible_tf()]
     if tf != "all":
         conds.append(_tf_filter(tf))
     if market == "crypto":
@@ -1536,7 +1557,7 @@ async def _journal_context(db: AsyncSession, tf: str, stage: str, symbol: str, d
     from app import setup_journal as journal
     from app.models import SetupJournal
 
-    tf = tf if tf in ("all", "4h", "1d", "1w", "1h", "sd", "sd1h", "sd15m") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1h", "sd", "sd1h", "sd15m") else "all"
     stage = stage if stage in journal.STAGE_LABELS else "all"
     days = days if days in (1, 3, 7, 30, 90) else 7
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
@@ -1545,7 +1566,7 @@ async def _journal_context(db: AsyncSession, tf: str, stage: str, symbol: str, d
         filters.append(SetupJournal.strategy == tf)
     else:
         # Supply / Demand (03.11) CRT'yle karismasin: "All" = uc CRT stratejisi, S/D kendi sekmesinde.
-        filters.append(SetupJournal.strategy.notin_(("sd", "sd1h", "sd15m")))
+        filters.append(SetupJournal.strategy.notin_(("sd", "sd1h", "sd15m") + HIDDEN_TFS))   # 22.11: 1W gizli
     if symbol:
         filters.append(SetupJournal.symbol.ilike(f"%{symbol}%"))
     # Min skor (04.10, kullanici istegi): DETAIL sutununda GORUNEN skor ("score N · ..."). `score`
@@ -1870,7 +1891,7 @@ async def api_chart_signals(request: Request, db: AsyncSession = Depends(get_db)
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=180)
     rows = (await db.execute(
         select(Signal).where(
-            Signal.symbol == symbol,
+            Signal.symbol == symbol, _visible_tf(),
             or_(Signal.status.in_(_OPEN_STATUSES), Signal.closed_at >= since),
         ).order_by(desc(Signal.id)).limit(200)
     )).scalars().all()

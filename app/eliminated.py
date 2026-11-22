@@ -203,7 +203,8 @@ def _base_filters(tf: str, market: str, days: int, symbol: str) -> list:
     if tf != "all":
         flt.append(t.strategy == tf)
     else:
-        flt.append(t.strategy.notin_(("sd", "sd1h", "sd15m")))   # S/D (03.11) kendi sekmesinde okunur, CRT ozetine karismaz
+        # S/D (03.11) kendi sekmesinde okunur, CRT ozetine karismaz; 1W 22.11'de kapatildi (main.HIDDEN_TFS)
+        flt.append(t.strategy.notin_(("sd", "sd1h", "sd15m", "1w")))
     if market == "crypto":
         flt.append(t.market_type == "crypto")
     elif market == "fx":
@@ -217,7 +218,8 @@ def _base_filters(tf: str, market: str, days: int, symbol: str) -> list:
 
 async def _signal_reference(db: AsyncSession, tf: str, market: str, days: int) -> dict:
     """Ayni donemde gercekten acilan sinyaller (kapanis zamanina gore): W/L/BE + gercek R -- kiyas icin."""
-    flt = [Signal.closed_at.is_not(None), Signal.result.is_not(None)]
+    flt = [Signal.closed_at.is_not(None), Signal.result.is_not(None),
+           or_(Signal.timeframe.is_(None), Signal.timeframe != "1w")]   # 22.11: 1W kapatildi
     if tf != "all":
         flt.append(Signal.timeframe == tf)
     if market == "crypto":
@@ -246,7 +248,7 @@ async def _signal_reference(db: AsyncSession, tf: str, market: str, days: int) -
 
 async def build_eliminated(db: AsyncSession, *, tf: str = "all", market: str = "all", days: int = 30,
                            gate: str = "all", result: str = "all", symbol: str = "", page: int = 1) -> dict:
-    tf = tf if tf in ("all", "4h", "1d", "1w", "1h") else "all"
+    tf = tf if tf in ("all", "4h", "1d", "1h") else "all"   # 22.11: 1W kapatildi
     market = market if market in ("all", "crypto", "fx") else "all"
     days = days if days in DAYS_CHOICES else 30
     gate = gate if gate in GATE_LABELS else "all"

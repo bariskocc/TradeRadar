@@ -334,10 +334,12 @@ async def send_signal_void(
 # ──────────────────── 1D / 1W potansiyel zinciri (11.11) ────────────────────
 # Motorun ALMADIGI ama kaliteli 1D/1W setup: CRT -> WAITING -> girise degdi -> sonuc. Sonuc motorun kuraliyla
 # (%50'de yarisi + kalan BE), mesajdaki seviyelerden, islem acilmasa da. Durum `potential_notices`ta.
+# 22.11: 1D'de kismi kar kapandi -> %50'de yalniz BE, girise donus "BE 0R" (scanner._pot_partial_frac).
 _POT_RESULT = {
     "tp": ("✅", "TP"),
     "tp_nofill": ("✅", "TP (no fill)"),
     "be50": ("\U0001f7e1", "50% + BE"),
+    "be": ("➖", "BE 0R"),
     "sl": ("❌", "SL"),
     "expired": ("⌛", "expired"),
 }

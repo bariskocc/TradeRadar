@@ -41,7 +41,7 @@
                     <div>
                         <label class="block text-xs text-gray-500 mb-1">STRATEJİ</label>
                         <select name="tf" class="w-28 px-3 py-2 bg-dark-700 border border-dark-600 rounded-lg text-sm text-white">
-                            {% for key, label in [('all', 'Hepsi'), ('4h', '4H'), ('1d', '1D'), ('1w', '1W')] %}
+                            {% for key, label in [('all', 'Hepsi'), ('4h', '4H'), ('1d', '1D')] %}
                             <option value="{{ key }}" {% if tf == key %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>

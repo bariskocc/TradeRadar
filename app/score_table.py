@@ -37,7 +37,7 @@ from app.setup_journal import PRE_SETUP_STAGES
 
 log = logging.getLogger(__name__)
 
-TABS = (("4h", "4H-15M"), ("1d", "1D-1H"), ("1w", "1W-4H"))
+TABS = (("4h", "4H-15M"), ("1d", "1D-1H"))   # 22.11: 1W-4H kapatildi (config.W1_ENABLED); kalemleri kodda duruyor
 
 # Skor kuralinin bu stratejide son degistigi gun: saglik penceresi bundan once baslamaz
 # (eski kuralla yazilmis satirlar yanlis alarm verir). Skor degisince guncelle.
@@ -280,8 +280,18 @@ def _trade_plan(strategy: str) -> dict:
     entry += " · bekleyen emir duyurulduktan sonra derine taşınmaz"
     frac = float(cfg.get("stop_frac") or 1.0)
     stop = "Purge ucu (%100)" if frac >= 1.0 else f"Girişten purge ucuna mesafenin %{frac * 100:.0f}'i"
+    # 22.11: koruma da STRATEGY_CFG'den (4H +1R BE; kismi kar TP yolunun kesrinde)
+    be_frac, be_r = cfg.get("be_arm_tp_fraction"), cfg.get("be_arm_r")
+    part = cfg.get("partial_close_fraction")
+    be_txt = " ya da ".join(x for x in (
+        f"TP yolunun %{float(be_frac) * 100:g}'si" if be_frac else "",
+        f"+{float(be_r):g}R" if be_r else "") if x)
+    protect = f"BE: {be_txt} (hangisi önce)" if be_frac and be_r else (f"BE: {be_txt}" if be_txt else "BE yok")
+    if part and be_frac:
+        protect += (" · kısmi kâr: " + ("yarısı" if float(part) == 0.5 else f"%{float(part) * 100:g}")
+                    + f", TP yolunun %{float(be_frac) * 100:g}'sinde")
     return {"code": strategy, "label": dict(TABS).get(strategy, strategy), "order": "Limit",
-            "entry": entry, "stop": stop}
+            "entry": entry, "stop": stop, "protect": protect}
 
 
 def _limits(strategy: str) -> dict:
@@ -339,8 +349,10 @@ def _filter_rows(strategy: str) -> list[dict]:
          "label": "Kripto: aynı setup'tan (C1 + C2 + yön) başka coinde sinyal olmamalı — muafiyet yok (28.10)",
          "stage": "same_setup", "on": bool(sc.SAME_SETUP_ONE_TRADE)},   # 1D/1W'de de BTC/ETH arasinda
         {"group": "Kapı",
-         "label": f"C2 ucunun ≤ {sc.LIQ_NEAR_MAX_ATR:g} ATR ötesinde alınmamış likidite varsa önce o süpürülmeli; "
-                  "süpürülünce giriş yeni uçtan (SL yeni uç) — 28.10",
+         "label": f"C2 ucunun ≤ {sc.LIQ_NEAR_MAX_ATR:g} ATR ötesinde alınmamış HTF likidite"
+                  + (f" ya da ≤ {sc.LTF_LIQ_NEAR_MAX_ATR:g} ATR ötesinde alınmamış büyük LTF swing'i (13.11)"
+                     if sc.LTF_LIQ_SWEEP_ENABLED else "")
+                  + " varsa önce o süpürülmeli; süpürülünce giriş yeni uçtan (SL yeni uç) — 28.10",
          "stage": "liq_unswept", "on": strategy in sc.LIQ_SWEEP_REQUIRED_TFS},
         {"group": "Kapı", "label": "CISD / MSS onayı ve giriş seviyesi olmalı", "stage": "no_cisd", "on": True},
         {"group": "Kapı", "label": f"RR ≥ {rr:g}", "stage": "low_rr", "on": True},
