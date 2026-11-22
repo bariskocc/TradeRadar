@@ -5159,7 +5159,10 @@ async def run_scan(
                         elif strategy == STRATEGY_1D:
                             from app import sd_scanner
                             sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd1h")
-                            sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd15m")
+                            if is_w1_symbol(bingx_symbol):
+                                # 22.11 (kullanici): 15m S/D altcoinsiz -- 11.11'de 1D'ye altcoin eklenince bu yol onlari da
+                                # tariyordu (canli 15m yolu is_w1_symbol ile zaten eliyordu). Altcoin 15m: 141 islem +3.2R.
+                                sd_scanner.evaluate_symbol(bingx_symbol, frames, strategy="sd15m")
 
                         df_ltf = frames.get(cfg["ltf"])
                         display_symbol = to_display_symbol(bingx_symbol)

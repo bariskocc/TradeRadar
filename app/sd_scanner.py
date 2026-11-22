@@ -4,7 +4,7 @@
 cagirir (ikisi de run_scan'de de). Burada sinyal / Telegram yok: her canli bolge Setup Journal'a bir satir
 (anahtar: strateji `sd` + sembol + yon + base'in ilk mumu), Radar'in S/D sekmesine sembol basina en iyi bolge.
 
-Kapilar (olcum; Journal `best_stage`): sd_dead < sd_bias < sd_no_target < sd_low_rr < sd_ready.
+Kapilar (olcum; Journal `best_stage`): sd_dead < sd_bias < sd_no_target < sd_low_rr < (15m: sd_long_base < sd_low_score) < sd_ready.
 Seviyeler (proximal / distal+tampon / hedef) kapidan bagimsiz Journal'a verilir ki kapinin eledigi bolgenin
 sonrasi da olculsun (CRT'deki gibi). Olu bolge yalniz Journal'da zaten satiri varsa not edilir.
 """
@@ -41,11 +41,16 @@ SD_CFG = {
 ALL = tuple(SD_CFG)
 
 # Radar siralamasi icin kapi onceligi (yuksek = daha ileri).
-_STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_near": 4.5, "sd_slow": 4.5, "sd_ready": 5}
+_STAGE_RANK = {"sd_dead": 0, "sd_bias": 1, "sd_no_target": 2, "sd_far": 3, "sd_low_rr": 4, "sd_long_base": 4.2, "sd_low_score": 4.3,
+               "sd_near": 4.5, "sd_slow": 4.5, "sd_ready": 5}
+# 22.11 (kullanici karari, 15m WR analizi): 15m'de skor filtresi + en fazla 3 mumluk base. Elenen bolge seviyeli izlenir (olcum, Signals'a
+# girmez). Altcoinsiz 303 islem: bugun WR %32 +20R -> 213 islem WR %37 +48R (duzeltilmis skor >= 4 + base <= 3). 4H / 1H'te kapi yok.
+SCORE_GATE = {"sd15m": 4}
+BASE_GATE_MAX = {"sd15m": 3}
 NEAR_STAGE = "sd_near"   # 05.11: cikis govdesi NEAR_LEG_BODY_ATR..LEG_BODY_MIN_ATR -- kapilari gecse de Signals'a girmez (olcum)
 SLOW_STAGE = "sd_slow"   # 10.11: cikis mumu govdesi < NEAR_LEG_BODY_ATR ama 3 mumda >= 2 ATR (NZDUSD 4H 05.11 tepesi) -- olcum
 ALT_STAGE = {"near": NEAR_STAGE, "slow": SLOW_STAGE}      # olcum kollari: kapilari gecen bolge bu asamayla yazilir
-LEVEL_STAGES = ("sd_ready", NEAR_STAGE, SLOW_STAGE)       # seviye verilen asamalar
+LEVEL_STAGES = ("sd_ready", NEAR_STAGE, SLOW_STAGE, "sd_long_base", "sd_low_score")   # seviye verilen asamalar (22.11: 15m kapilari olcum)
 
 
 def _near_zones(closed: pd.DataFrame, zones: list) -> list:
@@ -89,7 +94,7 @@ def week_close(store, now=None) -> int:
     return n
 
 
-def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
+def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None, strategy: str | None = None, parts: dict | None = None) -> str:
     if z.dead:
         return "sd_dead"
     if BIAS_GATE and not sde.bias_aligned(z.direction, bias):
@@ -103,6 +108,10 @@ def _gate(z: sde.SDZone, plan: sde.SDPlan, bias: str | None) -> str:
         return "sd_far"
     if plan.rr is None or plan.rr < sde.MIN_RR:
         return "sd_low_rr"
+    if strategy in BASE_GATE_MAX and z.base_bars > BASE_GATE_MAX[strategy]:
+        return "sd_long_base"
+    if strategy in SCORE_GATE and parts is not None and parts["score"] < SCORE_GATE[strategy]:
+        return "sd_low_score"
     return "sd_ready"
 
 
@@ -147,7 +156,8 @@ def evaluate_symbol(bingx_symbol: str, frames: dict, now=None, strategy: str = S
             plan = sde.plan_zone(z, zones, closed, last_close)
             parts = sde.score_zone(z, bias)
             feats = sde.zone_features(z, last_close, age, plan)
-            stage = _gate(z, plan, bias)
+            feats["score_v1"] = sde.score_v1(z, bias)
+            stage = _gate(z, plan, bias, strategy, parts)
             if kind:
                 feats[kind] = 1
                 stage = ALT_STAGE[kind] if stage == "sd_ready" else stage
@@ -243,12 +253,13 @@ def _backfill_zone(strategy, display, market, z, closed, df15, df1d, delta, now,
         if df1d is not None and not df1d.empty:
             d1p = df1d[df1d.index <= t]
             bias_at = compute_daily_bias(d1p) if not d1p.empty else "NEUTRAL"
-        stage_at = _gate(twin, plan_at, bias_at)
+        parts_at = sde.score_zone(twin, bias_at)
+        stage_at = _gate(twin, plan_at, bias_at, strategy, parts_at)
         if kind:
             stage_at = ALT_STAGE[kind] if stage_at == "sd_ready" else stage_at
         lv = plan_at.tp is not None and stage_at in LEVEL_STAGES
-        parts_at = sde.score_zone(twin, bias_at)
         feats_at = sde.zone_features(twin, last_close, _bars_since(past, twin.base_start), plan_at)
+        feats_at["score_v1"] = sde.score_v1(twin, bias_at)
         if kind:
             feats_at[kind] = 1
         skip_note = bool(kind) and stage_at != ALT_STAGE[kind] and not journal.has_record(strategy, display, twin.direction, twin.base_start)

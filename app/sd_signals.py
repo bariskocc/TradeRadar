@@ -16,11 +16,12 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import SetupJournal
 from app import sd_confirm
+from app import sd_engine as sde
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ DIRECTION_FILTERS = [("all", "All"), ("long", "Long"), ("short", "Short")]
 STATUS_FILTERS = [("all", "All"), ("waiting", "Waiting"), ("filled", "Filled"), ("closed", "Closed")]
 # 05.11 (kullanici): ana giris LTF onay + retest olan stratejiler (sd_confirm kolu olanlar)
 MAIN_CONFIRM = tuple(sd_confirm.STRATEGIES)
+ALT_EXEMPT = ("BTCUSDT.P", "ETHUSDT.P")   # 15m'de kalan kripto (22.11: altcoin 15m satirlari gizli)
 # 05.11 (kullanici): sonuc ve LTF onay sonucu filtreleri -- filtre -> eslesen outcome kumesi
 RESULT_FILTERS = [("all", "All"), ("tp", "TP"), ("sl", "SL"), ("no_trade", "No trade (zone failed / invalidated / no sweep / no retest / RR < 2)"),
                   ("week_close", "Week close"), ("expired", "Expired"), ("other", "Same bar / missed")]
@@ -220,8 +222,8 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
     tab, status_label, status_color, result_label, result_color = _OUTCOME.get(oc, _OUTCOME["pending"])
     if confirm_main and oc == "pending":
         status_label = "Waiting zone"            # bolgeye dokunus = uyari, emir degil
-    if confirm_main and oc == "wait_choch" and "sw_lv" in sdc and not sdc.get("sw_lv"):
-        status_label = "Waiting LTF sweep"       # 07.11: once likidite alinmali
+    if confirm_main and oc == "wait_choch" and sd_confirm.SWEEP_CHOCH and "sw_lv" in sdc and not sdc.get("sw_lv"):
+        status_label = "Waiting LTF sweep"       # 07.11: once likidite alinmali (22.11'den beri sart kapali)
     price = price_fn(r.symbol) if tab in ("waiting", "filled") else None
     live_r = dist_r = None
     if price is not None and entry is not None and risk > 0:
@@ -276,6 +278,8 @@ def _row_view(r: SetupJournal, price_fn) -> dict:
         # 07.11 (kullanici): sweep sonrasi LTF CHOCH displacement'la geldiyse etiket (filtre degil)
         "ltf_disp": sd_confirm.is_disp(sdc), "ltf_disp_x": sdc.get("bdisp"), "pd_ok": f.get("pd_ok"), "pd_pos": f.get("pd_pos"),
         "score": int(r.score) if r.score is not None else None,
+        # 22.11: skor "5/6" -- 22.11 duzeltmesinden onceki satirlar eski olcekte (tavan 9; yenilerde features.score_v1 var)
+        "score_max": sde.MAX_SCORE if "score_v1" in f else 9,
         "entry": entry, "sl": sl, "tp": tp, "rr": rr, "rr_struct": tgt_rs, "target_kind": tgt_kind,
         "price": price, "live_r": live_r, "dist_r": dist_r, "final_r": final_r,
         "tab": tab, "status_label": status_label, "status_color": status_color,
@@ -301,6 +305,8 @@ async def build_sd_signals(
     price_fn = price_fn or _live_price
     t = SetupJournal
     where = [t.strategy.in_(STRATEGIES), t.best_stage == "sd_ready", t.entry.is_not(None)]
+    # 22.11 (kullanici): 15m altcoinsiz -- 11.11-22.11 arasi sizan altcoin 15m satirlari toplamlardan da cikar (Journal'da duruyor)
+    where.append(not_(and_(t.strategy == "sd15m", t.symbol.like("%USDT.P"), t.symbol.not_in(ALT_EXEMPT))))
     if tf != "all":
         where.append(t.strategy == tf)
     if market == "crypto":

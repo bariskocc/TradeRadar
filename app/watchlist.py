@@ -2657,6 +2657,80 @@ async def _p_sd_sweep_gate(db: AsyncSession) -> Progress:
                     note="sonuç bölge limiti kolundan (aynı bölge, işlem değil) · 07.11 sonrası akış")
 
 
+async def _p_sd_nosweep_live(db: AsyncSession) -> Progress:
+    """22.11 (kullanici): 4H / 1H LTF onay kolunda sweep sarti kalkti (sd_confirm.SWEEP_CHOCH = False). Replay 1H'te +56R / 35 islem
+    dedi (33'u altcoin, 13.11 tek hareket yarisi). Canlida tutuyor mu: levels_at >= 23.11 satirlarin onay kolu islemleri (entries.sdc),
+    strateji ve 1H'te altcoin / diger ayri. R = sd_confirm.final_r (hafta kapanisi dahil)."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.strategy, t.c.symbol, t.c.entries, t.c.levels_at).where(
+        t.c.strategy.in_(("sd", "sd1h")), t.c.best_stage == "sd_ready", t.c.levels_at >= datetime(2026, 11, 23)))).all()
+    acc: dict[str, list] = {}
+    for st_, sym, ents, lv in rows:
+        try:
+            sd_ = (json.loads(ents or "{}")).get(sc.SDC_KEY) or {}
+        except Exception:
+            continue
+        if sd_.get("o") not in ("win", "loss", "week_close"):
+            continue
+        r_ = sc.final_r(sd_)
+        if r_ is None:
+            continue
+        alt = str(sym).endswith(".P") and sym not in ("BTCUSDT.P", "ETHUSDT.P")
+        acc.setdefault(st_, []).append((lv, r_))
+        if st_ == "sd1h":
+            acc.setdefault("sd1h_alt" if alt else "sd1h_maj", []).append((lv, r_))
+    table = [["Strateji", "İşlem", "W / L", "R", "R/işlem", "1. yarı", "2. yarı"]]
+    names = {"sd": "S/D 4H", "sd1h": "S/D 1H", "sd1h_alt": "  1H · altcoin", "sd1h_maj": "  1H · BTC/ETH + FX/CME"}
+    for k in ("sd", "sd1h", "sd1h_alt", "sd1h_maj"):
+        xs = sorted(acc.get(k, []), key=lambda x: x[0] or datetime.min)
+        rs = [x[1] for x in xs]
+        if not rs:
+            continue
+        w, l, h = sum(1 for x in rs if x > 0), sum(1 for x in rs if x < 0), len(rs) // 2
+        table.append([names[k], str(len(rs)), f"{w} / {l}", f"{sum(rs):+.1f}", f"{sum(rs) / len(rs):+.2f}",
+                      f"{sum(rs[:h]):+.1f}", f"{sum(rs[h:]):+.1f}"])
+    return Progress(bars=[Bar("S/D 1H onay kolu işlemi (çözülmüş)", len(acc.get("sd1h", [])), 30),
+                          Bar("S/D 4H onay kolu işlemi (çözülmüş)", len(acc.get("sd", [])), 15)], table=table,
+                    note="levels_at ≥ 23.11 · sweep şartsız akış · replay beklentisi 1H ~+1,6 R/işlem (korele altcoin hareketi şişirir)")
+
+
+async def _p_sd15m_filter_live(db: AsyncSession) -> Progress:
+    """22.11 (kullanici): 15m'de duzeltilmis skor >= 4 + base <= 3 mum filtresi (sd_scanner.SCORE_GATE / BASE_GATE_MAX). Elenen
+    bolgeler seviyeli izleniyor (sd_low_score / sd_long_base). levels_at >= 23.11; bolge limiti, R = TP rr / SL -1 / hafta kapanisi."""
+    from app import sd_confirm as sc
+    t = _journal_table()
+    rows = (await db.execute(select(t.c.best_stage, t.c.outcome, t.c.rr, t.c.entries, t.c.entry, t.c.sl, t.c.direction, t.c.levels_at).where(
+        t.c.strategy == "sd15m", t.c.best_stage.in_(("sd_ready", "sd_low_score", "sd_long_base")),
+        t.c.levels_at >= datetime(2026, 11, 23), t.c.outcome.in_(("win", "loss", "week_close"))))).all()
+    acc: dict[str, list] = {}
+    for stg, o, rr, ents, e, sl, d, lv in rows:
+        if o == "week_close":
+            try:
+                px = (json.loads(ents or "{}").get("_wc") or {}).get("px")
+            except Exception:
+                px = None
+            r_ = sc.week_close_r(e, sl, px, d)
+        else:
+            r_ = float(rr or 0) if o == "win" else -1.0
+        if r_ is not None:
+            acc.setdefault(stg, []).append((lv, r_))
+    acc["elenen (iki kapı)"] = acc.get("sd_low_score", []) + acc.get("sd_long_base", [])
+    table = [["Grup", "İşlem", "W / L", "WR", "R", "R/işlem", "1. yarı", "2. yarı"]]
+    names = {"sd_ready": "geçen (sd_ready)", "sd_low_score": "skor < 4", "sd_long_base": "base > 3 mum", "elenen (iki kapı)": "elenen toplam"}
+    for k in ("sd_ready", "sd_low_score", "sd_long_base", "elenen (iki kapı)"):
+        xs = sorted(acc.get(k, []), key=lambda x: x[0] or datetime.min)
+        rs = [x[1] for x in xs]
+        if not rs:
+            continue
+        w, l, h = sum(1 for x in rs if x > 0), sum(1 for x in rs if x < 0), len(rs) // 2
+        table.append([names[k], str(len(rs)), f"{w} / {l}", f"%{100 * w / len(rs):.0f}", f"{sum(rs):+.1f}",
+                      f"{sum(rs) / len(rs):+.2f}", f"{sum(rs[:h]):+.1f}", f"{sum(rs[h:]):+.1f}"])
+    return Progress(bars=[Bar("S/D 15m geçen bölge (çözülmüş)", len(acc.get("sd_ready", [])), 100),
+                          Bar("S/D 15m elenen bölge (çözülmüş)", len(acc["elenen (iki kapı)"]), 30)], table=table,
+                    note="levels_at ≥ 23.11 · altcoinsiz · bölge limiti · analiz beklentisi: geçen WR %36–37, elenen ~%20")
+
+
 async def _p_sd_partial_be(db: AsyncSession) -> Progress:
     """07.11 (kullanici, EURJPY 15m): S/D 15m'de TP yolunun %50'sinde yarisi kapansin + kalan BE mi? Ana islemin Journal golgesi
     (shadow k=1) motorun CRT kuralini zaten isletiyor (`_apply_partial_arm`: `pa` tetik, `cur` = kalan yarinin sonu tp / be / amb).
@@ -3969,7 +4043,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_score_items,
     ),
     WatchItem(
-        key="sd_target_model", status="open", started="05.11", onem=1, group="sd",
+        key="sd_target_model", status="done", started="05.11", onem=1, group="sd",
+        result="(22.11) EN YAKIN ENGEL KALIR (kullanıcı onayı): karşı S/D bölgesi her TF'de çok geride — 4H 1 TP / 33 SL −0,92, 1H −0,22 / −0,00, 15m −0,20 / +0,01 R/işlem.",
         title="S/D hedef: en yakın engel mi, karşı S/D bölgesi mi?",
         trigger="iki kolu da çözülmüş 60 bölge: karşı-bölge kolu R/işlemde ≥ +0,15 ileride VE iki yarıda aynı yön → hedef karşı bölge "
                 "(bölge yoksa bugünkü kural); aksi halde en yakın engel kalır",
@@ -3987,7 +4062,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_near,
     ),
     WatchItem(
-        key="sd_slow_legout", status="open", started="10.11", onem=1, group="sd",
+        key="sd_slow_legout", status="done", started="10.11", onem=1, group="sd",
+        result="(22.11) ÖLÇÜM KOLU KALIR (kullanıcı onayı): 4H+1H yavaş çıkış WR %35 / ana %29 ama yarılarda tutmuyor (1. yarı %28 / %34 — 6 puan geride, 2. yarı %39 / %30); 15m %30 / %30, yarılar ters. Gövde şartı kalkmaz.",
         title="S/D yavaş çıkışlı base: tek mumu 1 ATR olmayan ama 3 mumda ≥ 2 ATR giden bölgeler de çalışıyor mu?",
         trigger="4H + 1H'te yavaş çıkışlı bölge (sd_slow) 30 çözülmüş: WR'si ana kuralınkinden en fazla 5 puan geride VE iki yarıda aynı "
                 "→ çıkış mumu gövde şartı kalkar (3 mumda ≥ 2 ATR yeter); 10 puandan fazla gerideyse ölçüm kolu kalır",
@@ -4005,7 +4081,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_origin,
     ),
     WatchItem(
-        key="sd_origin_1h", status="open", started="10.11", onem=1, group="sd",
+        key="sd_origin_1h", status="done", started="10.11", onem=1, group="sd",
+        result="(22.11) FARK YOK, ÖLÇÜM KALIR (kullanıcı onayı): 1H origin %32 (31) / ara duraklama %32 (243).",
         title="S/D: hareketi başlatan base mi, ara duraklama mı? — 1H",
         trigger="taraf başına 30 çözülmüş (bölge limiti): origin bölgelerin WR'si ara duraklamadan ≥ 10 puan iyi VE iki yarıda aynı → "
                 "origin skor kalemi / kapı adayı (karar kullanıcıda); fark yoksa ölçüm kalır",
@@ -4050,7 +4127,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd15m_disp,
     ),
     WatchItem(
-        key="sd_plan_0611", status="open", started="06.11", onem=1, group="sd",
+        key="sd_plan_0611", status="done", started="06.11", onem=1, group="sd",
+        result="(22.11) YENİ PLAN KALIR (kullanıcı onayı): 15m yeni +0,04 / eski +0,03 R/işlem (iki yarıda da aynı), geride değil; 4H/1H bölge limiti bilgi (+0,15 / +0,20, +0,04 / +0,07).",
         title="S/D planı 06.11 — 1,75 ATR stop + 2R TP tabanı eskisine göre tuttu mu?",
         trigger="15m'de iki plan da çözülmüş 30 bölge: yeni plan R/işlemde eskiden ≥ 0,15 geride VE iki yarıda aynı yön → eski plana "
                 "(1,5 ATR + ilk RR ≥ 2 engel) dönüş; aksi halde yeni plan kalır. 4H/1H bölge limiti satırları bilgi (ana işlem LTF onay kolu)",
@@ -4072,7 +4150,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_zone_wick,
     ),
     WatchItem(
-        key="sd_mid_entry", status="open", started="09.11", onem=1, group="sd",
+        key="sd_mid_entry", status="done", started="09.11", onem=1, group="sd",
+        result="(22.11) ORTA NOKTA KALIR (kullanıcı onayı): 15m orta nokta −0,06 / kenar −0,06 R/bölge (iki yarıda aynı), geride değil.",
         title="S/D büyük bölgede orta nokta girişi — kenardan iyi mi?",
         trigger="15m'de bölge ≥ 1,25 ATR, iki girişi de çözülmüş 30 bölge: orta nokta R/bölgede kenardan ≥ 0,15 geride VE iki yarıda "
                 "aynı yön → giriş kenara döner (MID_ENTRY_MIN_ATR = None) ya da eşik büyür; aksi halde kalır. 4H/1H bilgi",
@@ -4081,7 +4160,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_mid_entry,
     ),
     WatchItem(
-        key="sd_sweep_gate", status="open", started="07.11", onem=1, group="sd",
+        key="sd_sweep_gate", status="done", started="07.11", onem=1, group="sd",
+        result="(22.11) Sweep şartı KALDIRILDI (kullanıcı kararı, 4H + 1H, altcoin dahil) — replay 10.11–22.11 (FX hariç): 1H bugünkü "
+               "kural 4 işlem −0,6R, sweep'siz 35 işlem 25 TP / 10 SL +56R, iki yarıda artı (33'ü altcoin, 13.11 tek hareket +28,6R); "
+               "4H 0 → 5 işlem +2,1R. sd_confirm.SWEEP_CHOCH = False, geçersizlik kuralı aynen.",
         title="S/D LTF sweep şartı: sweep olmadan elenen bölgeler kazanan mı?",
         trigger="4H + 1H'te sweep'siz elenen, sonucu belli 30 bölge: bölge limiti R/bölgede sweep gelenlerden ≥ 0,15 önde VE iki yarıda "
                 "aynı yön → sweep şartı gevşetilir (etikete döner); aksi halde şart kalır",
@@ -4090,7 +4172,26 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_sweep_gate,
     ),
     WatchItem(
-        key="sd_partial_be", status="open", started="07.11", onem=1, group="sd",
+        key="sd_nosweep_live", status="open", started="22.11", onem=2, group="sd",
+        title="S/D LTF onay kolu sweep şartsız canlıda — tuttu mu?",
+        trigger="1H 30 + 4H 15 çözülmüş onay kolu işlemi (levels_at ≥ 23.11): R/işlem > 0 VE iki yarıda artı → kalır; 1H'te "
+                "artı yalnız altcoinden geliyorsa altcoin sorusu ayrıca açılır; eksi → sweep şartını geri alma kararı",
+        measure="/sd-izleme tablosu (Journal entries.sdc, sd_confirm.final_r)",
+        md="S/D LTF sweep + CHOCH yeniden tanımı (07.11.2026)",
+        progress_fn=_p_sd_nosweep_live,
+    ),
+    WatchItem(
+        key="sd15m_filter_live", status="open", started="22.11", onem=2, group="sd",
+        title="S/D 15m skor ≥ 4 + base ≤ 3 filtresi canlıda — tuttu mu?",
+        trigger="levels_at ≥ 23.11: geçen 100 + elenen 30 çözülmüş — elenenin WR'si geçenden ≥ 5 puan geride VE R/işlemi düşük, iki yarıda "
+                "aynı yön → filtre kalır; aksi halde eşik / base kuralı yeniden açılır",
+        measure="/sd-izleme tablosu (Journal sd15m best_stage sd_ready / sd_low_score / sd_long_base)",
+        md="S/D 15m: WR'yi ne ayırıyor — skor filtresi? (22.11.2026)",
+        progress_fn=_p_sd15m_filter_live,
+    ),
+    WatchItem(
+        key="sd_partial_be", status="done", started="07.11", onem=1, group="sd",
+        result="(22.11) DÜZ TP/SL KALIR (kullanıcı onayı): 445 işlemde kısmi + BE +0,02 / düz +0,05 R/işlem — önde değil.",
         title="S/D 15m: TP yolunun %50'sinde yarısı kapansın + kalan BE mi?",
         trigger="150 sonuçlanmış 15m işlem: kısmi + BE R/işlemde düz TP/SL'den ≥ 0,15 önde VE iki yarıda aynı yön → 15m'de açılır; "
                 "aksi halde düz TP/SL kalır (07.11 ilk okuma 73 işlemde −0,12 geride)",
@@ -4099,7 +4200,8 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_sd_partial_be,
     ),
     WatchItem(
-        key="sd_pd_compare", status="open", started="07.11", onem=1, group="sd",
+        key="sd_pd_compare", status="done", started="07.11", onem=1, group="sd",
+        result="(22.11) İKİ TANIM DA AYIRMIYOR (kullanıcı onayı): 'uygun' grup 72 mumda %28 / %32, swing aralığında %28 / %32 — rozet değişmez, puan adayı değil.",
         title="S/D premium / discount: son 72 mum mu, swing aralığı mı?",
         trigger="swing aralığı tanımında uygun / uygun değil gruplarının her biri 30 çözülmüş: hangi tanımda uygun − uygun değil WR farkı "
                 "daha büyük VE iki yarıda aynı yön → rozet o tanıma geçer; ikisi de ≥ 10 puan ayırırsa puan kalemi adayı",

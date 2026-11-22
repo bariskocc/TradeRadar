@@ -131,8 +131,13 @@ MAJOR_SWING_K = 5
 
 # Skor kalemleri (olcum; esik yok -- hangisinin kazandirdigi Journal'dan okunur).
 SCORE_KEYS = ("strength", "base", "fvg", "fresh", "htf")
-STRENGTH_STRONG_ATR = 3.0    # leg-out >= 3 ATR -> +2 (2..3 ATR +1)
-MAX_SCORE = 9
+STRENGTH_STRONG_ATR = 3.0    # leg-out >= 3 ATR -> STRENGTH_STRONG_PTS (2..3 ATR +1)
+# 22.11 (kullanici karari, 15m WR analizi -- IZLEME "S/D 15m: WR'yi ne ayiriyor"): iki odul hak edilmiyordu. Sert cikis (>= 3 ATR)
+# %26 / %33 WR -> +2 yerine +1 (kalem artik herkese 1); 1D bias isleme hizali %28 / NEUTRAL %37 -> +2 yerine 0 (ters -2 kalir, %23).
+# Duzeltilmis skor monoton (0-2 %4, 3 %28, 4-5 %33, 6 %41). Eski skor `features.score_v1` (score_v1). Butun S/D TF'leri.
+STRENGTH_STRONG_PTS = 1
+HTF_ALIGN_PTS = 0
+MAX_SCORE = 6                # 1 + 2 + 1 + 2 + 0 (22.11'e kadar 9)
 
 
 @dataclass
@@ -591,7 +596,7 @@ def plan_zone(z: SDZone, zones: list[SDZone], df: pd.DataFrame, last_close: floa
 def score_zone(z: SDZone, bias: str | None) -> dict:
     """Kalem kalem skor (olcum). Tavan MAX_SCORE; esik yok."""
     parts = {
-        "strength": 2 if z.legout_atr >= STRENGTH_STRONG_ATR else 1,
+        "strength": STRENGTH_STRONG_PTS if z.legout_atr >= STRENGTH_STRONG_ATR else 1,
         "base": {1: 2, 2: 1}.get(z.base_bars, 0),
         "fvg": 1 if z.fvg else 0,
         "fresh": 2 if z.fresh else 0,
@@ -599,13 +604,21 @@ def score_zone(z: SDZone, bias: str | None) -> dict:
     }
     b = (bias or "NEUTRAL").upper()
     if b == ("BULLISH" if z.direction == "LONG" else "BEARISH"):
-        parts["htf"] = 2
+        parts["htf"] = HTF_ALIGN_PTS
     elif b == ("BEARISH" if z.direction == "LONG" else "BULLISH"):
         parts["htf"] = -2
     raw = sum(parts.values())
     parts["raw"] = raw
     parts["score"] = max(0, min(MAX_SCORE, raw))
     return parts
+
+
+def score_v1(z: SDZone, bias: str | None) -> int:
+    """22.11 oncesi skor (olcum surekliligi): sert cikis +2, hizali bias +2, tavan 9."""
+    p = score_zone(z, bias)
+    b = (bias or "NEUTRAL").upper()
+    raw = p["raw"] + (1 if z.legout_atr >= STRENGTH_STRONG_ATR else 0) + (2 if b == ("BULLISH" if z.direction == "LONG" else "BEARISH") else 0)
+    return max(0, min(9, raw))
 
 
 def zone_features(z: SDZone, last_close: float, n_bars_since: int, plan: SDPlan | None = None) -> dict:

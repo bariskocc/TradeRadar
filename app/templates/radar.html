@@ -237,7 +237,7 @@ function sdRow(s, badge) {
                                d.sweep ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="HTF sweep — base took the main liquidity: ${d.sweep_kind || 'major'}">HTF sweep</span>` : '',
                                d.ltf_sweep ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-amber-400 bg-amber-500/10" title="LTF sweep — the pullback took ${d.ltf_sweep} LTF liquidity low(s)/high(s) beyond the zone">LTF sweep</span>` : '',
                                d.ltf_disp ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold text-accent-blue bg-accent-blue/10" title="LTF CHOCH came with displacement — label only">LTF disp</span>` : ''].filter(Boolean).join(' ') || dash);
-    const score = s.score != null ? `${s.score}` : dash;
+    const score = s.score != null ? `${s.score}/{{ sd_score_max }}` : dash;   // 22.11: CRT gibi "5/6"
     const lv = s.entry ? `<span class="text-white">${s.entry}</span> / <span class="text-red-400">${s.sl}</span>` : dash;
     const target = s.tp ? `<span class="text-green-400">${s.tp}</span> <span class="text-[10px] text-gray-500" title="${d.target_kind === 'cap' ? 'Structural target beyond 3R — TP capped at 3R (structural RR ' + d.rr_struct + ')' : (d.target_kind === 'zone' ? 'Nearest opposite live zone' : (d.target_kind === 'rr2' ? 'Nearest obstacle gives RR < 2 (' + d.rr_struct + ') — TP set at 2R' : 'Nearest swing beyond price'))}">${d.target_kind || ''}</span>` : dash;
     const dist = d.dist_atr != null ? `${d.dist_atr.toFixed(1)} ATR` : dash;

@@ -78,6 +78,9 @@ STAGES: list[tuple[str, str]] = [
     ("sd_no_target", "S/D: no target (zone / swing)"),
     ("sd_far", "S/D: zone too far (> 3R from price)"),
     ("sd_low_rr", "S/D: RR < 2"),
+    # 22.11 (kullanici): 15m filtreleri -- seviyeli izlenir (olcum), Signals'a girmez
+    ("sd_long_base", "S/D 15m: base longer than 3 candles"),
+    ("sd_low_score", "S/D 15m: score < 4"),
     # 05.11: cikis govdesi 0.8-1 ATR (kural disi, kapilari gecti) -- olcum, Signals'a girmez
     ("sd_near", "S/D: near-miss zone (leg-out body 0.8–1 ATR)"),
     # 10.11 (NZDUSD 4H 05.11 tepesi): cikis mumu govdesi < 0.8 ATR ama 3 mumda >= 2 ATR uzama (yavas cikis) -- olcum, Signals'a girmez
@@ -85,7 +88,7 @@ STAGES: list[tuple[str, str]] = [
     ("sd_ready", "S/D: zone ready (all gates)"),
 ]
 STAGE_LABELS = dict(STAGES)
-SD_LEVEL_STAGES = ("sd_ready", "sd_near", "sd_slow")     # S/D: seviye verilen asamalar (kapilari gecti; near / slow olcum kollari)
+SD_LEVEL_STAGES = ("sd_ready", "sd_near", "sd_slow", "sd_long_base", "sd_low_score")     # S/D: seviye verilen asamalar (kapilari gecti; near / slow olcum kollari)
 PRE_SETUP_STAGES = frozenset(("sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak",
                               "c2_doji", "c2_second_sweep", "not_selected"))
 _RANK = {code: i for i, (code, _) in enumerate(STAGES)}

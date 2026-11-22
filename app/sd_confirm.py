@@ -185,7 +185,11 @@ def _ltf_sweep(rec: dict, st: dict, long: bool) -> list:
 # sd_scanner), dokunustan sonraki tepkide olusan dipler de sayilir. Sweep = bir LTF mumu boyle bir dibin altina iner. CHOCH seviyesi
 # = son alinan likidite dibi (dokunustan onceyse dokunus) ile sweep dibi arasindaki en yuksek tepe; kapanis bunun ustunde -> CHOCH.
 # Sweep olmadan CHOCH aranmaz (ufukta `no_sweep`). Eski akis (`SWEEP_CHOCH = False`): ilk 3'lu swing kirilimi + kisa swing yedegi.
-SWEEP_CHOCH = True
+# 22.11 (kullanici karari, "haftada 1 sinyal"): KAPALI -- sweep sarti sweep'siz donen kazananlari eliyordu. Replay (10.11-22.11, FX haric,
+# motorun step'i, A DB'yi 334 satirin 332'sinde uretti): 1H bugunku 4 islem -0.6R -> sweep'siz 35 islem 25 TP / 10 SL +56R (iki yarida
+# arti; 33'u altcoin, 13.11 tek hareket +28.6R); 4H 0 -> 5 islem +2.1R. INVALID_CLOSE acik kalir. Altcoinler 1H'te ayni kuralla.
+# True = 07.11 sweep + CHOCH akisi (CHOCH_PIVOT yalniz o akista).
+SWEEP_CHOCH = False
 # 10.11 (kullanici, EURCHF 1H #19953: 11:05 TSI "CHOCH"u tek mumluk pencerenin dibiydi -- swing yoktu, kucuk geri cekilmeyle fiyat yukari
 # devam etti): CHOCH seviyesi = pencerede (son alinan likidite / dokunus .. sweep mumu oncesi) her yanda CHOCH_SWING_K mumla TEYITLI son
 # swing (LONG tepe / SHORT dip); teyitli swing yoksa CHOCH aranmaz, beklenir. False = 07.11 davranisi (pencerenin en yuksek tepesi / en

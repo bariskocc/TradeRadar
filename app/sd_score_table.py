@@ -20,11 +20,11 @@ MIN_SIDE = 10
 WR_GAP = 10
 
 ITEMS = [
-    ("strength", "Leg-out gücü", f"proximal'den ≥ {sde.LEG_OUT_MIN_ATR:g} ATR +1 · ≥ {sde.STRENGTH_STRONG_ATR:g} ATR +2", "+1 / +2"),
+    ("strength", "Leg-out gücü", f"proximal'den ≥ {sde.LEG_OUT_MIN_ATR:g} ATR +1 · ≥ {sde.STRENGTH_STRONG_ATR:g} ATR +{sde.STRENGTH_STRONG_PTS} (22.11'e kadar +2)", "+1"),
     ("base", "Base uzunluğu", "1 mum +2 · 2 mum +1 · 3–4 mum 0", "0 / +1 / +2"),
     ("fvg", "Leg-out FVG", "çıkış 3'lü boşluk bıraktı +1", "0 / +1"),
     ("fresh", "Tazelik", "0 dokunuş +2 · 1 dokunuş 0 (2+ ölü)", "0 / +2"),
-    ("htf", "1D bias", "işlem yönünde +2 · ters −2 · NEUTRAL 0 (hard kapı yok, 04.11)", "−2 / 0 / +2"),
+    ("htf", "1D bias", f"işlem yönünde {sde.HTF_ALIGN_PTS:+d} (22.11'e kadar +2) · ters −2 · NEUTRAL 0 (hard kapı yok, 04.11)", "−2 / 0"),
 ]
 CANDIDATES = [
     ("sweep", "Likidite sweep'i (SSL / BSL)", "base asıl likiditeyi aldı: geniş swing (her yanda 5 mum), eşit dipler/tepeler ya da önceki gün ucu (05.11; yalnız ara swing sayılmaz)"),
@@ -47,6 +47,8 @@ GATES = [
     ("sd_bias", "1D bias ters", "KAPALI (04.11) — eski satırlar"),
     ("sd_no_target", "Hedef yok", "fiyatın ötesinde karşı bölge / alınmamış swing yok (son kapanıştan ≥ 0,5 ATR)"),
     ("sd_far", "Fiyata uzak", f"giriş > {sde.MAX_DIST_R:g}R uzak — seviye yazılmaz"),
+    ("sd_long_base", "Uzun base (15m)", "base 3 mumdan uzun — 15m filtresi, elenen seviyeli izlenir (22.11)"),
+    ("sd_low_score", "Skor < 4 (15m)", "düzeltilmiş skor 4'ün altında — 15m filtresi, elenen seviyeli izlenir (22.11)"),
     ("sd_low_rr", "RR düşük", f"RR < {sde.MIN_RR:g} (hedef en yakın engel, tavan {sde.MAX_RR:g}R)"),
     ("sd_near", "Yakın kaçan bölge", "çıkış gövdesi 0,8–1 ATR, kapıları geçti — ölçüm, Signals'a girmez (05.11)"),
     ("sd_slow", "Yavaş çıkışlı bölge", f"çıkış mumu gövdesi < {sde.NEAR_LEG_BODY_ATR:g} ATR ama {sde.LEG_OUT_BARS} mumda ≥ {sde.LEG_OUT_MIN_ATR:g} ATR uzama, kapıları geçti — ölçüm, Signals'a girmez (10.11, NZDUSD 4H)"),
@@ -95,8 +97,8 @@ def _plan(tf: str) -> dict:
           + (" (işlemin kendi riskiyle)" if tf in sdc.STRATEGIES else "")
           + "; yapısal hedef gölgede izlenir; dolum öncesi güncellenir")
     if tf in sdc.STRATEGIES:
-        entry = (f"bölgeye dokunuş = uyarı (bölge ≥ {sde.MID_ENTRY_MIN_ATR:g} ATR ise orta noktaya); LTF'de bölgenin altındaki likidite (5'li dip / eşit dipler / base dibi) alınmalı → CHOCH "
-                 "(son alınan dip ile sweep dibi arası tepe, kapanışla) → retest'te FVG / IFVG / CISD / MSS (RR ≥ 2, ilk dolan); "
+        entry = (f"bölgeye dokunuş = uyarı (bölge ≥ {sde.MID_ENTRY_MIN_ATR:g} ATR ise orta noktaya); LTF CHOCH "
+                 "(dipten önceki son 3'lü swing, kapanışla; LTF sweep şartı yok — 22.11) → retest'te FVG / IFVG / CISD / MSS (RR ≥ 2, ilk dolan); "
                  "bölge limiti ölçüm kolu")
         sl = (f"bölge planı stopu: distal + {sde.SL_BUFFER_ATR:g} ATR, risk en az {sde.MIN_RISK_ATR:g} ATR (bölge kenarından); "
               "gölgede dip stopu, +1R'de BE, %50'de BE")
@@ -131,6 +133,8 @@ async def build_sd_score_table(db: AsyncSession, tf: str) -> dict:
     tf = tf if tf in dict(TFS) else "sd"
     t = SetupJournal
     rows = (await db.execute(select(t).where(t.strategy == tf))).scalars().all()
+    if tf == "sd15m":   # 22.11 (kullanici): 15m altcoinsiz -- 11.11-22.11 arasi sizan altcoin satirlari okumaya girmez
+        rows = [r for r in rows if not (str(r.symbol).endswith("USDT.P") and r.symbol not in ("BTCUSDT.P", "ETHUSDT.P"))]
     resolved = [(r, res) for r in rows if (res := _result(r)) is not None]
     item_rows = []
     for key, label, rule, pts in ITEMS + [(k, l, r_, "aday") for k, l, r_ in CANDIDATES]:

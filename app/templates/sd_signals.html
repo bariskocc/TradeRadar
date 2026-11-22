@@ -184,7 +184,7 @@
                                 {% if r.fvg %}<span class="px-1.5 py-0.5 rounded font-bold text-accent-purple bg-accent-purple/10">FVG</span>{% endif %}
                                 {% if not (r.bos or r.sweep or r.ltf_sweep or r.ltf_disp or r.fvg or r.pd_ok == 1) %}<span class="text-gray-600">—</span>{% endif %}
                             </td>
-                            <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}{% else %}—{% endif %}</td>
+                            <td class="px-2 py-2 text-center text-xs text-gray-300">{% if r.score is not none %}{{ r.score }}/{{ r.score_max }}{% else %}—{% endif %}</td>
                             <td class="px-2 py-2 text-right text-xs font-mono text-gray-300 whitespace-nowrap">
                                 {% if r.levels_kind == 'zone' and r.confirm_main %}<span class="text-[10px] text-gray-500 mr-1" title="Zone levels — the trade levels come after the LTF CHOCH">zone</span>{% endif %}{% if r.entry_mid %}<span class="text-[10px] text-gray-500 mr-1" title="Large zone (≥ 1.25 ATR): entry at the zone midpoint, stop unchanged">mid</span>{% endif %}{{ r.entry_s }} / <span class="text-red-400/80">{{ r.sl_s }}</span> / <span class="text-green-400/80">{{ r.tp_s }}</span>
                             </td>

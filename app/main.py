@@ -186,6 +186,8 @@ RADAR_STATE_META = {
     # Supply / Demand sekmesi (03.11, olcum modu -- app/sd_scanner.py).
     "sd_ready":       {"label": "Zone ready (all gates)",     "color": "green",  "rank": 0},
     "sd_low_rr":      {"label": "Low RR",                     "color": "yellow", "rank": 2},
+    "sd_long_base":   {"label": "Base > 3 candles (15m)",     "color": "yellow", "rank": 2},
+    "sd_low_score":   {"label": "Score < 4 (15m)",            "color": "yellow", "rank": 2},
     "sd_no_target":   {"label": "No target",                  "color": "yellow", "rank": 3},
     "sd_far":         {"label": "Too far from price (> 3R)",  "color": "yellow", "rank": 3},
     "sd_bias":        {"label": "1D bias opposite",           "color": "orange", "rank": 5},
@@ -216,6 +218,9 @@ templates.env.globals["fmt_ui_symbol"] = _fmt_ui_symbol
 # Sol menu rozetleri (04.11): aksiyon bekleyen izleme maddesi sayisi, bellekten (app/watch_badges.py).
 from app import watch_badges  # noqa: E402
 templates.env.globals["watch_badges"] = watch_badges.get
+# 22.11 (kullanici): S/D skoru CRT gibi "5/6" -- payda sd_engine.MAX_SCORE (22.11 duzeltmesinden beri 6)
+from app.sd_engine import MAX_SCORE as _SD_MAX_SCORE  # noqa: E402
+templates.env.globals["sd_score_max"] = _SD_MAX_SCORE
 
 
 @app.middleware("http")
