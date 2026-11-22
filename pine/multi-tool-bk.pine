@@ -50,7 +50,9 @@ pdWidth     = input.int(2, "Çizgi kalınlığı", minval = 1, maxval = 4, group
 //  EMA'LAR  -  EMA 50 turuncu, EMA 200 mavi
 // ============================================================
 grpEMA   = "EMA"
-showE20  = input.bool(true, "EMA 20",  inline = "e20", group = grpEMA)
+emaMinTF = input.timeframe("5", "En düşük zaman dilimi", group = grpEMA,
+     tooltip = "EMA'lar yalnız bu zaman dilimi ve üstünde görünür. Örn. 1 saat seçilirse 15dk ve altında çizilmez.")
+showE20 = input.bool(true, "EMA 20",  inline = "e20", group = grpEMA)
 lenE20   = input.int(20,  "", inline = "e20", minval = 1, group = grpEMA)
 colE20   = input.color(color.aqua,    "", inline = "e20", group = grpEMA)
 showE50  = input.bool(true, "EMA 50",  inline = "e50", group = grpEMA)
@@ -107,7 +109,7 @@ inSession(int startH, int startM, int endH, int endM) =>
 withinHistory = (timenow - time) <= maxDays * 86400000
 useWick       = sweepMethod == "Wick (gölge)"
 kzAllowed     = timeframe.isintraday and timeframe.in_seconds() <= 900
-emaAllowed    = timeframe.in_seconds() >= 300
+emaAllowed    = timeframe.in_seconds() >= timeframe.in_seconds(emaMinTF)
 pdAllowed     = timeframe.in_seconds() <= 86400
 gapAllowed    = timeframe.in_seconds() <= 3600
 transp        = color.new(color.white, 100)   // görünmez baloncuk
