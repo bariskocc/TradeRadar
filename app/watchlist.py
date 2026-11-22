@@ -520,6 +520,31 @@ def _p_bias_outcome_for(strategy: str, since: Optional[datetime], need: int, not
     return fn
 
 
+D1_ALT_THR_SINCE = datetime(2026, 11, 22)   # 1D altcoin esigi 7 (scanner.MIN_QUALITY_SCORE_1D_ALT)
+
+
+async def _p_d1_alt_thr(db: AsyncSession) -> Progress:
+    """22.11: 1D altcoin, RR >= 2, seviyesi kesin, 22.11 sonrasi -- skor 6 (yeni esikte elenen) vs 7+ TP once mi."""
+    t = SetupJournal.__table__
+    score = func.coalesce(func.json_extract(t.c.parts_final, "$.parts.score"),
+                          func.json_extract(t.c.score_parts, "$.score"))
+    o = case((t.c.outcome == "signal", func.json_extract(t.c.shadow, '$."1".o')), else_=t.c.outcome)
+    rows = (await db.execute(select(score, o).where(
+        t.c.strategy == "1d", t.c.market_type == "crypto", t.c.symbol.notin_(("BTCUSDT.P", "ETHUSDT.P")),
+        t.c.first_seen >= D1_ALT_THR_SINCE, t.c.entry.is_not(None), t.c.rr >= 2.0,
+        t.c.best_stage.not_in(tuple(PRE_SETUP_STAGES)), _final_levels_cond(t, "1d"),
+    ))).all()
+    g = {"6": [0, 0], "7+": [0, 0]}
+    for sc_, oc in rows:
+        k = "6" if sc_ == 6 else ("7+" if (sc_ or 0) >= 7 else None)
+        if k is None or oc not in ("win", "tp_before_entry", "loss"):
+            continue
+        g[k][0 if oc != "loss" else 1] += 1
+    note = " · ".join(f"skor {k}: {w} TP / {l} SL" + (f" %{w / (w + l) * 100:.0f}" if w + l else "") for k, (w, l) in g.items())
+    return Progress(bars=[Bar("skor 6 (elenen) çözülmüş", sum(g["6"]), 30), Bar("skor 7+ çözülmüş", sum(g["7+"]), 30)],
+                    note=note + " · aynı sayaçla 11.11–22.11: 6 → 6 / 11 (%35), 7+ → 14 / 4 (%78)")
+
+
 async def _p_reclaim_penalty(db: AsyncSession) -> Progress:
     """Zayif C2 geri donusu cezasi (-4) alan, ham skoru esigi gecen, cozulmus Journal setupu -- strateji basina 20.
 
@@ -899,41 +924,167 @@ async def _p_nonsignal_outcomes(db: AsyncSession) -> Progress:
                          "dönmeden TP'ye gitti · Aynı mum = giriş ve TP aynı mumda · son 7 gün = ilk görülme")
 
 
-async def _p_bias_fidelity(db: AsyncSession) -> Progress:
-    """03.10: surekli izleme (kullanici: "bias cok onemli, hata varsa duzeltilmeli"). Calisan surecin baslangicindan
-    (03.10 15m/4h yaris duzeltmesi bu surecte canli) beri gun donumundeki (00:00-00:35 UTC) 4H kripto satirlari: motorun
-    bias'i (`htf_bias`, last_seen) vs `last_seen`'e kadar kapanmis gunun karne bias'i. Hedef 50, yanlis 0 olmali.
-    Gun ici farklar olcum yanilgisi olabilir (30.09 C1 kimligi -- htf_bias bayat kalir); kesin kontrol log'daki
-    `SKIPPED (BIAS) ... daily=` satirlari. Ayrintili rapor `scripts/bias_fidelity_stat.py`."""
+# 22.11 (kullanici): 1D Potential Signals izlemesi -- motorun ALMADIGI kaliteli 1D setuplar (potential_notices; 1W kapali).
+# Sonuc Potential Signals sayfasinin kendi hesabindan (`potential_signals.build_potential_signals`: zincir takibi, eski satirda
+# bildirim seviyeleriyle store mumlari, yoksa Journal) -- iki yerde ayri mantik yok. Hesap ~2 sn: 10 dk onbellek.
+POT1D_MIN_RESOLVED = 30     # alarm: kapi / kil payi grubunda cozulmus
+POT1D_R_BAND = 0.15         # alarm: dolum bazli R / dolan >= bu
+POT1D_TP_PCT = 50.0         # alarm: TP once orani >= bu
+_POT1D_CACHE: dict = {}
+
+
+def _pot1d_r(r) -> float:
+    """Dolum bazli R: TP (dolmadan) = 0 (emir dolmazdi), SL -1, digerleri zincirin kendi R'si."""
+    res = r.get("result")
+    if res == "sl":
+        return -1.0
+    if res == "tp_nofill":
+        return 0.0
+    if r.get("result_r") is not None:
+        return float(r["result_r"])
+    rr = float(r.get("rr") or 0)
+    return {"tp": 0.75 * rr, "be50": 0.25 * rr}.get(res, 0.0)
+
+
+def _pot1d_row(label: str, g: list) -> tuple[list, dict]:
+    c = lambda k: sum(1 for r in g if r.get("result") == k)  # noqa: E731
+    tp, tpn, be, sl = c("tp"), c("tp_nofill"), c("be50") + c("be"), c("sl")
+    filled = tp + be + sl
+    rsum = sum(_pot1d_r(r) for r in g if r.get("result") in ("tp", "be50", "be", "sl"))
+    tp_pct = (tp + tpn) / (tp + tpn + sl) * 100 if tp + tpn + sl else None
+    rps = rsum / filled if filled else None
+    st = dict(n=len(g), resolved=tp + tpn + be + sl, tp_pct=tp_pct, rps=rps)
+    return [label, str(len(g)), str(tp), str(tpn), str(be), str(sl), str(len(g) - tp - tpn - be - sl),
+            f"%{tp_pct:.0f}" if tp_pct is not None else "—", f"{rps:+.2f}" if rps is not None else "—"], st
+
+
+def _pot1d_near(r) -> bool:
+    """Kil payi: sinyale donmesine bir adim kalan -- skor esigin 1 altinda (1D 6, altcoin 7 -> 5 / 6) ya da RR 1.8-2."""
+    gate = (r.get("gate") or "").lower()
+    alt = (r.get("symbol") or "").endswith("USDT.P") and r.get("symbol") not in ("BTCUSDT.P", "ETHUSDT.P")
+    if gate.startswith("score below"):
+        return (r.get("score") or 0) >= (6 if alt else 5)
+    if gate.startswith("r:r below"):
+        return 1.8 <= float(r.get("rr") or 0) < 2.0
+    return False
+
+
+async def _p_pot_1d(db: AsyncSession) -> Progress:
+    """Kapi basina: dolup TP / dolmadan TP / %50+BE ya da BE / SL / acik, TP once orani, dolum bazli R. Ek satirlar: kil payi,
+    sinyale donen zincirler, ayni donemin gercek 1D sinyalleri (referans). Cubuk = ALARM: kazanc kesen grup sayisi."""
+    import time as _time
+    now = _time.monotonic()
+    if _POT1D_CACHE.get("at") and now - _POT1D_CACHE["at"] < 600:
+        return _POT1D_CACHE["p"]
+    from app import potential_signals as P
     try:
         from app.market_data import market_data
-        since = market_data.status().get("started_at")
+        store = market_data.store
     except Exception:
-        since = None
-    if since is None:
-        return Progress(bars=[Bar("restart sonrası gün dönümü 4H değerlendirmesi", 0, 50)],
-                        note="motor çalışmıyor — sayaç çalışan sürecin başlangıcından sayar")
-    since = since.replace(tzinfo=None)
+        store = None
+    rows, page = [], 1
+    while True:
+        d = await P.build_potential_signals(db, tf="1d", date_from="", page=page, store=store)
+        rows += d["rows"]
+        if page >= int(d.get("pages") or 1):
+            break
+        page += 1
+    signal = [r for r in rows if str(r.get("status") or "").startswith("signal")]
+    pot = [r for r in rows if r not in signal]
+    table = [["grup", "n", "TP (dolup)", "TP (dolmadan)", "%50+BE / BE", "SL", "açık", "TP önce", "R / dolan"]]
+    groups: dict[str, list] = {}
+    for r in pot:
+        g_ = r.get("gate")
+        groups.setdefault(g_ if g_ and g_ != "—" else "kapı yok (yeni zincir: CRT / düşük kalite)", []).append(r)
+    alarms = []
+    for label in sorted(groups, key=lambda k: -len(groups[k])):
+        line, st = _pot1d_row(label, groups[label])
+        table.append(line)
+        if (st["resolved"] >= POT1D_MIN_RESOLVED and st["rps"] is not None and st["rps"] >= POT1D_R_BAND
+                and (st["tp_pct"] or 0) >= POT1D_TP_PCT):
+            alarms.append(label)
+    line, _ = _pot1d_row("TOPLAM (potansiyel)", pot)
+    table.append(line)
+    near = [r for r in pot if _pot1d_near(r)]
+    line, st = _pot1d_row("kıl payı (skor eşik−1 / RR 1.8–2)", near)
+    table.append(line)
+    if (st["resolved"] >= POT1D_MIN_RESOLVED and st["rps"] is not None and st["rps"] >= POT1D_R_BAND
+            and (st["tp_pct"] or 0) >= POT1D_TP_PCT):
+        alarms.append("kıl payı")
+    line, _ = _pot1d_row("sinyale dönen zincir", signal)
+    table.append(line)
+    # Referans: ayni donemde gercek 1D sinyaller (motorun yonetimiyle kapanan R)
+    since = datetime(2026, 10, 24)
+    sig = (await db.execute(select(Signal.exit_reason, Signal.rr_value).where(
+        Signal.timeframe == "1d", Signal.result.is_not(None), Signal.created_at >= since))).all()
+    tp_ = sum(1 for e, _ in sig if e == "tp"); be_ = sum(1 for e, _ in sig if e == "be"); sl_ = sum(1 for e, _ in sig if e == "sl")
+    rs = sum(float(v or 0) for _, v in sig)
+    table.append(["gerçek 1D sinyal (24.10+, referans)", str(len(sig)), str(tp_), "—", str(be_), str(sl_), "—",
+                  f"%{(tp_ + be_) / (tp_ + be_ + sl_) * 100:.0f}" if tp_ + be_ + sl_ else "—",
+                  f"{rs / len(sig):+.2f}" if sig else "—"])
+    pot_res = [r for r in pot if r.get("result") in ("tp", "tp_nofill", "be50", "be", "sl")]
+    nofill = sum(1 for r in pot_res if r.get("result") == "tp_nofill")
+    tps = sum(1 for r in pot_res if r.get("result") in ("tp", "tp_nofill"))
+    note = (f"{len(pot)} potansiyel · TP'ye gidenlerin {nofill}/{tps}'i girişe dönmeden gitti (hiçbir kapı değişikliği "
+            f"yakalayamaz → giriş tipi sorusu) · alarm: kapı ya da kıl payı ≥ {POT1D_MIN_RESOLVED} çözülmüş, R/dolan ≥ "
+            f"+{POT1D_R_BAND}, TP önce ≥ %{POT1D_TP_PCT:.0f}" + (f" · KAZANÇ KESEN: {', '.join(alarms)}" if alarms else ""))
+    prog = Progress(bars=[Bar("kazanç kesen kapı (1 olunca aksiyon)", len(alarms), 1)], note=note, table=table)
+    _POT1D_CACHE.update(at=now, p=prog)
+    return prog
+
+
+BIAS_FID_SINCE = datetime(2026, 10, 22)   # 21.10 hiz siniri (100410) tekrar denemesi canli -- oncesinde restart'ta bos seri bias'i bozuyordu
+BIAS_FID_DAYCHANGE = timedelta(minutes=35)
+
+
+async def _p_bias_fidelity(db: AsyncSession) -> Progress:
+    """Surekli izleme (03.10, kullanici: "bias cok onemli, hata varsa duzeltilmeli"). 22.11 yeniden yazildi -- eski sayac
+    (a) calisan surecin baslangicindan sayiyordu, her restart'ta sifirlaniyordu; (b) yalniz `last_seen`'i 00:00-00:35 UTC'ye
+    dusen 4H kripto satirlarini sayiyordu (gunde ~2), 50'ye hic ulasmadi; (c) donmus satirin bayat `htf_bias`'i sahte alarm
+    veriyordu (AVAX 4H 09.11 -- 30.09 C1 kimligi: baska C1'in notu yalniz last_seen'i gunceller).
+
+    Simdi: 22.10+, 4H + 1D, kripto + FX. Yalniz `first_seen` ve `last_seen`'i AYNI islem gununde olan satirlar (bias gun icinde
+    sabit -- yalniz kapanmis gunlerden -- yani `htf_bias` kesin o gune ait). Karne: `bias_journal.combined`, gun etiketi + 24 saat
+    = kapanis (kriptoda 00:00 UTC, FX'te seans baslangici). Gun donumu = ilk gorulme kapanistan sonraki 35 dk icinde (yaris
+    riski orada). Yanlis 0 olmali; cikarsa incele (IZLEME "1D bias hesap dogrulugu")."""
+    import bisect
     t = SetupJournal.__table__
-    rows = (await db.execute(select(t.c.symbol, t.c.last_seen, t.c.htf_bias).where(
-        t.c.strategy == "4h", t.c.market_type == "crypto", t.c.last_seen >= since, t.c.htf_bias.is_not(None),
-    ))).all()
     karne: dict[str, list] = {}
     for sym, day, comb in (await db.execute(select(BiasJournal.symbol, BiasJournal.day, BiasJournal.combined)
-                                            .where(BiasJournal.day >= since - timedelta(days=3))
+                                            .where(BiasJournal.day >= BIAS_FID_SINCE - timedelta(days=6))
                                             .order_by(BiasJournal.day))).all():
-        karne.setdefault(sym, []).append((day, comb))
-    n = bad = 0
-    for sym, ls, hb in rows:
-        if not (ls.hour == 0 and ls.minute < 35):
-            continue
-        closed = [c for d, c in karne.get(sym, []) if d + timedelta(hours=24) <= ls]
-        if not closed:
-            continue
-        n += 1
-        bad += hb != closed[-1]
-    return Progress(bars=[Bar("restart sonrası gün dönümü 4H değerlendirmesi", n, 50)],
-                    note=f"yanlış bias {bad}/{n} (0 olmalı) · süreç başlangıcı {since:%d.%m %H:%M} UTC")
+        karne.setdefault(sym, []).append((day + timedelta(hours=24), comb))
+    ends = {s: [e for e, _ in v] for s, v in karne.items()}
+
+    def closed(sym, ts):
+        k = bisect.bisect_right(ends.get(sym, []), ts) - 1
+        return karne[sym][k] if k >= 0 else None
+
+    rows = (await db.execute(select(t.c.strategy, t.c.symbol, t.c.market_type, t.c.first_seen, t.c.last_seen, t.c.htf_bias)
+                             .where(t.c.strategy.in_(("4h", "1d")), t.c.first_seen >= BIAS_FID_SINCE,
+                                    t.c.htf_bias.is_not(None)))).all()
+    cnt: dict[tuple, list] = {}
+    for st, sym, mk, fs, ls, hb in rows:
+        a, b = closed(sym, fs), closed(sym, ls)
+        if a is None or b is None or a[0] != b[0]:
+            continue   # gun degistirmis satir: htf_bias hangi gune ait belli degil
+        seg = "kripto" if mk == "crypto" else "FX"
+        dc = (fs - a[0]) < BIAS_FID_DAYCHANGE
+        c_ = cnt.setdefault((st, seg, dc), [0, 0])
+        c_[0] += 1
+        c_[1] += hb != a[1]
+    tot = lambda dc: [sum(v[i] for k, v in cnt.items() if k[2] == dc) for i in (0, 1)]  # noqa: E731
+    (n_dc, bad_dc), (n_in, bad_in) = tot(True), tot(False)
+    table = [["strateji", "segment", "gün dönümü (yanlış / n)", "gün içi (yanlış / n)"]]
+    for st in ("4h", "1d"):
+        for seg in ("kripto", "FX"):
+            d, g = cnt.get((st, seg, True), [0, 0]), cnt.get((st, seg, False), [0, 0])
+            table.append([st.upper(), seg, f"{d[1]} / {d[0]}", f"{g[1]} / {g[0]}"])
+    # Cubuk = ALARM (22.11): yanlis bias 1 olunca madde "aksiyon bekliyor"a duser. Orneklem tabloda / notta.
+    return Progress(bars=[Bar("yanlış bias (1 olunca aksiyon)", bad_dc + bad_in, 1)],
+                    note=f"yanlış bias: gün dönümü {bad_dc}/{n_dc} · gün içi {bad_in}/{n_in} (0 olmalı) · "
+                         f"{BIAS_FID_SINCE:%d.%m}'den beri, restart'ta sıfırlanmaz",
+                    table=table)
 
 
 async def _p_prefill(db: AsyncSession) -> Progress:
@@ -2671,7 +2822,11 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_retrace_for("4h", 150),
     ),
     WatchItem(
-        key="retrace_1d", status="open", started="01.10", onem=1,
+        key="retrace_1d", status="done", started="01.10", onem=1,
+        result="(22.11) KAPANDI — GİRİŞ VE STOP KALIR (kullanıcı: 'pek değişiklik olmuyorsa bu haliyle kalsın', replay yapılmadı). "
+               "levels_final süzgeçli rapor, kapı geçmiş 187: bugünkü giriş + stop %60 +0.05 R/setup (yarılar +0.18 / −0.08), en yakın "
+               "giriş −0.05 → geçmedi. Tek geçen: BPR'li 47 setupta BPR uzak kenar + stop %60 +0.19 (yarılar +0.20 / +0.18, ~8 kazanan, "
+               "~15 kombinasyon denendi) — sınanmadı, kayıt IZLEME.",
         title="Limit giriş seviyesi — 1D",
         trigger="11.11 (kullanıcı): BÖLGE GİRİŞLİ (IFVG/BPR), seviyesi kesin 40 first_bar'lı dolmuş kazanan (o gün 25): stop %60 ya da bir "
                 "limit varyantı aynı setuplarda bugünkü girişi +0.15 R/setup geçer VE iki zaman yarısında aynı yöndeyse tek "
@@ -2829,7 +2984,10 @@ ITEMS: list[WatchItem] = [
                                               "kümede 25 setup, limit 2 TP / 16 SL)"),
     ),
     WatchItem(
-        key="reclaim_penalty_by_tf", status="open", started="01.10", onem=0,
+        key="reclaim_penalty_by_tf", status="done", started="01.10", onem=0,
+        result="(22.11) KAPANDI — CEZA KALIR (kullanıcı onayı): 4H 03.10'da karara bağlanmıştı; 1D ham skor ≥ 6 (yeni eşik), TP önce mi: "
+               "ceza alan 32 TP / 52 SL %38 vs cezasız 87 / 40 %69 (p < 0.001; eski ve yeni tabloda ayrı ayrı aynı), dolum bazlı R farkı "
+               "−0.20. 1W stratejisi kapalı. Rapor artık TP önce satırını da basar.",
         title="Zayıf C2 geri dönüşü cezası (−4) alan setup gerçekten stop oluyor mu?",
         trigger="strateji başına 20 çözülmüş ceza alan setup (ham skor ≥ eşik): ceza alanın R/setup'ı cezasızdan "
                 "0.15'ten az kötüyse o stratejide ceza gevşetme adayı (−2, replay öncesi kullanıcıya); değilse kalır",
@@ -2922,7 +3080,11 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_neutral,
     ),
     WatchItem(
-        key="key_level_filter", status="open", started="29.09", onem=0, pinned=True,
+        key="key_level_filter", status="done", started="29.09", onem=0, pinned=True,
+        result="(22.11) KAPANDI — FİLTRE YOK (kullanıcı onayı): kapı geçmiş RR ≥ 2; 4H key level'siz parada kötü değil (yeni kalem "
+               "+0.50 vs −0.26 R/dolan, TP önce %62 / %60; eski tanım kripto TP önce %49 / %67 ama R +0.01 / +0.25, FX ters). 1D yeni "
+               "kalemde key level'li iyi (%77 / %53, n 13). Soru zaten skorda: key level teması 4H 29.10 / 1D 11.11'den beri +1 kalem "
+               "(EQ/SSL dahil), 4H kriptoda no_confirm kapısı.",
         title="Key level teması yoksa işlem açılmasın mı? (+ EQ/SSL puan almalı mı)",
         trigger="29.09 sonrası her grupta 30 sonuçlanmış setup (kapı geçmiş, RR ≥ 2; 01.10'da 20 → 30) + fark tek yönlü "
                 "bootstrap p < 0.10: key level'siz grup ≥ 0.3 R/setup kötüyse hard filtre, "
@@ -3069,10 +3231,20 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_nonsignal_outcomes,
     ),
     WatchItem(
+        key="pot_1d", status="open", started="22.11", onem=1, pinned=True, pin_order=1,
+        title="1D Potential Signals — TP'ye gidenler neden elendi, sinyale dönüşebilir miydi?",
+        trigger="SÜREKLİ İZLEME (22.11, kullanıcı): kapı başına sonuç tablosu; çubuk alarm — bir kapı ya da kıl payı grubu ≥ 30 "
+                "çözülmüş, dolum bazlı R/dolan ≥ +0.15 ve TP önce ≥ %50 olunca aksiyon (o kapı kazanç kesiyor olabilir → kapı "
+                "maddesi + önceden yazılmış hipotezle tek replay); madde kapanmaz",
+        measure="/potential-signals?tf=1d · bu kartın tablosu (potential_signals.build_potential_signals ile aynı hesap)",
+        md="1D Potential Signals — TP'ye gidenler neden elendi, sinyale dönüşebilir miydi? (22.11.2026, kullanıcı)",
+        progress_fn=_p_pot_1d,
+    ),
+    WatchItem(
         key="bias_fidelity", status="open", started="24.09", onem=0, pinned=True, pin_order=0,  # 03.10: bias en onemli konu (kullanici)
         title="1D bias hesap doğruluğu — motor doğru günün bias'ını mı kullanıyor?",
-        trigger="SÜREKLİ İZLEME (03.10, kullanıcı): restart sonrası gün dönümünde 50 4H değerlendirmesi → yanlış bias 0 "
-                "olmalı (03.10 15m/4h yarış düzeltmesi); hata çıkarsa incele ve düzelt, madde kapanmaz",
+        trigger="SÜREKLİ İZLEME (03.10, kullanıcı): 4H + 1D, kripto + FX — yanlış bias 1 olunca aksiyon (çubuk alarm); hata çıkarsa "
+                "incele ve düzelt, madde kapanmaz (22.11: sayaç 22.10'dan sayar, restart'ta sıfırlanmaz, sayılar tabloda)",
         measure="python scripts/bias_fidelity_stat.py",
         md="1D bias hesap doğruluğu (başladı 24.09.2026, ⏰ 03.10.2026)",
         progress_fn=_p_bias_fidelity,
@@ -3098,7 +3270,9 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_gated_potential,
     ),
     WatchItem(
-        key="dead_candidate", status="open", started="18.09",
+        key="dead_candidate", status="done", started="18.09",
+        result="(22.11) KAPANDI — DÜZELTME KALIR (kullanıcı onayı): yeni yolla doğan 13 setup; 6'sı gerçek işlem 3 TP / 3 SL +4.4R, 7'si "
+               "dolmadan silindi; Journal TP önce 6 / 6 (1 açık). Seçili setupta past_sl payı %0.7 (hafta 37) → %0.0–0.4.",
         title="Ölü CRT adayı slotu tutmasın",
         trigger="yeni yolla doğan 10 sinyal: sonuçları + past_sl radar durumu seyrekleşti mi",
         measure="setup_journal — best_stage='waiting' satırları, kardeş not_selected ile",
@@ -3228,7 +3402,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_near_tp,
     ),
     WatchItem(
-        key="sticky_delete", status="open", started="01.10", onem=2,
+        key="sticky_delete", status="done", started="01.10", onem=2,
+        result="(22.11) KAPANDI — KALICI SİLME KALIR (kullanıcı onayı): 32 çözülmüş engellenen setup (RR ≥ 2), dolum bazlı 6 TP / 26 SL "
+               "−0.25 R/işlem; P(R/işlem > +0.3) %4. TP önce ölçüsü %65 ama 49 TP'nin 43'ü dolmadan (34'ü near_tp silmesi — tanım gereği); "
+               "skor düşüşüyle silinenler 4H 5 TP / 7 SL, 1D 5 / 9.",
         title="Kalıcı silme — engellenen setup TP'ye gidiyor mu?",
         trigger="02.10 sonrası silinen 30 çözülmüş setup (RR ≥ 2, past_sl/past_tp hariç): R/işlem > +0.3 ve "
                 "bootstrap p < 0.10 ise kural kazanç kesiyor → kullanıcıya geri alma önerisi",
@@ -3249,7 +3426,10 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_bias_1h,
     ),
     WatchItem(
-        key="score_v2_4h", status="open", started="29.10", onem=1,
+        key="score_v2_4h", status="done", started="29.10", onem=1,
+        result="(22.11) KAPANDI — TABLO KALIR (kullanıcı onayı): 123 çözülmüş (tetik 60), RR ≥ 2, TP önce mi: yeni (≥ 6) 87 TP / 36 SL %71, "
+               "eski (≥ 7) 76 / 36 %68; eklenen 30 / 8 %79 vs çıkarılan 19 / 8 %70 (+9 puan, dönüş kuralı tersi). Segment: altcoin "
+               "eklenen %78 / çıkarılan %74, FX %83 / %62.",
         title="4H yeni skor tablosu canlıda — tuttu mu?",
         trigger="yeni tablonun seçtiği (skor ≥ 6) RR ≥ 2 4H setup 60 çözülmüş (TP önce mi SL önce mi). Aynı setuplarda eski "
                 "tablo (features.v1_raw, eşik 7) paralel: yeni tablonun EKLEDİKLERİ çıkardıklarından ≥ 5 puan kötü (WR) ve "
@@ -3259,7 +3439,11 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_v2_4h,
     ),
     WatchItem(
-        key="score_v2_1d", status="open", started="11.11", onem=1,
+        key="score_v2_1d", status="done", started="11.11", onem=1,
+        result="(22.11) TABLO KALIR (kullanıcı onayı): 43 çözülmüş, yeni (≥ 6) 25 TP / 18 SL %58 · eski (≥ 7) 18 / 10 %64 · eklenen 7 / 8 "
+               "%47 · çıkarılan yok → dönüş kuralı uygulanamadı. Eklenenlerin geri kalması tamamen altcoin skor 6'dan (3 TP / 11 SL vs "
+               "7+ 11 / 4, p 0.003; FX skor 6 3 / 0) → 1D altcoin eşiği 7 yapıldı (MIN_QUALITY_SCORE_1D_ALT), doğrulaması "
+               "'1D altcoin eşiği 7 — tuttu mu?'.",
         title="1D yeni skor tablosu canlıda — tuttu mu?",
         trigger="yeni tablonun seçtiği (skor ≥ 6) RR ≥ 2 1D setup 40 çözülmüş (TP önce mi SL önce mi). Aynı setuplarda eski "
                 "tablo (features.v1_raw, eşik 7) paralel: yeni tablonun EKLEDİKLERİ çıkardıklarından ≥ 5 puan kötü (WR) ve "
@@ -3269,7 +3453,20 @@ ITEMS: list[WatchItem] = [
         progress_fn=_p_score_v2_for("1d"),
     ),
     WatchItem(
-        key="fx4h_no_confirm", status="open", started="02.11", onem=1,
+        key="d1_alt_thr7", status="open", started="22.11", onem=2,
+        title="1D altcoin eşiği 7 — tuttu mu?",
+        trigger="22.11 sonrası 1D altcoin, RR ≥ 2, seviyesi kesin: skor 6 (artık elenen) ve skor 7+ gruplarında 30'ar çözülmüş "
+                "(TP önce mi SL önce mi). Skor 6 grubu 7+'tan ≥ 10 puan geride DEĞİLSE (ya da iki yarıda yön değişirse) eşik "
+                "6'ya döner — kullanıcıya; aksi halde 7 kalır",
+        measure="/izleme sayacı · Journal 1D (analysis_parts skoru, levels_final)",
+        md="1D altcoin eşiği 7 (22.11.2026, kullanıcı kararı)",
+        progress_fn=_p_d1_alt_thr,
+    ),
+    WatchItem(
+        key="fx4h_no_confirm", status="done", started="02.11", onem=1,
+        result="(22.11) KAPANDI — FX'TE KAPI YOK (kullanıcı onayı): 60 / 78 çözülmüş, TP önce mi: ikisi de yok 36 TP / 24 SL %60 vs en az "
+               "biri var 54 / 24 %69 (−9 puan, yarılar −8 / −7) ama p 0.13 > 0.10. Dolum bazlı R ters: ikisi de yok +0.36 vs −0.19 "
+               "R/dolan (yarılar tutarsız) — kapı FX'te para kazandıran grubu keserdi.",
         title="4H FX: key level teması da güçlü CISD de olmayan setup daha mı kötü? — kripto filtresi FX'e açılsın mı",
         trigger="4H FX yeni tablo, RR ≥ 2, −4 cezasız: 'ikisi de yok' ve 'en az biri var' gruplarında 60'ar çözülmüş (11.11: "
                 "30'da −10 puan, yarılar −2 / −12, p 0.16 → uzatıldı; TP önce "

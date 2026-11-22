@@ -65,6 +65,7 @@ from app.exchange import (
     get_h1_markets,
     get_h1_symbols_flat,
     get_w1_markets,
+    is_d1_alt,
     is_session_symbol,
     is_w1_symbol,
     market_of,
@@ -393,6 +394,20 @@ ENABLED_STRATEGIES = tuple(s for s in STRATEGY_CFG if s != STRATEGY_1W or W1_ENA
 def _min_score(cfg: dict | None) -> int:
     """Stratejinin acilma esigi (1W: 6, digerleri MIN_QUALITY_SCORE)."""
     return int((cfg or {}).get("min_score", MIN_QUALITY_SCORE))
+
+
+# 22.11 (kullanici karari): 1D ALTCOINLERDE sinyal esigi 7 (FX, BTC/ETH 6 kalir). Journal 1D yeni tablo (11.11+, RR >= 2,
+# TP once mi): altcoin skor 6 3 TP / 11 SL (%21) vs 7+ 11 / 4 (%73), p 0.003, LONG / SHORT ikisinde de; FX skor 6 3 / 0.
+# Cekince: 11 gun, tek rejim (kripto dususu). IZLEME "1D nasil iyilesir?" + "1D altcoin esigi 7".
+MIN_QUALITY_SCORE_1D_ALT = 7
+
+
+def _min_score_for(cfg: dict | None, strategy: str | None, bingx_symbol: str | None) -> int:
+    """Sinyal kapisinin esigi: strateji esigi, 1D altcoinde en az MIN_QUALITY_SCORE_1D_ALT (22.11)."""
+    base = _min_score(cfg)
+    if strategy == STRATEGY_1D and bingx_symbol and is_d1_alt(bingx_symbol):
+        return max(base, MIN_QUALITY_SCORE_1D_ALT)
+    return base
 
 
 def _w1_daily(bingx_symbol: str, store: object | None, df_1d: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -3258,7 +3273,7 @@ async def _detect_and_create_waiting_locked(
         await _gated("target_taken")
         return None
 
-    min_score = _min_score(cfg)
+    min_score = _min_score_for(cfg, strategy, bingx_symbol)   # 22.11: 1D altcoin 7
     if int(setup.bias_score or 0) < min_score:
         if existing_pending is not None:
             await _delete_pending(session, existing_pending, "low_quality")

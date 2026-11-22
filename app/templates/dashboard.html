@@ -159,7 +159,8 @@
             <p class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">
                 Strategy performance · all time{% if stats_since %} <span class="normal-case text-gray-600">(since {{ stats_since }})</span>{% endif %}
             </p>
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
+            {# 22.11: 1W kalkinca 2 kart kaldi -- 3 sutunluk izgarada sagda bos sutun kaliyordu; sutun sayisi kart sayisindan #}
+            <div class="grid grid-cols-1 {% if strategies|length == 2 %}lg:grid-cols-2{% else %}lg:grid-cols-3{% endif %} gap-4 mb-5">
                 {% for st in strategies %}{% set t = st.total %}{% set c = st.crypto %}{% set f = st.fx %}
                 {% set cn = c.win_count + c.loss_count + c.be_count %}{% set fn = f.win_count + f.loss_count + f.be_count %}
                 <section class="bg-dark-800 rounded-xl border border-dark-600 p-4">

@@ -41,7 +41,7 @@ A = ap.parse_args()
 PRE = {"sweep_small", "range_atr", "c1_stale", "c2_breakout", "c2_wrong_color", "c1_weak", "c2_doji", "c2_second_sweep", "not_selected"}
 PEN = -abs(CE.C2_RECLAIM_PENALTY)
 CAP = {"4h": 9, "1d": 9, "1w": 8}
-MIN_SCORE = {"4h": 7, "1d": 7, "1w": 6}
+MIN_SCORE = {"4h": 7, "1d": 6, "1w": 6}   # 22.11: 1D yeni tablo esigi 6 (11.11); 4H 03.10 karari eski esikle (7) okundu
 MIN_RESOLVED = 20      # karar icin ceza grubunda cozulmus setup (strateji basina)
 BAND = 0.15            # R/setup farki
 
@@ -148,3 +148,9 @@ for strat, gp_p, gp_b, d in summary:
     wr = lambda st: f"{st['wr']:.0f}%" if st["wr"] is not None else "-"
     ds = f"{d:+.3f}" if d is not None else "-"
     print(f"   {strat.upper():<4} cozulmus {res:>3}  WR ceza {wr(gp_p):>4} / cezasiz {wr(gp_b):>4}  fark {ds:>7}  -> {v}")
+    # 22.11: kullanici kurali (24.10) -- setup sonucu TP once mi SL once mi (dolmadan TP de TP). Karar bu satirdan okunur.
+    tf = lambda st: (st["w"] + st["tpb"], st["l"])  # noqa: E731
+    (a1, a2), (b1, b2) = tf(gp_p), tf(gp_b)
+    pct = lambda w, l: f"%{w / (w + l) * 100:.0f}" if w + l else "-"  # noqa: E731
+    print(f"        TP once: ceza {a1} TP / {a2} SL {pct(a1, a2)} · cezasiz {b1} / {b2} {pct(b1, b2)}")
+print("\n22.11: madde KAPANDI -- ceza 4H (03.10) ve 1D (22.11) kalir; 1W stratejisi kapali. Rapor olcum icin duruyor.")

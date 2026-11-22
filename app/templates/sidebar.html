@@ -52,8 +52,10 @@
             background: rgb(var(--tr-d800)); box-shadow: 1px 0 0 rgb(var(--tr-d600)); }
     }
     @media (min-width: 768px) {
-        body.tr-nav-collapsed #tr-sidebar { display: none; }
-        body.tr-nav-collapsed main { padding-left: 2.5rem; }
+        /* 22.11 (kullanici): daraltilinca menu tamamen gizleniyordu, aci-kapa dugmesi gri zemin ustunde "transparan" duruyordu.
+           Artik beyaz ince serit (menu rengi + sag cizgi) kalir, dugme onun ustunde; icerik gizli, main seridin yanindan baslar. */
+        body.tr-nav-collapsed #tr-sidebar { width: 3.5rem; }
+        body.tr-nav-collapsed #tr-sidebar > * { display: none; }
         /* Masaustunde de liste kutuya sigmayinca TASIYORDU (03.11, kullanici: "alt kisim gri, kesik"): aside = ekran
            yuksekligi, nav flex item'i icerigin altina kuculmez (min-height: auto) -> nav + kullanici satiri beyaz kutunun
            disina, gri zemine ciziliyordu. Mobil kuralinin aynisi: nav kucul-kaydir, logo ve kullanici satiri sabit. */
